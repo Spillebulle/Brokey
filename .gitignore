@@ -8,3 +8,4 @@
 .DS_Store
 /crates/brokey/gen/schemas
 __pycache__/
+.superpowers/

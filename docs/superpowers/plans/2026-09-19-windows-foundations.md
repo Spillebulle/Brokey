@@ -34,6 +34,7 @@ Nothing Windows-specific is added here. The Linux-only code is gated so that `ca
 - Modify: `crates/brokey-core/src/sources/mod.rs`
 - Modify: `crates/brokey-core/src/system.rs`, `crates/brokey-core/src/launch.rs`, `crates/brokey-core/src/transaction/runner.rs`, `crates/brokey-core/src/transaction/allow.rs`, `crates/brokey-core/src/selfupdate/install.rs`
 - Modify: `crates/brokey-helper/src/main.rs`
+- Modify: whatever else the build demands, including `crates/brokey/src/`. `Store::launcher` and `Store::launcher_notices` are gated in this task, so their call sites in the Tauri commands need the same treatment. The authority on this task's file list is `cargo check --workspace` on Windows, not this list.
 - Test: `crates/brokey-core/src/sources/mod.rs` (inline `#[cfg(test)]`)
 
 **Interfaces:**
@@ -232,12 +233,13 @@ pub mod windows;
 #[cfg(unix)]
 pub use linux::{detect, is_executable, which};
 #[cfg(windows)]
-pub use windows::{detect, which};
+pub use windows::detect;
 
-// Pure on both platforms, so both are always in scope.
+// Pure on both platforms, so it is always in scope.
 pub use linux::from_os_release;
-pub use windows::from_registry_version;
 ```
+
+Nothing else is re-exported yet. Task 2 adds `pub use windows::from_registry_version;` and Task 4 adds `which` to the Windows line, each when the function it names exists. Re-exporting a name before its task has written it will not compile.
 
 Inside `system/linux.rs`, put `#[cfg(unix)]` on `detect`, `which` and `is_executable`, which use `/etc/os-release` and `PermissionsExt`. Leave `from_os_release` ungated: it is a pure text parser and nothing in it is Linux-specific.
 
@@ -1049,9 +1051,27 @@ The registry holds 343 keys on the reference machine and roughly 157 application
     "release_type": null,
     "estimated_size": 40960,
     "url_info_about": null
+  },
+  {
+    "hive": "machine32",
+    "key_name": "Notepad-plus-plus",
+    "display_name": "Notepad++ (32-bit x86)",
+    "display_version": "8.6.2",
+    "publisher": "Notepad++ Team",
+    "install_location": "C:\\Program Files (x86)\\Notepad++",
+    "uninstall_string": "\"C:\\Program Files (x86)\\Notepad++\\uninstall.exe\"",
+    "quiet_uninstall_string": null,
+    "display_icon": "C:\\Program Files (x86)\\Notepad++\\notepad++.exe",
+    "system_component": null,
+    "parent_key_name": null,
+    "release_type": null,
+    "estimated_size": null,
+    "url_info_about": null
   }
 ]
 ```
+
+That is nine entries, of which five survive `is_application`: 7-Zip, Obsidian, the Arduino driver package, the per-user application and Notepad++. The four that do not are the system component, the security update, the child of a suite and the nameless key, one for each rule in the filter. Notepad++ is there because without it the fixture had no ordinary application falling to the interactive removal route: the only entry reaching it was the driver, and a rule tested by a single example of a single kind is not tested.
 
 - [ ] **Step 2: Write the failing tests**
 
