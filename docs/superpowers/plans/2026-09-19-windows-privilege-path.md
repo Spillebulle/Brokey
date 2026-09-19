@@ -288,7 +288,7 @@ pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
 
 - [ ] **Step 5: Make `Line` and `stream_lines` reachable**
 
-In `runner.rs`: `struct Line` becomes `pub struct Line` with both fields `pub`; `fn stream_lines` becomes `pub(crate) fn stream_lines`. **`kill_group` does not change** — it belongs to `run_session` and the seam has no use for it. Add `pub mod elevate;` to `transaction/mod.rs`, ungated, re-exporting nothing from it.
+In `runner.rs`: `struct Line` becomes `pub struct Line` with both fields `pub`; `fn stream_lines` becomes `pub(crate) fn stream_lines`. **`kill_group` does not change** — it belongs to `run_session` and the seam has no use for it. Declare the module in `transaction/mod.rs` as `#[cfg(unix)] pub mod elevate;`, exactly as Step 4 says, re-exporting nothing from it.
 
 `Line` is `pub` rather than `pub(crate)` because `Elevated::lines` is a public field of a public type, so the type it yields must be nameable from outside the crate. Give `Line` a doc comment saying what it is: one line of the helper's output, and which stream it came from.
 
@@ -388,6 +388,8 @@ pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
 `Elevated`'s `inner: Inner` field is the awkward one: with no `Inner` on Windows the struct does not exist there either. Give Windows a placeholder `Inner` in `elevate/mod.rs` whose `wait` returns the same error sentence, so that `Elevated` is one type on both platforms and Task 6 has only to replace it. Say in your report what you chose.
 
 Then fix the module doc, which is now wrong in three places. Lines 6 to 8 say `allow` is "Linux's shape of it (Windows will get its own in a later plan)"; lines 10 to 11 call `runner` "The only `pkexec` call site"; line 12 says `runner` is "Linux only until a later plan gives Windows its own privilege path". The first and third described this plan. The second moved to `elevate/unix.rs` in Task 1. Replace all three with what is now true.
+
+**`runner.rs` has its own stale header too.** Its module doc at lines 1 to 14 opens "Executes a plan. Root steps go to `brokey-helper` through `pkexec`" and says at line 8 "This is the only place in the workspace that spawns `pkexec`." Neither is true after Task 1: the spawning moved to `elevate/unix.rs`, and root steps reach the helper through whatever `elevate` does on the platform. Fix that header here as well. Task 1 left it deliberately, being out of its scope; it is in yours.
 
 - [ ] **Step 4: Gate only what actually touches Unix, in `runner.rs`**
 
