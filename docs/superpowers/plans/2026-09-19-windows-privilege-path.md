@@ -123,8 +123,10 @@ The point of this task is that Linux behaviour is provably identical afterwards.
 - Produces:
   - `pub struct Elevated { pub input: Option<Box<dyn std::io::Write + Send>>, pub lines: std::sync::mpsc::Receiver<crate::transaction::runner::Line> }`
   - `pub fn start(helper: &std::path::Path, wrapper: &[String]) -> std::io::Result<Elevated>`
-  - `impl Elevated { pub fn wait(&mut self) -> std::io::Result<Option<i32>>; pub fn kill(&mut self); }`
-- Consumes: `runner::Line`, `runner::stream_lines` and `runner::kill_group`, all currently private and all made reachable by this task.
+  - `impl Elevated { pub fn wait(&mut self) -> std::io::Result<Option<i32>>; }`
+- Consumes: `runner::Line` and `runner::stream_lines`, both currently private and both made reachable by this task.
+
+**There is deliberately no `kill`.** `run_helper` has never killed the elevated child and must not start: it cancels by writing `CANCEL_LINE` down the same stream the plan went down, and waits. `kill_group` at `runner.rs:713` is called from **`run_session`** (line 275) and from nowhere else. The helper's own doc says why: a root child cannot be killed by the user, and killing a package manager mid-transaction is the one thing worse than waiting. Do not give the seam a `kill`; Windows cancels the same way, down the pipe.
 
 - [ ] **Step 1: Read `run_helper` before changing it**
 
@@ -208,14 +210,14 @@ pub struct Elevated {
 impl Elevated {
     /// Wait for the helper to finish. `None` when the platform reported no
     /// code, which is not by itself a failure.
+    ///
+    /// There is no `kill` beside this on purpose. A running helper is
+    /// stopped by writing `CANCEL_LINE` to `input`, which lets it finish the
+    /// step it is on; killing a package manager part-way through is worse
+    /// than waiting for it, and on Linux the child belongs to root and could
+    /// not be killed from here anyway.
     pub fn wait(&mut self) -> std::io::Result<Option<i32>> {
         self.inner.wait()
-    }
-
-    /// Stop the helper and, where the platform has the notion, anything it
-    /// started.
-    pub fn kill(&mut self) {
-        self.inner.kill();
     }
 }
 
@@ -245,7 +247,7 @@ pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
 //! This is the only place in the workspace that spawns `pkexec`.
 
 use super::Elevated;
-use crate::transaction::runner::{kill_group, stream_lines};
+use crate::transaction::runner::stream_lines;
 use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -258,10 +260,6 @@ pub struct Inner {
 impl Inner {
     pub fn wait(&mut self) -> std::io::Result<Option<i32>> {
         self.child.wait().map(|status| status.code())
-    }
-
-    pub fn kill(&mut self) {
-        kill_group(&mut self.child);
     }
 }
 
@@ -295,17 +293,19 @@ pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
 
 The `.process_group(0)` here is the one `run_helper` already had on its own spawn. `run_session`'s separate `.process_group(0)` at line 229 is a different call and is **not** touched by this task.
 
-- [ ] **Step 5: Make `Line`, `stream_lines` and `kill_group` reachable**
+- [ ] **Step 5: Make `Line` and `stream_lines` reachable**
 
-In `runner.rs`: `struct Line` becomes `pub struct Line` with both fields `pub`; `fn stream_lines` becomes `pub(crate) fn stream_lines`; `fn kill_group` becomes `pub(crate) fn kill_group`. Add `pub mod elevate;` to `transaction/mod.rs`, ungated, re-exporting nothing from it.
+In `runner.rs`: `struct Line` becomes `pub struct Line` with both fields `pub`; `fn stream_lines` becomes `pub(crate) fn stream_lines`. **`kill_group` does not change** — it belongs to `run_session` and the seam has no use for it. Add `pub mod elevate;` to `transaction/mod.rs`, ungated, re-exporting nothing from it.
 
 `Line` is `pub` rather than `pub(crate)` because `Elevated::lines` is a public field of a public type, so the type it yields must be nameable from outside the crate. Give `Line` a doc comment saying what it is: one line of the helper's output, and which stream it came from.
 
 - [ ] **Step 6: Use the seam in `run_helper`**
 
-Replace, in `run_helper` only: the `Command::new(...)...spawn()`, the `child.stdin.take()`, the `stream_lines(&mut child)` call, the `child.wait()` and the `kill_group(&mut child)`. Everything else stays exactly as it is — the writer thread, the event loop, the exit-code interpretation at line 486, and every sentence.
+Replace, in `run_helper` only: the `Command::new(...)...spawn()` at lines 335 to 344, the `child.stdin.take()` at 351, the `stream_lines(&mut child)` at 371, and the `child.wait()` at the end. Everything else stays exactly as it is — the writer thread and its comment, the `cancel_tx`/`cancel_rx` channel, the event loop, the exit-code interpretation at line 486, and every sentence.
 
-The writer thread now takes `e.input.take()`; the loop reads `e.lines`; the exit code comes from `e.wait()`; cancellation calls `e.kill()`. `start` returns `io::Result` and `run_helper` returns `Result<(), String>`, so map the error into a sentence that names the wrapper, in the register of the sentences already in that function.
+The writer thread now takes `e.input.take()`; the loop reads `e.lines`; the exit code comes from `e.wait()`. **Cancellation is untouched**: it already goes through `cancel_tx` to the writer thread, which writes `CANCEL_LINE`, and that is the only way the helper is ever stopped.
+
+`start` returns `io::Result` and `run_helper` returns `Result<(), String>`, so map the error into a sentence that names the wrapper, in the register of the sentences already in that function — the one it replaces reads `"Could not start {program}: {e}."`.
 
 - [ ] **Step 7: Build for Windows and reason about Linux**
 
@@ -390,18 +390,31 @@ process.process_group(0);
 
   before `spawn()`.
 
-- `#[cfg(unix)]` on the `unsafe extern "C" { fn kill(...) }` block, on `SIGTERM`, on `SIGKILL` and on `kill_group`. Add beside it:
+- `#[cfg(unix)]` on the `unsafe extern "C" { fn kill(...) }` block, on `SIGTERM`, on `SIGKILL` and on `kill_group`. **A Windows `kill_group` is genuinely needed**, because `run_session` calls it at line 275 and `run_session` is not gated — a cancelled session step on Windows reaches that line:
 
 ```rust
-/// Stop the child. Windows has no process group to signal, so this is the
-/// child itself; `TerminateProcess` does not reach its descendants, and the
-/// package manager under it is left to finish, which is the same promise
-/// `CANCELLING_SESSION` makes on Linux.
+/// Stop the child. Windows has no process group to signal, so this reaches
+/// the child itself and not its descendants: an installer the step started
+/// is left to finish, which is the truthful thing to promise and is what
+/// `CANCELLING_SESSION` says.
 #[cfg(windows)]
-pub(crate) fn kill_group(child: &mut Child) {
+fn kill_group(child: &mut Child) {
     let _ = child.kill();
 }
 ```
+
+  Keep it private, exactly as the Linux one is. Nothing outside `runner.rs` calls it.
+
+- **`CANCELLING_SESSION` is reachable on Windows and its sentence is wrong there.** It is emitted at line 273, inside `run_session`, which now runs on both platforms; it currently reads "Cancelling. A package manager this step started under pkexec finishes first; nothing after it will start." Nothing on Windows goes through pkexec. Split it, the way the rest of this plan splits copy — whole sentences, never one sentence with a word swapped:
+
+```rust
+#[cfg(unix)]
+pub const CANCELLING_SESSION: &str = "Cancelling. A package manager this step started under pkexec finishes first; nothing after it will start.";
+#[cfg(windows)]
+pub const CANCELLING_SESSION: &str = "Cancelling. An installer this step started finishes first; nothing after it will start.";
+```
+
+  `crates/brokey-core/tests/transaction.rs:584` compares an event message against `runner::CANCELLING_SESSION` by name, so it keeps working unchanged on Linux. Check line 910 of `runner.rs`, which also names the constant, and make sure whatever it asserts still holds on both.
 
 - `#[cfg(unix)]` on `HELPER_PATHS` and on the existing `locate_helper`. Read the existing one first, including how it handles `BROKEY_HELPER`, and mirror that behaviour exactly in:
 
@@ -436,8 +449,6 @@ let wrapper = vec!["pkexec".to_string()];
 #[cfg(windows)]
 let wrapper = Vec::new();
 ```
-
-- Leave `CANCELLING_SESSION` alone. It names pkexec, but it is emitted only on the session path and only on Linux; Task 10 revisits copy.
 
 - [ ] **Step 5: Split `allow.rs` by platform**
 
@@ -936,6 +947,8 @@ git commit -m "Elevate: a named pipe this user and Administrators can open"
 
 - [ ] **Step 1: Write the failing tests**
 
+These go **inside the `#[cfg(test)] mod tests` that Task 5 created in `windows.rs`**, beside its four, not in a second module.
+
 ```rust
 /// What the elevated helper is started with. The pipe name has to reach
 /// it: it is the only way back. This is checked without elevating, because
@@ -1020,7 +1033,7 @@ In order, and the order matters:
 5. `let lines = crate::transaction::runner::stream_lines_from(reader);`
 6. Return `Elevated { input: Some(Box::new(stream)), lines, inner: Inner { process } }`.
 
-`Inner::wait` waits with `WaitForSingleObject(handle, INFINITE)` then reads `GetExitCodeProcess`. `Inner::kill` calls `TerminateProcess(handle, 1)`. Same unsafe rules as Task 5. Hold the process handle in an `OwnedHandle`.
+`Inner` has **only** `wait`, matching the Unix `Inner` from Task 1: it waits with `WaitForSingleObject(handle, INFINITE)` then reads `GetExitCodeProcess`. There is no `kill` and no `TerminateProcess` — cancelling writes `CANCEL_LINE` down the pipe, exactly as Linux writes it down stdin, and the helper stops after the step it is on. Same unsafe rules as Task 5. Hold the process handle in an `OwnedHandle`.
 
 - [ ] **Step 5: Add `stream_lines_from` to `runner.rs`**
 
@@ -1028,6 +1041,7 @@ In order, and the order matters:
 /// One reader's lines, for a transport that has a single stream. A named
 /// pipe has no separate error stream, so everything that arrives is
 /// output. `stream_lines` is the two-stream version, for piped stdio.
+#[cfg(windows)]
 pub(crate) fn stream_lines_from(
     reader: impl Read + Send + 'static,
 ) -> mpsc::Receiver<Line> {
@@ -1036,6 +1050,8 @@ pub(crate) fn stream_lines_from(
     rx
 }
 ```
+
+**The `#[cfg(windows)]` is load-bearing.** Only `elevate/windows.rs` calls this, so without the gate it is dead code on Linux, and CI sets `RUSTFLAGS: -D warnings`, which turns that into a failed Linux build rather than a warning nobody reads.
 
 Read `stream_lines` first and match how it spawns and names its threads. `pump` is reused unchanged, which is the whole reason this is three lines.
 
