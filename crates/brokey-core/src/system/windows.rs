@@ -142,7 +142,8 @@ pub fn has_nvidia() -> bool {
 /// runs as the same user with the same profile, so nothing scrubs the
 /// environment the way `pkexec` does for the helper, and no closed allow
 /// list needs a path it can name ahead of time. The `directories` crate's
-/// ordinary answer, under `%LOCALAPPDATA%`, is used as it comes.
+/// ordinary answer is used as it comes: the cache under `%LOCALAPPDATA%`,
+/// config and data under `%APPDATA%`, which is where the crate puts them.
 pub struct Dirs {
     pub cache: PathBuf,
     pub config: PathBuf,

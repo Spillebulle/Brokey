@@ -237,6 +237,15 @@ connect. The Plan goes down it and Events come back up it. From
 `runner.rs`'s point of view the contract is unchanged: it holds a writer and a
 line reader, and `CANCEL_LINE` still stops the helper between steps.
 
+The running-state copy is still Linux-worded and has to change with this
+section. `FlowDialog.tsx` already says Administrator on Windows, because a
+Remove opens it with a real plan preview before anything runs. `ActivityPanel.tsx`
+and `Shell.tsx` still say "Waiting for your password" and "Enter your password
+in the system dialog", and are unreachable there only because no plan can run
+on Windows yet: `commands.rs` refuses one, `transaction::runner` is
+`#[cfg(unix)]`, and the helper exits on Windows. The moment this section is
+built those three sentences become reachable and wrong, so they change with it.
+
 `allow.rs` gains a second closed list, cfg-selected, with the same test that
 the helper refuses anything not on it.
 

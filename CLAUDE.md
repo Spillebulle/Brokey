@@ -107,8 +107,9 @@ crates/brokey/src/
   lib.rs            Tauri builder, plugins, state
   commands.rs       every #[tauri::command], thin
   settings.rs       key = value preferences
-  icons/            icon.ico is required by tauri-build for a Windows target
-                    regardless of what tauri.conf.json's bundle.icon lists
+crates/brokey/icons/icon.ico
+                    required by tauri-build for a Windows target, whatever
+                    tauri.conf.json's bundle.icon lists
 frontend/src/
   main.tsx, App.tsx shell, routing by view state
   api.ts            typed wrappers over invoke(); mock.ts stands in under `vite dev`
@@ -173,7 +174,7 @@ These were decided before the first line and are not re-litigated in a fix:
 - Calling `pacman`, `flatpak` or `apt` from a Tauri command directly.
   Everything runs through a Plan so it is logged, batched, and cancellable.
 - Parsing `pacman -Ss` output. The sync database is a tar of `desc` files;
-  `sources/pacman.rs` reads it and is ten times faster.
+  `sources/linux/pacman.rs` reads it and is ten times faster.
 - Showing a spinner over an unknown. §7.18: an empty rail and a sentence.
 - Using `<select>`, `<input type=checkbox>` or a stock `<button>` unstyled.
   Every control in §7 is painted in `app.css`; the sample markup in

@@ -30,8 +30,9 @@ pub use windows::from_registry_version;
 // must land somewhere the helper's closed list can name in advance; it
 // judges the GPU from `/sys/bus/pci/devices`. Windows elevation (UAC) runs
 // as the same user with the same profile, so there is no environment to
-// work around and the `directories` crate's ordinary answer (under
-// `%LOCALAPPDATA%`) is used as it comes; it never looks for a GPU, because
+// work around and the `directories` crate's ordinary answer is used as it
+// comes: the cache under `%LOCALAPPDATA%`, config and data under
+// `%APPDATA%`. It never looks for a GPU, because
 // the workaround `has_nvidia` exists for is a WebKitGTK-only concern and
 // WebKitGTK does not run on Windows.
 #[cfg(unix)]
