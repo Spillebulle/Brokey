@@ -243,7 +243,12 @@ CREATE TABLE [tags2_map]([tag] INT64 NOT NULL, [package] INT64 NOT NULL,
 #   3 Mozilla.Firefox.af   shares its moniker: the ordering rule's whole point
 #   4 Python.Python.3.0    two members of a version family the index folds to
 #   5 Python.Python.3.14   one norm_name and one norm_publisher
-#   6 Valve.Steam          a prefix match rather than an exact one, for "steam"
+#   6 Valve.Steam          moniker `steam`, so an exact-moniker hit for "steam"
+#   9 Codeusa.SteamCleaner a real catalogue package that also matches "steam",
+#                          at a worse rank, and whose id sorts BEFORE
+#                          Valve.Steam alphabetically. That is what makes rank
+#                          precedence testable: if rank stopped outranking the
+#                          tiebreak, this would come first.
 #   7 Notepad++.Notepad++  a GUID product code and a non-GUID one at once
 #   8 Obsidian.Obsidian    a GUID with no braces, and no upgrade code
 PACKAGES = [
@@ -255,6 +260,7 @@ PACKAGES = [
     (6, "Valve.Steam", "Steam", "steam", "2.10.91.91", "steam", "valve"),
     (7, "Notepad++.Notepad++", "Notepad++", "notepad++", "8.9.8", "notepad", "donhonotepad"),
     (8, "Obsidian.Obsidian", "Obsidian", "obsidian", "1.13.7", "obsidian", "obsidian"),
+    (9, "Codeusa.SteamCleaner", "SteamCleaner", "steamcleaner", "2.4", "steamcleaner", "codeusa"),
 ]
 
 PRODUCT_CODES = [
@@ -625,9 +631,12 @@ mod tests {
         assert_eq!(ids(&rows)[0], "7zip.7zip");
     }
 
-    /// The case the id-length tiebreak exists for. The locale build shares
-    /// the base package's moniker and matches at the same rank; without the
-    /// tiebreak it wins on name length and the real Firefox is never shown.
+    /// A base package comes before its variants. The locale build shares the
+    /// base package's moniker and matches at the same rank, so only the
+    /// tiebreak separates them, and a winget id is `Publisher.Product` with
+    /// an optional `.Variant` appended: the variant sorts straight after the
+    /// base it came from. In the live catalogue all 102 packages with the
+    /// moniker `firefox` are ids beginning `Mozilla.Firefox`.
     #[test]
     fn the_base_package_beats_its_locale_variant() {
         let (_d, db) = db();
@@ -635,17 +644,30 @@ mod tests {
         assert_eq!(
             ids(&rows),
             vec!["Mozilla.Firefox", "Mozilla.Firefox.af"],
-            "shortest id first, so the base package leads"
+            "the base package leads its own variant"
         );
     }
 
-    /// The tiebreak must not reorder things that matched differently: a rank
-    /// 0 hit stays ahead of a rank 4 hit whatever the ids are.
+    /// Rank outranks the tiebreak. `Codeusa.SteamCleaner` sorts before
+    /// `Valve.Steam` alphabetically and would lead on the tiebreak alone, but
+    /// Steam matches its moniker exactly and SteamCleaner only contains the
+    /// word, so Steam wins on rank. Swap the two `ORDER BY` terms and this
+    /// fails, which is the point of it.
     #[test]
-    fn a_better_match_beats_a_shorter_id() {
+    fn a_better_match_beats_an_earlier_id() {
         let (_d, db) = db();
         let rows = search(&db, "steam", 10).unwrap();
-        assert_eq!(ids(&rows)[0], "Valve.Steam");
+        assert!(
+            ids(&rows).contains(&"Codeusa.SteamCleaner"),
+            "the worse match is in the results at all: {:?}",
+            ids(&rows)
+        );
+        assert_eq!(
+            ids(&rows)[0],
+            "Valve.Steam",
+            "and loses to the exact moniker despite sorting first: {:?}",
+            ids(&rows)
+        );
     }
 
     /// Case folds. Nobody types a package id with its capitals.
@@ -699,7 +721,7 @@ mod tests {
     #[test]
     fn the_catalogue_can_be_counted() {
         let (_d, db) = db();
-        assert_eq!(count(&db).unwrap(), 8);
+        assert_eq!(count(&db).unwrap(), 9);
     }
 
     /// Normalisation matches the index's own: letters and digits, folded.
@@ -757,10 +779,19 @@ pub fn normalise(text: &str) -> String {
 
 /// Matches, best first.
 ///
-/// The rank says how it matched; ties break on the length of the id, shortest
-/// first, then on the id. Both halves are load-bearing and both have a test:
-/// without the length tiebreak `firefox` buries `Mozilla.Firefox` under a
-/// hundred locale builds that share its moniker.
+/// The rank says how it matched, and ties break on the id. That is enough to
+/// put a base package above its variants, because a winget id is
+/// `Publisher.Product` with an optional `.Variant` on the end, so a variant
+/// sorts immediately after the base it came from. All 102 packages in the
+/// live catalogue whose moniker is `firefox` are ids beginning
+/// `Mozilla.Firefox`, and `Mozilla.Firefox` sorts first among them.
+///
+/// An earlier draft broke ties on the length of the id first. It was dropped:
+/// it changes nothing for the case it was written for, and in the 28 real
+/// monikers where length and alphabet disagree it prefers whichever vendor
+/// has the shorter name, which is not a measure of anything. For moniker
+/// `dev-cpp` it would pick `Orwell.Dev-C++`, the abandoned fork, over
+/// `Embarcadero.Dev-C++`, the maintained one.
 const SEARCH_SQL: &str = "
 SELECT p.id, p.name, p.moniker, p.latest_version, np.norm_publisher, MIN(r.rank) AS rank
 FROM packages p
@@ -775,7 +806,7 @@ JOIN (
 ) r ON r.pkg = p.rowid
 LEFT JOIN norm_publishers2 np ON np.package = p.rowid
 GROUP BY p.rowid
-ORDER BY rank, length(p.id), p.id
+ORDER BY rank, p.id
 LIMIT :limit
 ";
 
