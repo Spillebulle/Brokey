@@ -460,6 +460,11 @@ impl Source for Arp {
         })
     }
 
+    /// Removal is the only operation this source has. Any other kind is
+    /// nothing for it to do, which is an empty list. An id it does not hold
+    /// is a different thing and is an error: an empty list would be carried
+    /// to a successful outcome, and the user would be told a removal worked
+    /// when nothing had happened.
     fn plan(&self, op: &Op) -> Result<Vec<Step>> {
         let Op::Remove { package } = op else {
             return Ok(Vec::new());
@@ -530,6 +535,7 @@ pub fn read() -> Vec<RawEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Op, Query, Source};
 
     fn fixture() -> Vec<RawEntry> {
         let text = std::fs::read_to_string(concat!(
@@ -942,8 +948,6 @@ mod tests {
         );
     }
 
-    use crate::{Op, Query, Source};
-
     fn source_from_fixture() -> Arp {
         Arp { entries: fixture() }
     }
@@ -998,6 +1002,25 @@ mod tests {
 
         let install = arp.plan(&Op::Install { package: reference }).unwrap();
         assert!(install.is_empty());
+    }
+
+    /// An id this source does not hold is an error rather than an empty
+    /// list. Empty means the source has nothing to do, which the Runner
+    /// carries to a successful outcome, so a removal that found nothing to
+    /// remove would report that it worked.
+    #[test]
+    fn planning_a_removal_for_an_id_it_does_not_have_says_so() {
+        let arp = source_from_fixture();
+        let e = arp
+            .plan(&Op::Remove {
+                package: crate::model::PackageRef {
+                    source: SourceKind::Arp,
+                    id: "HKLM\\Nothing".to_string(),
+                },
+            })
+            .unwrap_err();
+        assert!(e.message.contains("HKLM\\Nothing"), "{}", e.message);
+        assert!(e.message.contains("nothing to remove"), "{}", e.message);
     }
 
     /// The source is always there: the registry is part of Windows. It says

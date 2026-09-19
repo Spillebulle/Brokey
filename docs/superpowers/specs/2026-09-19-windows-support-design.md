@@ -464,6 +464,17 @@ stay `#[ignore]` and named `live_*`.
 
 ## Open
 
+- **A registry value of the wrong type reads as absent.** `windows-registry`'s
+  `get_u32` rejects a `REG_SZ`, so an installer that writes `SystemComponent`
+  or `WindowsInstaller` as the string `"1"` rather than a DWORD gives `None`.
+  A string `SystemComponent` then lets a runtime through the filter and be
+  listed as an application; a string `WindowsInstaller` demotes a real MSI to
+  the interactive route, which still removes it but opens a window. Neither
+  appeared anywhere in the 343 keys on the reference machine, so this is
+  recorded rather than coded around: if a machine turns one up, the fix is to
+  fall back to reading the value as text and parsing it, with a fixture entry
+  for each.
+
 - Which of `source.msix` and `source2.msix` to read, and whether the smaller
   one is a complete index or a delta. Settled by opening both.
 - `rusqlite` with `bundled` links a statically compiled SQLite. The objection
