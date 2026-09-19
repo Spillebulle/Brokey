@@ -201,11 +201,11 @@ mod tests {
     #[test]
     fn a_bare_name_finds_the_executable_with_an_extension() {
         let dir = tempdir();
-        std::fs::write(dir.join("choco.exe"), b"").unwrap();
+        std::fs::write(dir.join("choco.EXE"), b"").unwrap();
         let found = which_in("choco", dir.to_str().unwrap(), ".COM;.EXE;.BAT");
         assert!(same_file(
             &found.expect("it is found"),
-            &dir.join("choco.exe")
+            &dir.join("choco.EXE")
         ));
     }
 
@@ -214,12 +214,12 @@ mod tests {
     #[test]
     fn pathext_is_tried_in_order() {
         let dir = tempdir();
-        std::fs::write(dir.join("thing.exe"), b"").unwrap();
-        std::fs::write(dir.join("thing.com"), b"").unwrap();
+        std::fs::write(dir.join("thing.EXE"), b"").unwrap();
+        std::fs::write(dir.join("thing.COM"), b"").unwrap();
         let found = which_in("thing", dir.to_str().unwrap(), ".COM;.EXE");
         assert!(same_file(
             &found.expect("it is found"),
-            &dir.join("thing.com")
+            &dir.join("thing.COM")
         ));
     }
 
@@ -243,12 +243,12 @@ mod tests {
     fn the_first_directory_on_the_path_wins() {
         let first = tempdir();
         let second = tempdir();
-        std::fs::write(first.join("dup.exe"), b"").unwrap();
-        std::fs::write(second.join("dup.exe"), b"").unwrap();
+        std::fs::write(first.join("dup.EXE"), b"").unwrap();
+        std::fs::write(second.join("dup.EXE"), b"").unwrap();
         let path = format!("{};{}", first.display(), second.display());
         assert!(same_file(
             &which_in("dup", &path, ".EXE").expect("it is found"),
-            &first.join("dup.exe")
+            &first.join("dup.EXE")
         ));
     }
 
@@ -256,7 +256,9 @@ mod tests {
     /// case, while the file on disk is usually lower case, so the path `which_in`
     /// builds and the path the test wrote can differ in spelling while naming one
     /// file. Canonicalising both is how the test says "the same file" rather than
-    /// "the same string".
+    /// "the same string". Returns `false` if either path cannot be canonicalised
+    /// (for instance, if it does not exist), which results in a plain assertion
+    /// failure and is acceptable for a test helper.
     fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
         match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
             (Ok(a), Ok(b)) => a == b,
@@ -277,5 +279,21 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Windows filesystems are case-insensitive. When `PATHEXT` is upper case
+    /// (conventional) and the on-disk file is lower case (typical), `is_file()`
+    /// still answers true and the function returns a match. This is a genuine
+    /// property of the Windows implementation and the real-world scenario.
+    #[test]
+    #[cfg(windows)]
+    fn windows_filesystem_is_case_insensitive_for_extension_matching() {
+        let dir = tempdir();
+        std::fs::write(dir.join("python.exe"), b"").unwrap();
+        let found = which_in("python", dir.to_str().unwrap(), ".EXE");
+        assert!(same_file(
+            &found.expect("it is found despite case mismatch"),
+            &dir.join("python.exe")
+        ));
     }
 }
