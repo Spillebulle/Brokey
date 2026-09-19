@@ -25,11 +25,18 @@ use crate::model::{SourceKind, Step};
 use std::path::Component;
 use std::path::{Path, PathBuf};
 
-/// The directories a package file (`pacman -U`, `dpkg -i`, `rpm -U`, a `.deb`
-/// given to `apt-get install`) may come from.
+/// The facts the closed list cannot derive for itself, handed to it by the
+/// caller: the directories a package file (`pacman -U`, `dpkg -i`, `rpm -U`,
+/// a `.deb` given to `apt-get install`) may come from, and on Windows the
+/// removal commands the registry records.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Allowed {
     pub package_dirs: Vec<PathBuf>,
+    /// The removal commands the registry actually records, for the one kind
+    /// of step whose shape cannot be checked. Empty means nothing from
+    /// Add/Remove Programs may run, which is the safe direction to fail.
+    #[cfg(windows)]
+    pub removals: Vec<crate::model::Command>,
 }
 
 impl Allowed {
@@ -45,6 +52,10 @@ impl Allowed {
                 .iter()
                 .map(PathBuf::from)
                 .collect(),
+            // Nothing from Add/Remove Programs until a caller reads the
+            // registry and says what is there. See `with_registered_removals`.
+            #[cfg(windows)]
+            removals: Vec::new(),
         }
     }
 
@@ -62,6 +73,31 @@ impl Allowed {
                 .push(home.join(".cache").join("brokey"));
         }
         allowed
+    }
+
+    /// The system list plus the removal commands `HKLM` records. Only those
+    /// ever reach the helper: `removal_step` sets `needs_root` from
+    /// `Hive::needs_elevation`, which is false for `HKCU`, so a per-user
+    /// removal is a session step and is never validated here at all. That is
+    /// also why an elevated helper reading `HKLM` sees the right set despite
+    /// `HKCU` being the administrator's under elevation.
+    ///
+    /// Both sides of the seam call this. The runner checks every root run
+    /// against its own `Allowed` before the first prompt, so a runner left
+    /// with an empty list would refuse every removal before the user was
+    /// ever asked.
+    #[cfg(windows)]
+    pub fn with_registered_removals() -> Allowed {
+        let removals = crate::sources::windows::arp::read()
+            .iter()
+            .filter(|e| e.hive.needs_elevation())
+            .filter_map(crate::sources::windows::arp::removal_step)
+            .map(|step| step.command)
+            .collect();
+        Allowed {
+            removals,
+            ..Allowed::system()
+        }
     }
 }
 
@@ -157,27 +193,28 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 /// no requirement about its *shape* would be honest. The only honest check
 /// is provenance: is this command one the registry actually records?
 ///
-/// **Today that provenance is trusted, not verified, and this is the
-/// weakest point of the Windows list.** The arm below admits any program
-/// with any arguments as long as the step says its source is
-/// `SourceKind::Arp` — and `source` is an ordinary field of a `Step`, so it
-/// is whatever the plan says it is. Against a forged plan this reduces to
-/// "label the step `Arp` and run anything as Administrator". The Linux half
-/// of this file has no such branch: it checks program and arguments for
-/// every step whatever the source claims.
+/// That is what the arm below asks. `Allowed::removals` carries the removal
+/// commands read back out of the registry, the way `package_dirs` carries
+/// the directories a package file may come from, and a step is admitted
+/// only if its whole command (program, arguments, environment and working
+/// directory) is one of them. Labelling a step `SourceKind::Arp` buys a
+/// forged plan nothing, because `source` now only chooses which question is
+/// asked. An empty list refuses every removal, which is the safe direction
+/// to fail: a caller that has not read the registry cannot run anything
+/// from it.
 ///
-/// What holds it up meanwhile is narrower than it looks: the plan reaches
-/// the helper over a pipe whose DACL admits only this user and
-/// Administrators, and the confirm dialog shows the user the exact command
-/// line before anything runs. Neither is a substitute for checking.
+/// Both sides fill the list, through `Allowed::with_registered_removals`.
+/// The helper does because it is what enforces the list; the runner does
+/// because it validates every root run before the first prompt, and a
+/// runner with an empty list would refuse every removal before the user was
+/// ever asked.
 ///
-/// This is fixed where the fix belongs, in the helper that enforces the
-/// list: `arp::read` and `arp::removal_step` are public, so the set of
-/// removal commands the registry genuinely records can be computed and
-/// carried in `Allowed`, the way `package_dirs` already is, and compared
-/// against. Only `HKLM` removals ever arrive here — `removal_step` sets
-/// `needs_root` from `Hive::needs_elevation`, which is false for `HKCU` —
-/// so an elevated helper reading `HKLM` sees exactly the right set.
+/// Only `HKLM` removals ever arrive here. `removal_step` sets `needs_root`
+/// from `Hive::needs_elevation`, which is false for `HKCU`, so a per-user
+/// removal is a session step and is never validated here at all. That is
+/// what makes reading the registry in an elevated process sound: `HKLM` is
+/// the same whoever reads it, while the elevated process's `HKCU` may be an
+/// administrator's rather than the user's.
 ///
 /// Widening this is a deliberate edit here with a test beside it.
 #[cfg(windows)]
@@ -193,9 +230,6 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 
 #[cfg(windows)]
 pub fn check_step(step: &Step, allowed: &Allowed) -> Result<(), String> {
-    // Windows has no equivalent of the package-file directories the Linux
-    // list guards: nothing here is handed a file to install.
-    let _ = allowed;
     let program = Path::new(&step.command.program)
         .file_name()
         .map(|name| name.to_string_lossy().to_lowercase())
@@ -211,7 +245,13 @@ pub fn check_step(step: &Step, allowed: &Allowed) -> Result<(), String> {
             }
             Ok(())
         }
-        SourceKind::Arp => Ok(()),
+        SourceKind::Arp => {
+            if allowed.removals.contains(&step.command) {
+                Ok(())
+            } else {
+                Err(not_allowed(&step.command.program))
+            }
+        }
         other => Err(not_allowed(&format!("{other:?}"))),
     }
 }
@@ -1279,16 +1319,77 @@ mod windows_tests {
         assert_eq!(validate(&plan), Ok(()));
     }
 
-    /// An uninstall string out of the registry is whatever the installer
-    /// wrote, so nothing about its shape can be required.
+    /// A removal the registry records is allowed.
     #[test]
-    fn an_add_remove_programs_removal_is_allowed() {
+    fn a_registered_removal_is_allowed() {
+        let step = step_from(
+            SourceKind::Arp,
+            r"C:\Program Files\Thing\unins000.exe",
+            &["/SILENT"],
+        );
+        let allowed = Allowed {
+            removals: vec![step.command.clone()],
+            ..Allowed::system()
+        };
+        assert_eq!(validate_with(&plan_of(vec![step]), &allowed), Ok(()));
+    }
+
+    /// A command the registry does not record is refused, however the step
+    /// labels itself. This is the forged-plan case, and before this check
+    /// existed it ran as Administrator.
+    #[test]
+    fn an_unregistered_removal_is_refused_even_when_labelled_arp() {
+        let registered = step_from(
+            SourceKind::Arp,
+            r"C:\Program Files\Thing\unins000.exe",
+            &["/SILENT"],
+        );
+        let forged = step_from(SourceKind::Arp, "powershell.exe", &["-Command", "whoami"]);
+        let allowed = Allowed {
+            removals: vec![registered.command],
+            ..Allowed::system()
+        };
+        let err = validate_with(&plan_of(vec![forged]), &allowed)
+            .expect_err("the registry does not record this command");
+        assert!(err.contains("powershell.exe"), "{err}");
+        assert!(err.ends_with('.'), "the reason is a sentence: {err}");
+    }
+
+    /// Same program, different arguments, is a different command. An
+    /// uninstaller that takes a path to delete must not be reachable with a
+    /// path of someone else's choosing.
+    #[test]
+    fn a_registered_program_with_other_arguments_is_refused() {
+        let registered = step_from(
+            SourceKind::Arp,
+            r"C:\Program Files\Thing\unins000.exe",
+            &["/SILENT"],
+        );
+        let twisted = step_from(
+            SourceKind::Arp,
+            r"C:\Program Files\Thing\unins000.exe",
+            &["/SILENT", r"C:\Windows"],
+        );
+        let allowed = Allowed {
+            removals: vec![registered.command],
+            ..Allowed::system()
+        };
+        assert!(validate_with(&plan_of(vec![twisted]), &allowed).is_err());
+    }
+
+    /// An empty list refuses every removal. That is the safe direction to
+    /// fail: a caller that has not read the registry runs nothing from it.
+    #[test]
+    fn no_registered_removals_means_no_removal_runs() {
         let plan = plan_of(vec![step_from(
             SourceKind::Arp,
             r"C:\Program Files\Thing\unins000.exe",
             &["/SILENT"],
         )]);
-        assert_eq!(validate(&plan), Ok(()));
+        assert!(
+            validate(&plan).is_err(),
+            "validate uses the system list, which records nothing"
+        );
     }
 
     /// A source with no Windows business is refused whatever it runs.

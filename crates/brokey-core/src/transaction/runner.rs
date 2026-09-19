@@ -100,11 +100,19 @@ impl Runner {
         let wrapper = vec!["pkexec".to_string()];
         #[cfg(windows)]
         let wrapper = Vec::new();
+        #[cfg(unix)]
+        let allowed = Allowed::for_home(std::env::var_os("HOME").map(PathBuf::from).as_deref());
+        // The same list the helper builds. `execute_inner` validates every
+        // root run against this before the first prompt, so a runner left
+        // with no removals would refuse every removal before the user was
+        // ever asked, and the helper's own check would never be reached.
+        #[cfg(windows)]
+        let allowed = Allowed::with_registered_removals();
         Runner {
             helper: locate_helper(),
             wrapper,
             cancel: CancelToken::new(),
-            allowed: Allowed::for_home(std::env::var_os("HOME").map(PathBuf::from).as_deref()),
+            allowed,
         }
     }
 

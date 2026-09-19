@@ -362,12 +362,54 @@ pub fn removal(e: &RawEntry) -> Option<Removal> {
 /// The step that removes the entry. `needs_root` means Administrator here:
 /// software the whole machine has needs it, software only this user has
 /// does not, which is what keeps the common case free of a prompt.
+/// The full path to `msiexec.exe`, which is what an MSI removal runs and
+/// the one program in a removal command that the registry does not name in
+/// full.
+///
+/// A path rather than the bare name, because the helper never searches for
+/// a program: it refuses anything that is not a full path, so a bare name
+/// would fail every MSI removal on the machine (179 of 280 on the
+/// development machine's registry).
+///
+/// The system directory comes from `GetSystemDirectoryW` and not from
+/// `%SystemRoot%`. The elevated helper inherits the environment of the
+/// unelevated process that started it, so an environment variable is a
+/// thing an unprivileged caller can choose, and this one would choose which
+/// program runs as Administrator. The kernel's answer cannot be chosen.
+#[cfg(windows)]
+pub fn msiexec_program() -> String {
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buffer = [0u16; 260];
+    // SAFETY: `buffer` is a writable array of exactly the length passed
+    // alongside it, which is what this call is documented to fill.
+    let written = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+    // Zero is failure, and anything longer than the buffer means it wrote
+    // nothing and is reporting the size it wanted. Neither is worth a
+    // second attempt: `System32` is not somewhere else on a machine where
+    // this fails, and a wrong answer here is worse than a fixed one.
+    let directory = if written == 0 || written > buffer.len() {
+        r"C:\Windows\System32".to_string()
+    } else {
+        String::from_utf16_lossy(&buffer[..written])
+    };
+    format!(r"{directory}\msiexec.exe")
+}
+
+/// Off Windows there is no system directory to ask about and no MSI to
+/// remove. The bare name keeps `removal_step` an ordinary function of its
+/// fixture on the platform where the fixture tests run.
+#[cfg(not(windows))]
+pub fn msiexec_program() -> String {
+    "msiexec.exe".to_string()
+}
+
 pub fn removal_step(e: &RawEntry) -> Option<Step> {
     let name = e.display_name.clone().unwrap_or_else(|| e.key_name.clone());
     let command = match removal(e)? {
         Removal::Quiet(c) | Removal::Interactive(c) => c,
         Removal::Msi { product_code } => Command {
-            program: "msiexec.exe".to_string(),
+            program: msiexec_program(),
             args: vec![
                 "/x".to_string(),
                 product_code,
@@ -948,7 +990,17 @@ mod tests {
     fn an_msi_step_runs_msiexec_quietly() {
         let entries = fixture();
         let step = removal_step(named(&entries, "A per-user application")).expect("a step");
-        assert_eq!(step.command.program, "msiexec.exe");
+        assert_eq!(
+            windows_file_stem(&step.command.program).to_lowercase(),
+            "msiexec"
+        );
+        // The helper searches for nothing, so this must be a full path.
+        #[cfg(windows)]
+        assert!(
+            std::path::Path::new(&step.command.program).is_absolute(),
+            "{}",
+            step.command.program
+        );
         assert_eq!(
             step.command.args,
             [

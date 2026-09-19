@@ -591,13 +591,16 @@ fn allowed() -> Allowed {
     Allowed::for_home(home.as_deref())
 }
 
-/// Windows has no invoking user's home to derive yet, and the Windows arm
-/// of the closed list ignores `allowed` entirely (it has nothing shaped
-/// like a package-file directory to check), so the system directories
-/// stand in until a later plan gives the Windows helper its own answer.
+/// The removal commands the registry records, which is the one fact the
+/// Windows closed list cannot derive from a step's shape. Read here, in the
+/// process that enforces the list, rather than taken on trust from the plan.
+///
+/// There is no invoking user's home to derive: Windows has nothing shaped
+/// like a package-file directory for the list to guard, so `system()`'s
+/// directories stand unused.
 #[cfg(windows)]
 fn allowed() -> Allowed {
-    Allowed::system()
+    Allowed::with_registered_removals()
 }
 
 /// The home directory of `uid` in a passwd file.
