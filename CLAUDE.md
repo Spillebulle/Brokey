@@ -94,7 +94,9 @@ crates/brokey-core/src/
   model.rs          the data types, serde-derived, shared with the page as JSON
   sources/          one module per source, split by platform and selected by #[cfg]
     linux/          pacman.rs, aur.rs, flatpak.rs, snap.rs, apt.rs, dnf.rs, github.rs, fwupd.rs, chwd.rs
-    windows/        arp.rs (Add/Remove Programs); more to come per the Windows spec
+    windows/        arp.rs (Add/Remove Programs), winget/ (mod.rs, index.rs,
+                    query.rs, version.rs); Chocolatey, Scoop and the Store
+                    come next, per the Windows spec
   appstream/        catalogue XML parser, icon resolution, index
   group.rs          packages -> apps. Pure. Fixture-tested
   transaction/      Plan building and the Runner (spawns the helper and user-session steps)
