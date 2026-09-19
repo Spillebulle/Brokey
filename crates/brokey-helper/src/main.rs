@@ -789,6 +789,18 @@ mod tests {
     /// need root, so such a plan would otherwise be run without being
     /// checked at all. The step here is one the list would refuse anyway,
     /// but it never gets that far: no step is started and no list is read.
+    ///
+    /// This test runs on both platforms but is only real coverage on
+    /// Windows. Remove the `every_step_needs_root` guard and, on Windows,
+    /// this test fails: the Windows closed list checks nothing about a step
+    /// whose `needs_root` is false, so the step runs and every assertion
+    /// below breaks. On Linux the same removal leaves this test passing
+    /// regardless, because the Linux `check_step` refuses a step whose
+    /// `needs_root` is false on its own, with a message that contains
+    /// "root" the same as the guard's does; the plan still comes back
+    /// refused with `PRIVILEGE` in it, for a different reason than the one
+    /// this test means to exercise. A reader must not take a green run of
+    /// this test on Linux as evidence that the guard itself works there.
     #[test]
     fn a_step_that_does_not_need_root_refuses_the_whole_plan() {
         let mut plan = refusable_plan();
