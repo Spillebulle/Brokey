@@ -5,7 +5,7 @@
 
 Writes crates/brokey-core/tests/fixtures/windows/winget/source2.msix: a zip of
 the same shape as Microsoft's, holding a SQLite database with the real schema
-version 2 tables and eight packages chosen to exercise every ranking rule.
+version 2 tables and nine packages chosen to exercise every ranking rule.
 
 The real catalogue is 3.6 MB and is rebuilt daily, so it is not committed.
 This is, so the tests are deterministic and run on Linux.
@@ -45,7 +45,12 @@ CREATE TABLE [tags2_map]([tag] INT64 NOT NULL, [package] INT64 NOT NULL,
 #   3 Mozilla.Firefox.af   shares its moniker: the ordering rule's whole point
 #   4 Python.Python.3.0    two members of a version family the index folds to
 #   5 Python.Python.3.14   one norm_name and one norm_publisher
-#   6 Valve.Steam          a prefix match rather than an exact one, for "steam"
+#   6 Valve.Steam          moniker `steam`, so an exact-moniker hit for "steam"
+#   9 Codeusa.SteamCleaner a real catalogue package that also matches "steam",
+#                          at a worse rank, and whose id sorts BEFORE
+#                          Valve.Steam alphabetically. That is what makes rank
+#                          precedence testable: if rank stopped outranking the
+#                          tiebreak, this would come first.
 #   7 Notepad++.Notepad++  a GUID product code and a non-GUID one at once
 #   8 Obsidian.Obsidian    a GUID with no braces, and no upgrade code
 PACKAGES = [
@@ -57,6 +62,7 @@ PACKAGES = [
     (6, "Valve.Steam", "Steam", "steam", "2.10.91.91", "steam", "valve"),
     (7, "Notepad++.Notepad++", "Notepad++", "notepad++", "8.9.8", "notepad", "donhonotepad"),
     (8, "Obsidian.Obsidian", "Obsidian", "obsidian", "1.13.7", "obsidian", "obsidian"),
+    (9, "Codeusa.SteamCleaner", "SteamCleaner", "steamcleaner", "2.4", "steamcleaner", "codeusa"),
 ]
 
 PRODUCT_CODES = [
