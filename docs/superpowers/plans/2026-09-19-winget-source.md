@@ -2306,9 +2306,10 @@ the privilege path lands they route correctly.
 6. `to_package` is defined in Task 5 and used in Task 6. `version::newer` is
 defined in Task 3 and used in Task 6. `bootstrap_steps` and `Bootstrap` are
 defined in Task 4 and used only there. `OpKind` and `operation_step` are
-defined in Task 7 and used only there. `query::one` is introduced in Task 6 and
-used only by Task 6's two statements; it is added there rather than in Task 2
-because Task 2 has no caller for it.
+defined in Task 7 and used only there. `query::rows` is introduced in Task 6
+and used only by Task 6's two statements; it is added there rather than in
+Task 2 because Task 2 has no caller for it. It was called `query::one` in an
+earlier draft, before the name rung had to distinguish one match from several.
 
 **One thing the implementer of Task 6 must check.** `RawEntry`'s field list in
 the test helper is copied from `arp.rs` as it stands today. If a field has been
