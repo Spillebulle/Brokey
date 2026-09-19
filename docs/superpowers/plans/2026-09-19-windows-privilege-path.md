@@ -369,7 +369,7 @@ Read `runs_join_consecutive_root_steps_only` first and match how it inspects a `
 
 Run: `cargo test -p brokey-core --lib transaction::runner`
 
-Expected on Windows: FAIL to compile, because the module is not built there.
+Expected on Windows: **zero tests match and the command reports success.** The module is `#[cfg(unix)]`, so it is absent from the build rather than failing to compile it — there is nothing there for the filter to select. That is the failure, and like the `#![cfg(unix)]` integration file it is a silence rather than a red line. Do not read it as a pass.
 
 - [ ] **Step 3: Ungate the modules**
 
