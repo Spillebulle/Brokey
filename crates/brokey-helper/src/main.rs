@@ -194,7 +194,7 @@ fn pipe_argument(args: &[String]) -> Result<String, String> {
 /// not a process's own standard streams can supply both. Watches `reader`
 /// for a line reading `cancel` after the plan line, exactly as `run` always
 /// has.
-fn run_with(mut reader: impl BufRead + Send + 'static, mut writer: impl Write) -> i32 {
+fn run_with(reader: impl BufRead + Send + 'static, writer: impl Write) -> i32 {
     if !is_privileged() {
         #[cfg(unix)]
         eprintln!(
@@ -206,6 +206,51 @@ fn run_with(mut reader: impl BufRead + Send + 'static, mut writer: impl Write) -
         );
         return EXIT_NOT_ROOT;
     }
+    serve(reader, writer)
+}
+
+/// What this platform calls the privilege the helper runs with. The two
+/// platforms say the same thing and differ only by this word, so the
+/// sentences below are written once.
+#[cfg(unix)]
+const PRIVILEGE: &str = "root";
+#[cfg(windows)]
+const PRIVILEGE: &str = "Administrator";
+
+/// Whether every step in `plan` is one the helper has any business running.
+///
+/// The runner sends the helper a sub-plan of exactly one root run, and a
+/// run is a maximal stretch of steps whose `needs_root` is true, so every
+/// step that legitimately arrives here needs root. A plan that carries one
+/// which says otherwise was not built by the runner, and it is refused
+/// whole before any step starts.
+///
+/// This is load-bearing on Windows. The Windows closed list checks only the
+/// steps that need root, because a step that does not is a session step the
+/// runner runs itself, and a per-user removal from `HKCU` is one: checking
+/// those here would refuse every one of them before the user was ever
+/// asked. Without this guard a forged plan whose steps all said
+/// `needs_root: false` would be validated against nothing at all and then
+/// run, every step of it, as Administrator. On Linux the list checks every
+/// step either way, so this is a tightening there rather than a hole
+/// closed: such a plan is now refused before it is checked.
+fn every_step_needs_root(plan: &Plan) -> Result<(), String> {
+    if plan.steps.iter().all(|step| step.needs_root) {
+        return Ok(());
+    }
+    Err(format!(
+        "The helper was sent a step that is not marked as needing {PRIVILEGE}, and it only ever \
+         runs steps that are. Start the operation again from Brokey, which decides what needs \
+         elevating and what does not."
+    ))
+}
+
+/// `run_with` once the caller is known to be privileged: read the plan,
+/// refuse it if the closed list or [`every_step_needs_root`] says so, then
+/// run its steps in order. Separate from the privilege check so that a test
+/// can drive the refusal paths, which a test could not otherwise do without
+/// being elevated.
+fn serve(mut reader: impl BufRead + Send + 'static, mut writer: impl Write) -> i32 {
     let mut first = String::new();
     if let Err(e) = reader.read_line(&mut first) {
         emit(
@@ -232,6 +277,17 @@ fn run_with(mut reader: impl BufRead + Send + 'static, mut writer: impl Write) -
             return EXIT_BAD_INPUT;
         }
     };
+    if let Err(message) = every_step_needs_root(&plan) {
+        emit(
+            &mut writer,
+            &Event::PlanFinished {
+                plan: plan.id.clone(),
+                ok: false,
+                message,
+            },
+        );
+        return EXIT_REFUSED;
+    }
     if let Err(message) = allow::validate_with(&plan, &allowed()) {
         emit(
             &mut writer,
@@ -383,14 +439,13 @@ fn run_step(plan: &str, index: usize, step: &Step, writer: &mut impl Write) -> R
 /// read this as a deliberate difference, not an oversight.
 ///
 /// The step's own `env` entries are applied unfiltered, where Linux passes
-/// them through `allow::ALLOWED_ENV`. Nothing on Windows sets any: both
-/// `winget::operation_step` and `arp::removal_step` build a `Command` with
-/// an empty `env`, and a removal is compared whole against what the
-/// registry records, `env` included, so a forged one cannot carry any
-/// either. Only a winget step could, and a winget step already chooses its
-/// own arguments within the closed list, so this adds nothing an attacker
-/// did not have. A Windows equivalent of `ALLOWED_ENV` belongs with the
-/// first source that actually needs a variable.
+/// them through `allow::ALLOWED_ENV`. Nothing on Windows sets any, and
+/// nothing can: both `winget::operation_step` and `arp::removal_step` build
+/// a `Command` with an empty `env`, and the closed list compares a whole
+/// command against one of those, `env` and `cwd` included. A forged step
+/// carrying a variable is therefore refused before it reaches here, which
+/// is why there is no Windows `ALLOWED_ENV` to consult: the list has
+/// already asked the stronger question.
 #[cfg(windows)]
 fn run_step(plan: &str, index: usize, step: &Step, writer: &mut impl Write) -> Result<(), String> {
     if !Path::new(&step.command.program).is_absolute() {
@@ -725,6 +780,62 @@ mod tests {
         assert!(err.ends_with('.'), "the reason is a sentence: {err}");
         assert!(!err.contains('\u{2014}'), "no em dashes: {err}");
         assert!(out.is_empty(), "nothing was started, so nothing was logged");
+    }
+
+    /// A plan carrying a step that does not need root was not built by the
+    /// runner, which only ever sends one root run at a time, and it is
+    /// refused whole before any step starts. On Windows this is what keeps
+    /// the closed list from being skipped: it checks only the steps that
+    /// need root, so such a plan would otherwise be run without being
+    /// checked at all. The step here is one the list would refuse anyway,
+    /// but it never gets that far: no step is started and no list is read.
+    #[test]
+    fn a_step_that_does_not_need_root_refuses_the_whole_plan() {
+        let mut plan = refusable_plan();
+        plan.steps[0].needs_root = false;
+        let line = format!(
+            "{}\n",
+            serde_json::to_string(&plan).expect("a plan is JSON")
+        );
+        let mut out = Vec::new();
+        let code = serve(std::io::Cursor::new(line), &mut out);
+        assert_eq!(code, EXIT_REFUSED);
+        let events = String::from_utf8(out).expect("events are UTF-8");
+        assert!(
+            events.contains("\"event\":\"plan_finished\"") && events.contains("\"ok\":false"),
+            "{events}"
+        );
+        assert!(
+            !events.contains("step_started"),
+            "nothing was started: {events}"
+        );
+        assert!(
+            events.contains(PRIVILEGE),
+            "the refusal names the privilege: {events}"
+        );
+    }
+
+    /// The sentence itself, so the copy rules are checked on it rather than
+    /// on whatever a JSON escape made of it.
+    #[test]
+    fn the_refusal_for_a_step_that_does_not_need_root_is_a_sentence() {
+        let mut plan = refusable_plan();
+        plan.steps[0].needs_root = false;
+        let err = every_step_needs_root(&plan).expect_err("this plan was not built by the runner");
+        assert!(err.ends_with('.'), "{err}");
+        assert!(!err.contains('\u{2014}'), "no em dashes: {err}");
+        assert_eq!(every_step_needs_root(&refusable_plan()), Ok(()));
+    }
+
+    /// The helper's closed list is the registry-backed one, not the bare
+    /// system list, which would refuse every removal after the prompt. As
+    /// on the runner's side, the assertion is the wiring and not a count:
+    /// on a machine whose registry records no machine-wide removals the two
+    /// lists are equal and this can only pass.
+    #[cfg(windows)]
+    #[test]
+    fn the_helpers_closed_list_is_the_registry_backed_one() {
+        assert_eq!(allowed(), Allowed::with_registered_removals());
     }
 
     /// A step the closed list on this platform does not admit: `curl` is
