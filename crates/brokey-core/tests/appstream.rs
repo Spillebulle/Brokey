@@ -10,7 +10,6 @@
 
 use brokey_core::Picture;
 use brokey_core::appstream::Catalogue;
-#[cfg(unix)]
 use brokey_core::appstream::extra_roots;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -636,15 +635,23 @@ fn the_callers_origin_overrides_the_files() {
     assert!(catalogue.components().iter().all(|c| c.icon.is_none()));
 }
 
-// `extra_roots` splits on `:`, which is also how a Windows path names its
-// drive (`C:\...`), so a real path is not representable in the variable
-// there yet. Linux only, like `BROKEY_APPSTREAM_DIR` itself for now.
-#[cfg(unix)]
 #[test]
 fn brokey_appstream_dir_names_roots_that_load_like_the_system_ones() {
     // What `load_system` does with the variable, without touching the
-    // process environment: split, keep absolute entries, read each `xml/`.
-    let value = format!(":{}:relative/path:", swcatalog().display());
+    // process environment: split on the platform's own path-list separator
+    // (`:` on Unix, `;` on Windows, via `join_paths`/`split_paths`), keep
+    // absolute entries, read each `xml/`. Empty entries bookend the value
+    // the way a real `PATH`-style variable can, and must be dropped same
+    // as the relative one.
+    let value = std::env::join_paths([
+        std::ffi::OsStr::new(""),
+        swcatalog().as_os_str(),
+        std::ffi::OsStr::new("relative/path"),
+        std::ffi::OsStr::new(""),
+    ])
+    .expect("none of these carry the path-list separator")
+    .into_string()
+    .expect("these paths are valid UTF-8");
     let roots = extra_roots(Some(&value));
     assert_eq!(roots, vec![swcatalog()]);
     let xml_dirs: Vec<PathBuf> = roots.iter().map(|r| r.join("xml")).collect();

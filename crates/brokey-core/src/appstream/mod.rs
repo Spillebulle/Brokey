@@ -288,15 +288,13 @@ impl Catalogue {
     }
 }
 
-/// The extra catalogue roots named by `BROKEY_APPSTREAM_DIR`: colon-separated,
+/// The extra catalogue roots named by `BROKEY_APPSTREAM_DIR`: separated the
+/// way `PATH` is on this platform (`:` on Unix, `;` on Windows, both via
+/// [`std::env::split_paths`], as `system::linux::which` already does),
 /// empty entries ignored, relative entries ignored because the store's
 /// working directory is not something a user can predict.
 pub fn extra_roots(value: Option<&str>) -> Vec<PathBuf> {
-    value
-        .unwrap_or_default()
-        .split(':')
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
+    std::env::split_paths(value.unwrap_or_default())
         .filter(|p| p.is_absolute())
         .collect()
 }
@@ -424,17 +422,30 @@ fn read_file_memoised(
 mod tests {
     use super::*;
 
-    // The paths are Unix ones (a leading `/` is not `is_absolute()` on
-    // Windows), and Flatpak itself does not exist there yet.
-    #[cfg(unix)]
     #[test]
-    fn extra_roots_splits_on_colons_and_drops_relative_entries() {
+    fn extra_roots_reads_the_platform_path_list_and_drops_relative_entries() {
         assert!(extra_roots(None).is_empty());
         assert!(extra_roots(Some("")).is_empty());
-        assert_eq!(
-            extra_roots(Some("/a/swcatalog::relative:/b")),
-            vec![PathBuf::from("/a/swcatalog"), PathBuf::from("/b")]
-        );
+
+        // Two directories under the current one, so they are absolute on
+        // whatever platform runs this test, plus a relative entry that
+        // must be dropped because the store's working directory is not
+        // something a user can predict. Joined with `join_paths` so the
+        // separator is whatever `extra_roots` itself reads with
+        // `split_paths` (`:` on Unix, `;` on Windows).
+        let here = std::env::current_dir().expect("a working directory");
+        let a = here.join("swcatalog-a");
+        let b = here.join("swcatalog-b");
+        let value = std::env::join_paths([
+            a.as_os_str(),
+            std::ffi::OsStr::new("relative"),
+            b.as_os_str(),
+        ])
+        .expect("none of these paths carry the path-list separator")
+        .into_string()
+        .expect("these paths are valid UTF-8");
+
+        assert_eq!(extra_roots(Some(&value)), vec![a, b]);
     }
 
     #[cfg(unix)]
