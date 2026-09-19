@@ -32,8 +32,11 @@ pub fn all(
     }
     #[cfg(windows)]
     {
-        let _ = (system, client, catalogue, preferences);
-        vec![Box::new(windows::arp::Arp::new())]
+        let _ = (system, catalogue, preferences);
+        vec![
+            Box::new(windows::arp::Arp::new()),
+            Box::new(windows::winget::Winget::new(client)),
+        ]
     }
 }
 
@@ -80,7 +83,7 @@ mod tests {
     /// Windows from here on.
     #[cfg(windows)]
     #[test]
-    fn windows_has_the_add_remove_programs_source() {
+    fn windows_has_add_remove_programs_and_winget() {
         let system = crate::system::detect();
         let sources = super::all(
             &system,
@@ -89,6 +92,6 @@ mod tests {
             &crate::Preferences::default(),
         );
         let kinds: Vec<_> = sources.iter().map(|s| s.kind()).collect();
-        assert_eq!(kinds, [crate::SourceKind::Arp]);
+        assert_eq!(kinds, [crate::SourceKind::Arp, crate::SourceKind::Winget]);
     }
 }

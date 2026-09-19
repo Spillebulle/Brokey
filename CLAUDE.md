@@ -18,10 +18,12 @@ Windows side of that split and what it supersedes in `architecture.md`.
 **Early and building out.** The first machine is Arch (CachyOS): pacman and the
 AUR are the reference sources. apt and dnf are written to the same interface and
 are marked untested until they have run on a real Debian and Fedora. Windows
-has one source so far, Add/Remove Programs (`sources/windows/arp.rs`): it lists
-what the registry knows and works out how each entry would be removed, but
-`brokey-helper` has no Windows implementation yet, so nothing is actually
-installed or removed there. `README.md`'s "What is not there yet" is the
+now has two sources, Add/Remove Programs (`sources/windows/arp.rs`) and winget
+(`sources/windows/winget/`): winget's catalogue is downloaded and read by
+Brokey rather than shelled out to, which is why search works without winget
+installed, and its installed list is the registry joined to that catalogue.
+`brokey-helper` still has no Windows implementation, so nothing is actually
+installed or removed there yet. `README.md`'s "What is not there yet" is the
 user-facing list and is kept honest.
 
 The house reference for conventions is `../Muster` and `../Umber` (Rust
