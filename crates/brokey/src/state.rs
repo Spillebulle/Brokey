@@ -407,16 +407,22 @@ mod tests {
     use super::*;
     use brokey_core::{Op, PackageRef, SourceKind};
 
-    fn scratch_state(name: &str) -> AppState {
+    /// A directory that never collides with another test or another run,
+    /// even when the operating system reuses a process id: the pid alone is
+    /// not enough, so this also mixes in a nanosecond timestamp.
+    fn scratch_dir(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!(
+        std::env::temp_dir().join(format!(
             "brokey-state-{}-{nanos}-{name}",
             std::process::id()
-        ));
-        AppState::at(dir.join(crate::settings::FILE_NAME))
+        ))
+    }
+
+    fn scratch_state(name: &str) -> AppState {
+        AppState::at(scratch_dir(name).join(crate::settings::FILE_NAME))
     }
 
     fn a_plan(id: &str) -> Plan {
@@ -577,7 +583,7 @@ mod tests {
 
     #[test]
     fn a_given_store_is_used_until_a_transaction_forgets_it() {
-        let dir = std::env::temp_dir().join(format!("brokey-state-{}-given", std::process::id()));
+        let dir = scratch_dir("given");
         let state = AppState::with_store(
             dir.join(crate::settings::FILE_NAME),
             Store {
@@ -599,8 +605,7 @@ mod tests {
 
     #[test]
     fn a_setting_the_sources_act_on_detects_the_store_again() {
-        let dir =
-            std::env::temp_dir().join(format!("brokey-state-{}-preferences", std::process::id()));
+        let dir = scratch_dir("preferences");
         let empty = || Store {
             system: brokey_core::system::from_os_release(""),
             sources: Vec::new(),
