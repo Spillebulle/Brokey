@@ -10,7 +10,7 @@
 //! it is tested against a fixture rather than against whatever happens to
 //! be installed on the machine running the tests.
 
-use crate::model::{Package, PackageKind, Picture, SourceKind};
+use crate::model::{Command, Package, PackageKind, Picture, SourceKind, Step};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -285,6 +285,101 @@ pub fn to_package(e: &RawEntry) -> Package {
     }
     p.facts.push(("Registry key".to_string(), package_id(e)));
     p
+}
+
+/// How an entry comes off the machine, best route first.
+///
+/// The two registry values have to be read together to get the real
+/// picture. On the reference machine 253 of 317 entries have no
+/// `QuietUninstallString` and 204 are MSI ProductCodes, but only 23 are
+/// both: 245 can be removed silently and 72 cannot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Removal {
+    /// The publisher gave a silent switch. Nothing opens.
+    Quiet(Command),
+    /// The uninstall key carries `WindowsInstaller = 1` and is named by a
+    /// well-formed ProductCode, so the Windows Installer removes it silently
+    /// whatever the uninstall string says.
+    Msi { product_code: String },
+    /// The publisher's own uninstaller opens a window the user clicks
+    /// through. The interface says so rather than drawing a progress rail.
+    Interactive(Command),
+}
+
+/// Whether a key name is shaped like an MSI ProductCode: braces around a
+/// GUID. The shape alone proves nothing, because plenty of things are keyed
+/// by a GUID without being MSI products; `removal` asks for the
+/// `WindowsInstaller` flag as well.
+fn product_code(key_name: &str) -> Option<&str> {
+    let inner = key_name.strip_prefix('{')?.strip_suffix('}')?;
+    let groups: Vec<&str> = inner.split('-').collect();
+    let expected = [8, 4, 4, 4, 12];
+    if groups.len() != expected.len() {
+        return None;
+    }
+    for (group, length) in groups.iter().zip(expected) {
+        if group.len() != length || !group.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+    }
+    Some(key_name)
+}
+
+fn command(line: &str) -> Option<Command> {
+    let (program, args) = split_command_line(line)?;
+    Some(Command {
+        program,
+        args,
+        env: Vec::new(),
+        cwd: None,
+    })
+}
+
+pub fn removal(e: &RawEntry) -> Option<Removal> {
+    if let Some(quiet) = e.quiet_uninstall_string.as_deref().and_then(command) {
+        return Some(Removal::Quiet(quiet));
+    }
+    // The flag says the Windows Installer owns this product; the shape says
+    // the key name is safe to hand it as an argument. A DIFX driver package
+    // is keyed by a GUID and has the shape without the flag, and msiexec
+    // would fail on it while Brokey reported a silent removal.
+    if e.windows_installer == Some(1)
+        && let Some(code) = product_code(&e.key_name)
+    {
+        return Some(Removal::Msi {
+            product_code: code.to_string(),
+        });
+    }
+    let interactive = e.uninstall_string.as_deref().and_then(command)?;
+    Some(Removal::Interactive(interactive))
+}
+
+/// The step that removes the entry. `needs_root` means Administrator here:
+/// software the whole machine has needs it, software only this user has
+/// does not, which is what keeps the common case free of a prompt.
+pub fn removal_step(e: &RawEntry) -> Option<Step> {
+    let name = e.display_name.clone().unwrap_or_else(|| e.key_name.clone());
+    let command = match removal(e)? {
+        Removal::Quiet(c) | Removal::Interactive(c) => c,
+        Removal::Msi { product_code } => Command {
+            program: "msiexec.exe".to_string(),
+            args: vec![
+                "/x".to_string(),
+                product_code,
+                "/qn".to_string(),
+                "/norestart".to_string(),
+            ],
+            env: Vec::new(),
+            cwd: None,
+        },
+    };
+    Some(Step {
+        source: SourceKind::Arp,
+        title: format!("Removing {name}"),
+        command,
+        needs_root: e.hive.needs_elevation(),
+        weight: 10,
+    })
 }
 
 #[cfg(test)]
@@ -575,5 +670,110 @@ mod tests {
             })
             .expect("the fixture has one");
         assert_eq!(to_package(driver).kind, crate::model::PackageKind::Driver);
+    }
+
+    /// The quiet string is preferred wherever there is one: nothing opens
+    /// and the plan can report honestly that it finished.
+    #[test]
+    fn a_quiet_uninstall_string_is_preferred() {
+        let entries = fixture();
+        let Some(Removal::Quiet(command)) = removal(named(&entries, "Obsidian")) else {
+            panic!("Obsidian has a quiet uninstall string");
+        };
+        assert_eq!(
+            command.program,
+            "C:\\Program Files\\Obsidian\\Uninstall Obsidian.exe"
+        );
+        assert_eq!(command.args, ["/allusers", "/S"]);
+    }
+
+    /// 253 of the reference machine's 317 entries have no quiet string, but
+    /// 204 are MSI ProductCodes and msiexec removes those silently. Only 72
+    /// are left that genuinely cannot be, which is a quarter of the machine
+    /// rather than most of it.
+    #[test]
+    fn an_msi_without_a_quiet_string_is_still_silent() {
+        let entries = fixture();
+        let per_user = named(&entries, "A per-user application");
+        assert_eq!(per_user.quiet_uninstall_string, None);
+        let Some(Removal::Msi { product_code }) = removal(per_user) else {
+            panic!("an MSI ProductCode key is removable by msiexec");
+        };
+        assert_eq!(product_code, "{6f320b93-ee3c-4826-85e0-000000000002}");
+    }
+
+    /// What is left opens the publisher's own uninstaller, and the
+    /// interface says so rather than drawing a rail that cannot move.
+    ///
+    /// The driver package is the entry that makes this rule load-bearing. Its
+    /// key name is a well-formed GUID, so a filter that went on shape alone
+    /// would call it an MSI and answer `msiexec /x` on something the Windows
+    /// Installer has never heard of. It has no `WindowsInstaller` flag, which
+    /// is what settles it.
+    #[test]
+    fn everything_else_opens_the_publishers_uninstaller() {
+        let entries = fixture();
+        let driver = entries
+            .iter()
+            .find(|e| {
+                e.display_name
+                    .as_deref()
+                    .is_some_and(|n| n.contains("Arduino"))
+            })
+            .expect("the fixture has one");
+        let Some(Removal::Interactive(command)) = removal(driver) else {
+            panic!("a DIFX driver has no quiet string and is not a Windows Installer product");
+        };
+        assert_eq!(
+            command.program,
+            "C:\\PROGRA~1\\DIFX\\873032~1\\DPINST~1.EXE"
+        );
+    }
+
+    #[test]
+    fn an_entry_with_no_uninstaller_at_all_cannot_be_removed() {
+        let entries = fixture();
+        assert!(removal(named(&entries, "Update for Windows")).is_none());
+    }
+
+    /// A key name that merely looks a bit like a GUID is not one. Only the
+    /// exact ProductCode shape is treated as an MSI.
+    #[test]
+    fn a_key_name_that_is_not_a_product_code_is_not_an_msi() {
+        let entries = fixture();
+        assert!(matches!(
+            removal(named(&entries, "7-Zip 26.00 (x64)")),
+            Some(Removal::Quiet(_))
+        ));
+    }
+
+    /// Removing what the whole machine has needs Administrator; removing
+    /// what only this user has does not. This is what keeps the common
+    /// case free of a prompt.
+    #[test]
+    fn only_a_machine_wide_entry_needs_elevation() {
+        let entries = fixture();
+        let machine = removal_step(named(&entries, "Obsidian")).expect("a step");
+        let user = removal_step(named(&entries, "A per-user application")).expect("a step");
+        assert!(machine.needs_root);
+        assert!(!user.needs_root);
+        assert_eq!(machine.source, crate::model::SourceKind::Arp);
+        assert_eq!(machine.title, "Removing Obsidian");
+    }
+
+    #[test]
+    fn an_msi_step_runs_msiexec_quietly() {
+        let entries = fixture();
+        let step = removal_step(named(&entries, "A per-user application")).expect("a step");
+        assert_eq!(step.command.program, "msiexec.exe");
+        assert_eq!(
+            step.command.args,
+            [
+                "/x",
+                "{6f320b93-ee3c-4826-85e0-000000000002}",
+                "/qn",
+                "/norestart"
+            ]
+        );
     }
 }
