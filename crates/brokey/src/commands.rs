@@ -1065,7 +1065,14 @@ mod tests {
             Event::PlanFinished { plan, ok, message } => {
                 assert_eq!(plan, "plan-test");
                 assert!(!ok);
-                assert!(message.ends_with('.'), "a sentence: {message}");
+                // A spawn failure could not produce this exact sentence (it
+                // says "Could not start cmd: ...." instead), so this is what
+                // proves the fixture actually ran and exited with code 3,
+                // rather than merely failing to start.
+                assert!(
+                    message.contains("failed with exit code 3."),
+                    "the step ran and exited with code 3: {message}"
+                );
             }
             other => panic!("expected PlanFinished, got {other:?}"),
         }
