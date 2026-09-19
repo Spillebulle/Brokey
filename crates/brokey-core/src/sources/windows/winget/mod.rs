@@ -42,9 +42,13 @@ pub fn to_package(row: &query::Row) -> crate::model::Package {
         repo: Some("winget".to_string()),
         licence: None,
         homepage: None,
-        // The grouper's second rung is normalised name plus normalised
-        // publisher. The index has already normalised this one.
-        developer: row.publisher.clone(),
+        // The index stores only `norm_publishers2`, which is a join key and not
+        // a name: `igorpavlov`, `pythonsoftwarefoundation`. There is no column
+        // holding the publisher as a person would recognise it, so this stays
+        // empty rather than showing a fact nobody wrote. When Add/Remove
+        // Programs knows the same application, its edition carries the real
+        // name and the grouped app shows that.
+        developer: None,
         updated: None,
         download_size: None,
         installed_size: None,
@@ -263,7 +267,7 @@ impl Source for Winget {
         let row = query::by_id(&db, id)?.ok_or_else(|| {
             crate::Error::from_source(
                 SourceKind::Winget,
-                format!("{id} is not in the winget catalogue."),
+                format!("{id} is not in the winget catalogue. The catalogue is a daily snapshot; a very new package may not be in it yet."),
             )
         })?;
         Ok(to_package(&row))

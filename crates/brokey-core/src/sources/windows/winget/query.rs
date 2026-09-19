@@ -16,9 +16,9 @@ pub struct Row {
     pub name: String,
     pub moniker: Option<String>,
     pub latest_version: String,
-    /// From `norm_publishers2`, already normalised by the index. `group.rs`
-    /// joins a version family on this plus the normalised name, so it has to
-    /// travel with the row.
+    /// From `norm_publishers2`, already normalised by the index. This is what
+    /// the registry join in Task 6 matches against, and it travels with the
+    /// row for that reason.
     pub publisher: Option<String>,
 }
 
@@ -221,10 +221,9 @@ mod tests {
         );
     }
 
-    /// The version family is returned whole rather than ranked. Fifteen
-    /// Pythons are one application with fifteen editions and `group.rs`
-    /// joins them by normalised name and publisher, so the publisher has to
-    /// come back with the row.
+    /// The version family is returned whole rather than ranked. The publisher
+    /// travels with the row because Task 6's registry join matches on it, so
+    /// it has to come back with every row.
     #[test]
     fn a_version_family_comes_back_with_its_publisher() {
         let (_d, db) = db();
@@ -276,18 +275,27 @@ mod tests {
         assert_eq!(normalise("  7-Zip  "), "7zip");
     }
 
-    /// The publisher reaches the Package. `group.rs` joins a version family on
-    /// normalised name plus normalised publisher, so without this the fifteen
-    /// Pythons in the real catalogue stay fifteen rows on the page forever.
+    /// The identifying fields the index really has.
     #[test]
-    fn the_package_carries_the_publisher_the_grouper_needs() {
+    fn the_package_carries_what_the_index_knows() {
         let (_d, db) = db();
         let row = by_id(&db, "Python.Python.3.14").unwrap().unwrap();
         let p = super::super::to_package(&row);
-        assert_eq!(p.developer.as_deref(), Some("pythonsoftwarefoundation"));
         assert_eq!(p.source, crate::model::SourceKind::Winget);
         assert_eq!(p.id, "Python.Python.3.14");
+        assert_eq!(p.name, "Python 3.14");
         assert_eq!(p.version.as_deref(), Some("3.14.2"));
+    }
+
+    /// The publisher in the index is `pythonsoftwarefoundation`, which is a join
+    /// key and not a name. Showing it would put a mangled word on the detail
+    /// page under "Developer", so the source says it does not know instead.
+    #[test]
+    fn the_normalised_publisher_is_not_shown_as_the_developer() {
+        let (_d, db) = db();
+        let row = by_id(&db, "7zip.7zip").unwrap().unwrap();
+        assert_eq!(row.publisher.as_deref(), Some("igorpavlov"));
+        assert!(super::super::to_package(&row).developer.is_none());
     }
 
     /// The index has no description, homepage, licence or size, and the source
