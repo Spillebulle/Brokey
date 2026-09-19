@@ -12,10 +12,11 @@ use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle, RawHandle};
+use std::path::Path;
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{
-    ERROR_PIPE_CONNECTED, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree,
+    ERROR_CANCELLED, ERROR_PIPE_CONNECTED, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -28,7 +29,13 @@ use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcessToken, WaitForSingleObject,
+};
+use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+use super::Elevated;
 
 /// A pipe name no other run will choose. The process id alone is not
 /// enough: one session can run two plans.
@@ -271,6 +278,117 @@ impl PipeServer {
     }
 }
 
+/// What the elevated helper is started with. Separate from the call that
+/// elevates so it can be tested without raising a prompt.
+pub fn helper_arguments(pipe: &str) -> Vec<String> {
+    vec!["run".to_string(), "--pipe".to_string(), pipe.to_string()]
+}
+
+/// `SHELLEXECUTEINFOW::cbSize`, measured. Never a literal: it is 112 bytes
+/// on x86-64 and need not be on every target.
+pub fn shell_execute_info_size() -> u32 {
+    std::mem::size_of::<SHELLEXECUTEINFOW>() as u32
+}
+
+/// ShellExecuteEx takes one parameter string, so the arguments are joined
+/// and anything with a space in it is quoted. A pipe name never contains a
+/// space; a helper path very often does.
+fn join_arguments(args: &[String]) -> String {
+    args.iter()
+        .map(|a| {
+            if a.contains(' ') {
+                format!("\"{a}\"")
+            } else {
+                a.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A running elevated helper, waited on but never killed: see `Elevated::wait`.
+pub struct Inner {
+    process: OwnedHandle,
+}
+
+impl Inner {
+    /// Waits for the helper to exit and reports its exit code. There is no
+    /// `kill`: a helper in the middle of a step is stopped by writing
+    /// `CANCEL_LINE` down the pipe, exactly as Linux writes it to stdin.
+    pub fn wait(&mut self) -> io::Result<Option<i32>> {
+        // SAFETY: `self.process` owns a valid process handle, and `INFINITE`
+        // is a documented timeout value meaning "wait forever"; this blocks
+        // until the process exits and touches no memory.
+        let waited =
+            unsafe { WaitForSingleObject(self.process.as_raw_handle() as HANDLE, INFINITE) };
+        if waited == windows_sys::Win32::Foundation::WAIT_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        let mut code: u32 = 0;
+        // SAFETY: `self.process` is the same valid, now-exited process
+        // handle and `code` is a writable out-parameter.
+        let read = unsafe { GetExitCodeProcess(self.process.as_raw_handle() as HANDLE, &mut code) };
+        if read == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Some(code as i32))
+    }
+}
+
+/// Starts `helper` elevated with the `runas` verb and meets it on a named
+/// pipe. The pipe is listened on before the helper is started: the helper
+/// connects back the instant it launches, and a pipe that does not yet exist
+/// gets it nothing.
+pub fn start(helper: &Path, wrapper: &[String]) -> io::Result<Elevated> {
+    let _ = wrapper;
+    let name = pipe_name();
+    let mut server = listen(&name)?;
+
+    let helper_wide = wide_null(&helper.to_string_lossy());
+    let verb_wide = wide_null("runas");
+    let parameters = join_arguments(&helper_arguments(&name));
+    let parameters_wide = wide_null(&parameters);
+
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: shell_execute_info_size(),
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: verb_wide.as_ptr(),
+        lpFile: helper_wide.as_ptr(),
+        lpParameters: parameters_wide.as_ptr(),
+        nShow: SW_HIDE,
+        ..Default::default()
+    };
+
+    // SAFETY: `info` is a fully initialised `SHELLEXECUTEINFOW` whose string
+    // pointers (`helper_wide`, `verb_wide`, `parameters_wide`) are all still
+    // alive in bindings above this call, so none of them is dangling.
+    let ok = unsafe { ShellExecuteExW(&mut info) };
+    if ok == 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(ERROR_CANCELLED as i32) {
+            return Err(io::Error::other(
+                "You did not allow the change, so nothing was done.",
+            ));
+        }
+        return Err(err);
+    }
+
+    // SAFETY: `ShellExecuteExW` succeeded above with `SEE_MASK_NOCLOSEPROCESS`
+    // set, which is documented to fill `hProcess` with a fresh handle this
+    // call now owns exclusively.
+    let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess as RawHandle) };
+
+    let stream = server.accept()?;
+    let reader = stream.try_clone()?;
+    let lines = crate::transaction::runner::stream_lines_from(reader);
+
+    Ok(Elevated {
+        input: Some(Box::new(stream)),
+        lines,
+        inner: Inner { process },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +472,39 @@ mod tests {
         let name = pipe_name();
         let server = listen(&name).expect("the pipe is created");
         drop(server);
+    }
+
+    /// What the elevated helper is started with. The pipe name has to reach
+    /// it: it is the only way back. This is checked without elevating, because
+    /// a real run raises a UAC prompt and no test may do that.
+    #[test]
+    fn the_helper_is_told_where_to_connect() {
+        assert_eq!(
+            helper_arguments(r"\\.\pipe\brokey-1-0-2"),
+            vec![
+                "run".to_string(),
+                "--pipe".to_string(),
+                r"\\.\pipe\brokey-1-0-2".to_string(),
+            ]
+        );
+    }
+
+    /// `cbSize` must be the real size of the struct. A wrong one makes
+    /// ShellExecuteEx fail with a message that says nothing about size.
+    #[test]
+    fn the_shell_execute_struct_is_measured_not_guessed() {
+        assert_eq!(
+            shell_execute_info_size() as usize,
+            std::mem::size_of::<windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW>()
+        );
+    }
+
+    /// The arguments are one string to ShellExecuteEx, so a path with a space
+    /// in it must survive being joined. Every real helper path has one.
+    #[test]
+    fn an_argument_with_a_space_is_quoted() {
+        let joined = join_arguments(&["run".to_string(), r"C:\Program Files\x".to_string()]);
+        assert_eq!(joined, r#"run "C:\Program Files\x""#);
     }
 
     /// A client connects and the two sides speak. This is the whole

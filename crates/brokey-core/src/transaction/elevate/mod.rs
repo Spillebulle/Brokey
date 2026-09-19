@@ -20,20 +20,21 @@ mod unix;
 #[cfg(unix)]
 use unix::Inner;
 
-/// The named pipe half of the Windows privilege seam: its own DACL, its own
-/// tests. `ShellExecuteEx` and the rest of the Windows `start` are a later
-/// plan; nothing here is called from this module yet.
+/// The Windows half of the privilege seam: a named pipe with its own DACL,
+/// and `start`, which elevates the helper with `ShellExecuteEx`'s `runas`
+/// verb and meets it on that pipe.
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+use windows::Inner;
 
-/// The Windows side of privilege has not landed yet: there is nothing to
-/// wait on, only the sentence `start` already returned as an `Err`. This
-/// placeholder keeps `Elevated` one type on both platforms; a later plan
-/// replaces it with the named-pipe helper this module's doc describes.
-#[cfg(not(unix))]
+/// Neither Unix nor Windows: there is nothing to wait on, only the sentence
+/// `start` already returned as an `Err`. This keeps `Elevated` one type on
+/// every platform this builds for.
+#[cfg(not(any(unix, windows)))]
 struct Inner;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl Inner {
     fn wait(&mut self) -> std::io::Result<Option<i32>> {
         Err(std::io::Error::other(
@@ -74,7 +75,11 @@ pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
     {
         unix::start(helper, wrapper)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows::start(helper, wrapper)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (helper, wrapper);
         Err(std::io::Error::other(

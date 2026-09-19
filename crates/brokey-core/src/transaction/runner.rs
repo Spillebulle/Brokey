@@ -707,6 +707,16 @@ pub(crate) fn stream_lines(child: &mut Child) -> mpsc::Receiver<Line> {
     rx
 }
 
+/// One reader's lines, for a transport that has a single stream. A named
+/// pipe has no separate error stream, so everything that arrives is
+/// output. `stream_lines` is the two-stream version, for piped stdio.
+#[cfg(windows)]
+pub(crate) fn stream_lines_from(reader: impl Read + Send + 'static) -> mpsc::Receiver<Line> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || pump(reader, false, tx));
+    rx
+}
+
 fn pump(reader: impl Read, stderr: bool, tx: mpsc::Sender<Line>) {
     let mut reader = BufReader::new(reader);
     let mut buf = Vec::new();
