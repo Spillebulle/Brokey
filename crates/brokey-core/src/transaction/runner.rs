@@ -871,6 +871,24 @@ mod tests {
         assert!(split_runs(&[]).is_empty());
     }
 
+    /// The runner's closed list is the registry-backed one, not the bare
+    /// system list. Nothing else in the suite would notice the difference:
+    /// `execute_inner` validates every root run against this before the
+    /// first prompt, so a runner built with `Allowed::system()` would refuse
+    /// every Add/Remove Programs removal, and only a live removal after a
+    /// UAC prompt would ever say so.
+    ///
+    /// The assertion is the wiring rather than a count, because the number
+    /// of machine-wide removals is a property of the machine. On one whose
+    /// registry records none the two lists are equal anyway and this can
+    /// only pass; on any machine with software installed for all users it
+    /// can fail, which is every machine this will actually run on.
+    #[cfg(windows)]
+    #[test]
+    fn the_runners_closed_list_is_the_registry_backed_one() {
+        assert_eq!(Runner::new().allowed, Allowed::with_registered_removals());
+    }
+
     /// The runner is built on both platforms. Before this, `Runner` did not
     /// exist on Windows at all, so a plan could not even be described there.
     #[test]
