@@ -234,28 +234,41 @@ export function SettingsPage() {
           </Group>
 
           <Group eyebrow="Sources">
-            {SOURCE_KINDS.map((kind) => {
-              const status = sources.find((s) => s.kind === kind);
-              const label = sourceLabel(kind);
-              const on = settings.enabled_sources.includes(kind);
-              if (!status) {
-                return (
-                  <Setting
-                    key={kind}
-                    label={label}
-                    note="Brokey has not heard from this source yet."
-                    control={<Toggle label={label} on={on} onChange={() => undefined} disabled disabledReason="Brokey has not heard from this source yet." />}
-                  />
-                );
-              }
-              if (!status.available) {
-                const reason = status.reason ?? `${label} is not available on this machine.`;
-                const setup = status.setup ? <SetupButton kind={kind} setup={status.setup} running={busy.setups.has(kind)} /> : null;
-                // A source that is searched through its public store before its tool is here
-                // still has a meaningful switch: whether search asks it. The button beside it
-                // is how the tool gets here.
-                if (status.searchable) {
-                  return (
+            {
+              // Only the kinds this machine's store actually reported: nine
+              // on Linux, one on Windows, out of the fifteen SourceKind
+              // holds so both platforms' types are checked whole. A row for
+              // a source that could never exist here would read as Brokey
+              // waiting to hear from something it never will.
+              SOURCE_KINDS.flatMap((kind) => {
+                const status = sources.find((s) => s.kind === kind);
+                if (!status) return [];
+                const label = sourceLabel(kind);
+                const on = settings.enabled_sources.includes(kind);
+                if (!status.available) {
+                  const reason = status.reason ?? `${label} is not available on this machine.`;
+                  const setup = status.setup ? <SetupButton kind={kind} setup={status.setup} running={busy.setups.has(kind)} /> : null;
+                  // A source that is searched through its public store before its tool is here
+                  // still has a meaningful switch: whether search asks it. The button beside it
+                  // is how the tool gets here.
+                  if (status.searchable) {
+                    return [
+                      <Setting
+                        key={kind}
+                        label={label}
+                        note={reason}
+                        control={
+                          <>
+                            {setup}
+                            <Toggle label={label} on={on} onChange={(v) => setSource(kind, v)} />
+                          </>
+                        }
+                      />,
+                    ];
+                  }
+                  // Nothing here can use it, so the switch is drawn off: a lit switch that
+                  // cannot be moved reads as a setting that is on and broken.
+                  return [
                     <Setting
                       key={kind}
                       label={label}
@@ -263,30 +276,15 @@ export function SettingsPage() {
                       control={
                         <>
                           {setup}
-                          <Toggle label={label} on={on} onChange={(v) => setSource(kind, v)} />
+                          <Toggle label={label} on={false} onChange={() => undefined} disabled disabledReason={reason} />
                         </>
                       }
-                    />
-                  );
+                    />,
+                  ];
                 }
-                // Nothing here can use it, so the switch is drawn off: a lit switch that
-                // cannot be moved reads as a setting that is on and broken.
-                return (
-                  <Setting
-                    key={kind}
-                    label={label}
-                    note={reason}
-                    control={
-                      <>
-                        {setup}
-                        <Toggle label={label} on={false} onChange={() => undefined} disabled disabledReason={reason} />
-                      </>
-                    }
-                  />
-                );
-              }
-              return <Setting key={kind} label={label} note={status.detail ?? undefined} control={<Toggle label={label} on={on} onChange={(v) => setSource(kind, v)} />} />;
-            })}
+                return [<Setting key={kind} label={label} note={status.detail ?? undefined} control={<Toggle label={label} on={on} onChange={(v) => setSource(kind, v)} />} />];
+              })
+            }
             <Setting
               label="AUR helper"
               note="Automatic uses paru or yay when one is installed, else the built-in makepkg."
