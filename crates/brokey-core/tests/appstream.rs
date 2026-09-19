@@ -9,8 +9,7 @@
 //! `icons/`) and run `cargo test -p brokey-core -- --ignored live_`.
 
 use brokey_core::Picture;
-use brokey_core::appstream::Catalogue;
-use brokey_core::appstream::extra_roots;
+use brokey_core::appstream::{Catalogue, extra_roots};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 

@@ -10,8 +10,7 @@
 //! it is tested against a fixture rather than against whatever happens to
 //! be installed on the machine running the tests.
 
-use crate::model::Op;
-use crate::model::{Command, Package, PackageKind, Picture, SourceKind, Step};
+use crate::model::{Command, Op, Package, PackageKind, Picture, SourceKind, Step};
 use crate::{Error, Query, Result, Source, SourceStatus, Update};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -98,10 +97,12 @@ pub fn is_application(e: &RawEntry) -> bool {
     if e.parent_key_name.is_some() {
         return false;
     }
-    // Windows installed these itself and Brokey does not manage them.
+    // Windows installed these itself and Brokey does not manage them. Only
+    // the three the spec names: a fourth value needs a fixture entry where
+    // it fires before it is added here.
     if matches!(
         e.release_type.as_deref(),
-        Some("Security Update") | Some("Update") | Some("Hotfix") | Some("ServicePack")
+        Some("Security Update") | Some("Update") | Some("Hotfix")
     ) {
         return false;
     }
@@ -386,6 +387,17 @@ pub fn removal_step(e: &RawEntry) -> Option<Step> {
     })
 }
 
+/// "1 application" or "5 applications". The same shape as
+/// `sources/linux/pacman.rs`'s `count`, kept local because that one is
+/// private to its own module.
+fn count(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
 /// The Add/Remove Programs source. The entries are read once when the
 /// source is built, as the pacman source reads its database once.
 pub struct Arp {
@@ -428,7 +440,7 @@ impl Source for Arp {
             kind: SourceKind::Arp,
             available: true,
             reason: None,
-            detail: Some(format!("{found} applications")),
+            detail: Some(count(found, "application")),
             searchable: false,
             setup: None,
         }
@@ -1032,6 +1044,13 @@ mod tests {
         assert!(status.available);
         assert_eq!(status.reason, None);
         assert_eq!(status.detail.as_deref(), Some("5 applications"));
+    }
+
+    /// A machine with exactly one is not told it has "1 applications".
+    #[test]
+    fn one_application_is_singular() {
+        assert_eq!(count(1, "application"), "1 application");
+        assert_eq!(count(5, "application"), "5 applications");
     }
 
     /// The real registry on the machine running the tests. Ignored by
