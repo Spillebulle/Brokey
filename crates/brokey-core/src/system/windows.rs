@@ -13,7 +13,10 @@ use std::path::{Path, PathBuf};
 /// Kept apart from the reading so the naming is a pure function with tests.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RegistryVersion {
-    /// Read for completeness and never used. See the module note.
+    /// Read but never consulted by [`from_registry_version`]; kept only so
+    /// `the_version_comes_from_the_build_not_from_product_name` can set it
+    /// to "Windows 10 Pro" against a Windows 11 build and prove the naming
+    /// never reads it. See the module note.
     pub product_name: Option<String>,
     pub edition_id: Option<String>,
     pub display_version: Option<String>,
@@ -124,6 +127,54 @@ pub fn which_in(name: &str, path: &str, pathext: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// No NVIDIA enquiry is made on Windows. `has_nvidia` exists only for the
+/// WebKitGTK DMA-BUF workaround in `crates/brokey/src/lib.rs`, and WebKitGTK
+/// never runs on Windows, so there is nothing here for it to detect.
+pub fn has_nvidia() -> bool {
+    false
+}
+
+/// Where Brokey keeps its own files, on Windows.
+///
+/// Unlike Linux there is nothing fixed in advance: Windows elevation (UAC)
+/// runs as the same user with the same profile, so nothing scrubs the
+/// environment the way `pkexec` does for the helper, and no closed allow
+/// list needs a path it can name ahead of time. The `directories` crate's
+/// ordinary answer, under `%LOCALAPPDATA%`, is used as it comes.
+pub struct Dirs {
+    pub cache: PathBuf,
+    pub config: PathBuf,
+    pub data: PathBuf,
+}
+
+impl Dirs {
+    pub fn new() -> Dirs {
+        match directories::ProjectDirs::from("io.github", "spillebulle", "brokey") {
+            Some(d) => Dirs {
+                cache: d.cache_dir().to_path_buf(),
+                config: d.config_dir().to_path_buf(),
+                data: d.data_dir().to_path_buf(),
+            },
+            None => {
+                // `directories` says this can happen when no profile can be
+                // found at all. The temporary directory at least exists.
+                let base = std::env::temp_dir().join("brokey");
+                Dirs {
+                    cache: base.join("cache"),
+                    config: base.join("config"),
+                    data: base.join("data"),
+                }
+            }
+        }
+    }
+}
+
+impl Default for Dirs {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -297,5 +348,31 @@ mod tests {
             &found.expect("it is found despite case mismatch"),
             &dir.join("python.exe")
         ));
+    }
+
+    /// The regression this guards against: `Dirs` on Windows once answered
+    /// `/tmp` turned into `C:\tmp` because it read the Unix-only `HOME`
+    /// variable, which is unset here. The cache belongs under
+    /// `%LOCALAPPDATA%`, never under the temporary directory, whenever that
+    /// variable is set, which it always is in a normal session.
+    #[test]
+    #[cfg(windows)]
+    fn the_cache_lands_under_local_app_data() {
+        let dirs = Dirs::new();
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            assert!(
+                dirs.cache.starts_with(&local_app_data),
+                "expected {} to start under {local_app_data}",
+                dirs.cache.display()
+            );
+        }
+        assert_ne!(dirs.cache, dirs.config);
+        assert_ne!(dirs.cache, dirs.data);
+    }
+
+    /// No sysfs, no PCI bus, nothing to read: Windows never has an opinion.
+    #[test]
+    fn there_is_no_nvidia_enquiry_on_windows() {
+        assert!(!has_nvidia());
     }
 }
