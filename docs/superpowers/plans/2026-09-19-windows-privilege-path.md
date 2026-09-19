@@ -192,9 +192,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc::Receiver;
 
-#[cfg(unix)]
 mod unix;
-#[cfg(unix)]
 use unix::Inner;
 
 /// One elevated helper run, however the platform started it.
@@ -225,18 +223,15 @@ impl Elevated {
 /// arguments that obtain it, `pkexec` on Linux; it is ignored on a platform
 /// that has its own way.
 pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
-    #[cfg(unix)]
-    {
-        unix::start(helper, wrapper)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (helper, wrapper);
-        Err(std::io::Error::other(
-            "Brokey cannot obtain Administrator on this system.",
-        ))
-    }
+    unix::start(helper, wrapper)
 }
+```
+
+**This whole module is `#[cfg(unix)]` for the length of this task.** It names `runner::Line`, and `runner` is itself still gated until Task 2 ungates it, so an ungated `elevate` does not compile on Windows at all. Task 2 removes this gate at the same moment it removes `runner`'s and `allow`'s, and Task 6 is what gives `start` a second arm. Declaring it in `transaction/mod.rs` as:
+
+```rust
+#[cfg(unix)]
+pub mod elevate;
 ```
 
 `crates/brokey-core/src/transaction/elevate/unix.rs`:
@@ -249,7 +244,6 @@ pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
 use super::Elevated;
 use crate::transaction::runner::stream_lines;
 use std::io::Write;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
@@ -276,7 +270,6 @@ pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
         .spawn()?;
     let input: Option<Box<dyn Write + Send>> = child
         .stdin
@@ -291,7 +284,7 @@ pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
 }
 ```
 
-The `.process_group(0)` here is the one `run_helper` already had on its own spawn. `run_session`'s separate `.process_group(0)` at line 229 is a different call and is **not** touched by this task.
+**There is deliberately no `.process_group(0)` on this spawn.** `run_helper`'s spawn never had one — the only `.process_group(0)` in `runner.rs` is at line 229 and belongs to `run_session`, which this task does not touch. Adding one here would change how signals reach the pkexec child, which is a behaviour change on a task whose whole purpose is that there is none. That is also why this file needs no `std::os::unix` import at all.
 
 - [ ] **Step 5: Make `Line` and `stream_lines` reachable**
 
@@ -372,7 +365,27 @@ Expected on Windows: FAIL to compile, because the module is not built there.
 
 - [ ] **Step 3: Ungate the modules**
 
-In `transaction/mod.rs`, remove `#[cfg(unix)]` from `pub mod allow;`, `pub mod runner;`, the `pub use allow::{...}` line and the `pub use runner::{...}` line.
+In `transaction/mod.rs`, remove `#[cfg(unix)]` from `pub mod allow;`, `pub mod runner;`, `pub mod elevate;`, the `pub use allow::{...}` line and the `pub use runner::{...}` line.
+
+`elevate` was gated in Task 1 because it names `runner::Line` and `runner` was gated; ungating them together is the point at which that stops being true. Inside `elevate/mod.rs`, `mod unix;` and `use unix::Inner;` now need `#[cfg(unix)]` on each, and `start` needs its `#[cfg(not(unix))]` arm back:
+
+```rust
+pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
+    #[cfg(unix)]
+    {
+        unix::start(helper, wrapper)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (helper, wrapper);
+        Err(std::io::Error::other(
+            "Brokey cannot obtain Administrator on this system.",
+        ))
+    }
+}
+```
+
+`Elevated`'s `inner: Inner` field is the awkward one: with no `Inner` on Windows the struct does not exist there either. Give Windows a placeholder `Inner` in `elevate/mod.rs` whose `wait` returns the same error sentence, so that `Elevated` is one type on both platforms and Task 6 has only to replace it. Say in your report what you chose.
 
 Then fix the module doc, which is now wrong in three places. Lines 6 to 8 say `allow` is "Linux's shape of it (Windows will get its own in a later plan)"; lines 10 to 11 call `runner` "The only `pkexec` call site"; line 12 says `runner` is "Linux only until a later plan gives Windows its own privilege path". The first and third described this plan. The second moved to `elevate/unix.rs` in Task 1. Replace all three with what is now true.
 
