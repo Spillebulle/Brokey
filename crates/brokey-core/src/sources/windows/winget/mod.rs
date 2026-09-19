@@ -254,6 +254,35 @@ pub fn operation_step(kind: OpKind, id: &str, program: &str) -> Step {
     }
 }
 
+/// The one step that updates everything winget can, which is a different
+/// command from any single package's: `--all` in place of an id.
+///
+/// It lives here beside [`operation_step`] and takes its program the same
+/// way, so the closed list can rebuild it and compare the whole command
+/// rather than carrying a second copy of this argument list that could
+/// drift away from this one.
+pub fn update_all_step(program: &str) -> Step {
+    Step {
+        source: SourceKind::Winget,
+        title: "Updating everything winget can".to_string(),
+        command: Command {
+            program: program.to_string(),
+            args: vec![
+                "upgrade".to_string(),
+                "--all".to_string(),
+                "--silent".to_string(),
+                "--disable-interactivity".to_string(),
+                "--accept-source-agreements".to_string(),
+                "--accept-package-agreements".to_string(),
+            ],
+            env: Vec::new(),
+            cwd: None,
+        },
+        needs_root: true,
+        weight: 10,
+    }
+}
+
 /// Where `winget.exe` is, if it is anywhere.
 #[cfg(windows)]
 pub fn winget_exe() -> Option<std::path::PathBuf> {
@@ -521,25 +550,7 @@ impl Source for Winget {
             Op::Remove { package } if package.source == SourceKind::Winget => {
                 operation_step(OpKind::Remove, &package.id, &program)
             }
-            Op::UpdateAll { source } if *source == SourceKind::Winget => Step {
-                source: SourceKind::Winget,
-                title: "Updating everything winget can".to_string(),
-                command: Command {
-                    program: program.clone(),
-                    args: vec![
-                        "upgrade".to_string(),
-                        "--all".to_string(),
-                        "--silent".to_string(),
-                        "--disable-interactivity".to_string(),
-                        "--accept-source-agreements".to_string(),
-                        "--accept-package-agreements".to_string(),
-                    ],
-                    env: Vec::new(),
-                    cwd: None,
-                },
-                needs_root: true,
-                weight: 10,
-            },
+            Op::UpdateAll { source } if *source == SourceKind::Winget => update_all_step(&program),
             // Refresh is Brokey's own catalogue, not winget's, and `catalogue`
             // fetches it when it is stale. There is nothing to run.
             _ => return Ok(Vec::new()),
@@ -767,6 +778,13 @@ mod tests {
     /// and the closed list still recognises it. The helper searches for
     /// nothing, so a bare name would be refused there; this is the end that
     /// makes the path concrete.
+    ///
+    /// Windows only, because it asks `std::path` Windows questions. Off
+    /// Windows a backslash is an ordinary character, `is_absolute` is false
+    /// and `file_name` answers the whole string, so both assertions would
+    /// fail on the machine most of this project's tests run on. The rest of
+    /// this module stays ungated so the pure halves keep being tested there.
+    #[cfg(windows)]
     #[test]
     fn a_step_carries_the_resolved_path() {
         let s = operation_step(OpKind::Install, "Valve.Steam", WINGET);
