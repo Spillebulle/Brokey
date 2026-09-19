@@ -518,6 +518,68 @@ stay `#[ignore]` and named `live_*`.
 
 ## Open
 
+**Left by the winget source plan, 2026-09-19.** Recorded here because the
+plan's own workspace is scratch and these outlive it.
+
+- **Setup does not install the dependency bundle, and the spec asks it to.**
+  The table under "Setting a manager up from inside Brokey" says the App
+  Installer `.msixbundle` **and its dependency bundle**. `bootstrap()` finds
+  only the bundle, so `Add-AppxPackage` fails with `0x80073CF3` on a machine
+  missing `Microsoft.VCLibs.140.00.UWPDesktop` or `Microsoft.UI.Xaml`, which
+  is exactly the machine class that has no winget to begin with: Server,
+  Sandbox, stripped images. Closing it means a second download, at the time
+  of writing 97 MB, unpacking `DesktopAppInstaller_Dependencies.zip` and
+  choosing the right architecture's packages. This is the one requirement of
+  this spec the winget plan did not meet.
+
+- **The two Windows sources disagree about elevation.** `winget`'s
+  `operation_step` marks every operation `needs_root: true`, because
+  `--disable-interactivity` forbids winget from prompting and a machine-scope
+  package cannot otherwise install. `arp`'s `removal_step` answers per hive
+  and does not elevate for an `HKCU` entry. So removing the same per-user
+  application by the two routes prompts for Administrator on one and not the
+  other. The privilege plan is where this is settled, because the answer
+  depends on how elevation is actually performed.
+
+- **A per-user install performed under elevation lands in the wrong profile.**
+  If UAC is satisfied by a different account than the signed-in user, a winget
+  install that resolves to user scope installs into the administrator's
+  profile. A property of the elevation mechanism, not of what `plan()`
+  returns, and so also the privilege plan's to answer.
+
+- **Brokey has no equivalent of winget's name normaliser.** `norm_names2`
+  holds values winget produced by stripping versions, architectures and locale
+  tags as well as folding; `query::normalise` only folds to letters and
+  digits. It stored `python` for `Python 3.0` and `mozillafirefox` for
+  `Mozilla Firefox (en-US)`, where Brokey gives `python30` and
+  `mozillafirefoxenus`. Against a registry `DisplayName`, which almost always
+  carries a version, the two disagree, so the name rung of the
+  registry-to-catalogue join usually misses. It misses safely, and the exact
+  product-code rung carries software actually installed through winget.
+  Belongs with the metadata ladder.
+
+- **Whether a winget version family should collapse on the page.** Searching
+  `python` shows fifteen rows, because `group.rs` never joins two packages
+  from one source by name: the source listing both is the authority. That is
+  the same answer the AUR gets for `firefox-git` and `firefox-nightly`. But
+  winget's index carries a real family signal rather than a heuristic, so
+  Windows could collapse them in a way Linux cannot. A product decision,
+  not a correctness one.
+
+- **`--scope user` is not chosen per package.** This spec asks for per-user
+  where the manifest permits it. Knowing what the manifest permits means
+  fetching manifests, which is the metadata ladder.
+
+- **`refresh_index()` is left at its default for winget.** `catalogue()`
+  refetches when the cached copy is over a day old, so the index does
+  refresh, but pressing refresh does not force it.
+
+- **`NO_BOOTSTRAP` is unreachable.** `Source::setup` returns `Option<Setup>`
+  and `None` cannot carry a reason, so `transaction/plan.rs` renders
+  "winget cannot be set up on this system by Brokey." for both "already
+  installed" and "Microsoft could not be reached". The second is wrong: it
+  can be, just not now. Closing it means widening the `Source` trait.
+
 - **A registry value of the wrong type reads as absent.** `windows-registry`'s
   `get_u32` rejects a `REG_SZ`, so an installer that writes `SystemComponent`
   or `WindowsInstaller` as the string `"1"` rather than a DWORD gives `None`.
