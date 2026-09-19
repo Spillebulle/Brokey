@@ -766,6 +766,19 @@ a button that never appeared."
 Add to the `tests` module in `crates/brokey-core/src/system/windows.rs`:
 
 ```rust
+    /// `PATHEXT` supplies the extension's spelling and is conventionally
+    /// upper case, while the file on disk is usually lower case, so the
+    /// path `which_in` builds and the path the test wrote can differ in
+    /// spelling while naming one file. Canonicalising both is how the test
+    /// says "the same file" rather than "the same string". Comparing the
+    /// `PathBuf`s directly fails on Windows for that reason alone.
+    fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+
     /// The directories and the extensions come in as text so the search is
     /// a pure function. Nothing here touches the real PATH.
     #[test]
@@ -773,18 +786,20 @@ Add to the `tests` module in `crates/brokey-core/src/system/windows.rs`:
         let dir = tempdir();
         std::fs::write(dir.join("choco.exe"), b"").unwrap();
         let found = which_in("choco", dir.to_str().unwrap(), ".COM;.EXE;.BAT");
-        assert_eq!(found, Some(dir.join("choco.exe")));
+        assert!(same_file(&found.expect("it is found"), &dir.join("choco.exe")));
     }
 
     /// PATHEXT is tried in its own order, so a .com wins over a .exe when
-    /// it comes first, which is what the shell does.
+    /// it comes first, which is what the shell does. The assertion still
+    /// discriminates: `thing.com` and `thing.exe` are two files and
+    /// canonicalise differently.
     #[test]
     fn pathext_is_tried_in_order() {
         let dir = tempdir();
         std::fs::write(dir.join("thing.exe"), b"").unwrap();
         std::fs::write(dir.join("thing.com"), b"").unwrap();
         let found = which_in("thing", dir.to_str().unwrap(), ".COM;.EXE");
-        assert_eq!(found, Some(dir.join("thing.com")));
+        assert!(same_file(&found.expect("it is found"), &dir.join("thing.com")));
     }
 
     /// A name that already carries an extension is taken as it is.
@@ -810,7 +825,8 @@ Add to the `tests` module in `crates/brokey-core/src/system/windows.rs`:
         std::fs::write(first.join("dup.exe"), b"").unwrap();
         std::fs::write(second.join("dup.exe"), b"").unwrap();
         let path = format!("{};{}", first.display(), second.display());
-        assert_eq!(which_in("dup", &path, ".EXE"), Some(first.join("dup.exe")));
+        let found = which_in("dup", &path, ".EXE");
+        assert!(same_file(&found.expect("it is found"), &first.join("dup.exe")));
     }
 
     /// A unique directory under the system temporary directory, removed by
