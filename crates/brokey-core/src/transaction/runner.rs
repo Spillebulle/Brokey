@@ -18,6 +18,7 @@
 use crate::model::*;
 use crate::transaction::CancelToken;
 use crate::transaction::allow::{self, Allowed};
+use crate::transaction::elevate;
 use crate::transaction::progress::{self, ProgressParser};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
@@ -330,17 +331,10 @@ impl Runner {
         let json = serde_json::to_string(&sub)
             .map_err(|e| format!("The plan could not be encoded: {e}."))?;
         sink.event(Event::AuthRequired { plan: id.clone() });
-        let Some((program, leading)) = self.wrapper.split_first() else {
+        let Some((program, _leading)) = self.wrapper.split_first() else {
             return Err("No privilege wrapper is configured.".to_string());
         };
-        let mut child = Process::new(program)
-            .args(leading)
-            .arg(helper)
-            .arg("run")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+        let mut elevated = elevate::start(helper, &self.wrapper)
             .map_err(|e| format!("Could not start {program}: {e}."))?;
         // The plan is written on its own thread. pkexec reads nothing until
         // the dialog has been answered, so a plan larger than the pipe buffer
@@ -348,7 +342,7 @@ impl Runner {
         // written here. The same thread owns the cancel line, so stdin has
         // one owner and closes when the thread ends.
         let (cancel_tx, cancel_rx) = mpsc::channel::<()>();
-        if let Some(mut stdin) = child.stdin.take() {
+        if let Some(mut stdin) = elevated.input.take() {
             std::thread::spawn(move || {
                 let written = stdin
                     .write_all(json.as_bytes())
@@ -369,7 +363,7 @@ impl Runner {
                 }
             });
         }
-        let lines = stream_lines(&mut child);
+        let lines = &elevated.lines;
         let mut current = run.first;
         let mut parser: Box<dyn ProgressParser> =
             progress::parser_for(&plan.steps[run.first].command.program);
@@ -470,10 +464,10 @@ impl Runner {
             }
         }
         drop(cancel_tx);
-        let status = child
+        let exit = elevated
             .wait()
             .map_err(|e| format!("Could not wait for the helper: {e}."))?;
-        match (status.code(), helper_said) {
+        match (exit, helper_said) {
             (Some(0), Some((true, _))) | (Some(0), None) => {
                 // A helper that exited cleanly finished every step, whether
                 // or not each `StepFinished` arrived intact.
@@ -653,14 +647,15 @@ fn emit_progress(
     });
 }
 
-struct Line {
-    text: String,
-    stderr: bool,
+/// One line of a child's output, and which stream it came from.
+pub struct Line {
+    pub text: String,
+    pub stderr: bool,
 }
 
 /// Read the child's stdout and stderr on two threads into one channel, so a
 /// child that fills one pipe while the other is being read cannot block.
-fn stream_lines(child: &mut Child) -> mpsc::Receiver<Line> {
+pub(crate) fn stream_lines(child: &mut Child) -> mpsc::Receiver<Line> {
     let (tx, rx) = mpsc::channel();
     if let Some(out) = child.stdout.take() {
         let tx = tx.clone();

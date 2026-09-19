@@ -18,6 +18,8 @@
 
 #[cfg(unix)]
 pub mod allow;
+#[cfg(unix)]
+pub mod elevate;
 pub mod plan;
 pub mod progress;
 #[cfg(unix)]
