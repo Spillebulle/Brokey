@@ -473,6 +473,18 @@ stay `#[ignore]` and named `live_*`.
   Chocolatey should simply be the source that always elevates.
 - ARM64. The workspace should build for it and no machine exists to test it
   on, so it is marked untested in the sources list the way apt and dnf are.
+- **The Windows edition ranking, and what counts as Brokey itself.** Adding
+  the six Windows variants to `SourceKind` forced three exhaustive matches
+  closed in `group.rs` and `updates.rs`. They were filled with placeholders,
+  in enum order, and are inert while only one Windows source exists. Two of
+  them are probably wrong and must be settled before a second Windows source
+  lands: `Arp` currently ranks ahead of Chocolatey and Scoop, though an
+  Add/Remove entry is provenance-unknown and should likely lose to a real
+  package manager's edition; and `is_self_package` returns `false` for `Arp`,
+  which breaks the moment Brokey ships as an MSI, because its own uninstall
+  entry is exactly how it will appear. Settling either means a grouping
+  fixture, per the invariant that a heuristic arrives with a fixture where it
+  fires and one where it must not.
 - How the second spec hooks in. The candidates are an install-time snapshot
   taken before a plan runs, a path and registry ownership index built from
   every source's installed list, and an undo journal written by the helper.
