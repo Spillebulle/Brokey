@@ -1286,19 +1286,23 @@ impl Source for Winget {
         let tool: Option<std::path::PathBuf> = None;
 
         if tool.is_none() {
-            let setup = self.bootstrap().ok().map(|_| SourceSetup {
-                label: SETUP_LABEL.to_string(),
-                sentence: SETUP_SENTENCE.to_string(),
-            });
-            let reason = if setup.is_some() { NOT_INSTALLED } else { NO_BOOTSTRAP };
             return SourceStatus {
                 kind,
                 available: false,
-                reason: Some(reason.to_string()),
+                reason: Some(NOT_INSTALLED.to_string()),
                 detail: None,
                 // The catalogue is Brokey's own file, so search works either way.
                 searchable: true,
-                setup,
+                // What setting winget up would do. Whether Microsoft's release
+                // is reachable is deliberately not asked here: `status()` runs
+                // every time the page draws a source list, and two network
+                // requests per draw to prove a remedy will work is a cost
+                // nobody agreed to. `setup()` finds out, once, when the user
+                // actually asks for it.
+                setup: Some(SourceSetup {
+                    label: SETUP_LABEL.to_string(),
+                    sentence: SETUP_SENTENCE.to_string(),
+                }),
             };
         }
         let detail = self
@@ -1427,6 +1431,14 @@ impl Winget {
 }
 ```
 
+**Implementer note, second.** `status()` now advertises the Install winget
+button without proving Microsoft's release is reachable, and `setup()` returns
+`None` when it is not. Check what `transaction/plan.rs` does with an
+`Op::Setup` whose source answers `None`: if it silently plans nothing, the
+button would do nothing when the machine is offline. If that is what happens,
+say so in your report rather than changing `plan.rs` here, and it becomes a
+ruling for the controller. Do not widen this task to fix the planner.
+
 **Implementer note.** `crate::system::windows::which` is the function Task 4 of
 the Windows foundations plan added; check its exact name and signature before
 calling it, and adjust this line rather than adding a second one. If the
@@ -1471,7 +1483,7 @@ Add to `query.rs`'s test module:
 fn the_package_carries_the_publisher_the_grouper_needs() {
     let (_d, db) = db();
     let row = by_id(&db, "Python.Python.3.14").unwrap().unwrap();
-    let p = super::to_package(&row);
+    let p = super::super::to_package(&row);
     assert_eq!(p.developer.as_deref(), Some("pythonsoftwarefoundation"));
     assert_eq!(p.source, SourceKind::Winget);
     assert_eq!(p.id, "Python.Python.3.14");
@@ -1484,7 +1496,7 @@ fn the_package_carries_the_publisher_the_grouper_needs() {
 #[test]
 fn fields_the_index_does_not_have_are_empty() {
     let (_d, db) = db();
-    let p = super::to_package(&by_id(&db, "7zip.7zip").unwrap().unwrap());
+    let p = super::super::to_package(&by_id(&db, "7zip.7zip").unwrap().unwrap());
     assert!(p.description.is_none());
     assert!(p.homepage.is_none());
     assert!(p.licence.is_none());
@@ -1496,7 +1508,7 @@ fn fields_the_index_does_not_have_are_empty() {
 #[test]
 fn the_moniker_is_shown_as_a_fact() {
     let (_d, db) = db();
-    let p = super::to_package(&by_id(&db, "Valve.Steam").unwrap().unwrap());
+    let p = super::super::to_package(&by_id(&db, "Valve.Steam").unwrap().unwrap());
     assert!(
         p.facts.iter().any(|(k, v)| k == "Moniker" && v == "steam"),
         "{:?}",
@@ -1638,9 +1650,9 @@ code, 17 more by normalised name, 72 unmatched.
 Add to `query.rs`'s test module:
 
 ```rust
-fn entry(key: &str, name: &str, version: &str, publisher: &str) -> super::super::arp::RawEntry {
-    super::super::arp::RawEntry {
-        hive: super::super::arp::Hive::Machine,
+fn entry(key: &str, name: &str, version: &str, publisher: &str) -> crate::sources::windows::arp::RawEntry {
+    crate::sources::windows::arp::RawEntry {
+        hive: crate::sources::windows::arp::Hive::Machine,
         key_name: key.to_string(),
         display_name: Some(name.to_string()),
         display_version: Some(version.to_string()),
@@ -1664,7 +1676,7 @@ fn entry(key: &str, name: &str, version: &str, publisher: &str) -> super::super:
 fn an_uninstall_key_matches_its_product_code_whatever_the_case() {
     let (_d, db) = db();
     let e = entry("{23170F69-40C1-2701-2603-000001000000}", "7-Zip 26.03 (x64)", "26.03", "Igor Pavlov");
-    let row = super::match_entry(&db, &e).unwrap().unwrap();
+    let row = super::super::match_entry(&db, &e).unwrap().unwrap();
     assert_eq!(row.id, "7zip.7zip");
 }
 
@@ -1674,7 +1686,7 @@ fn an_uninstall_key_matches_its_product_code_whatever_the_case() {
 fn a_product_code_that_is_not_a_guid_still_matches() {
     let (_d, db) = db();
     let e = entry("notepad++", "Notepad++ (64-bit x64)", "8.9.8", "Notepad++ Team");
-    assert_eq!(super::match_entry(&db, &e).unwrap().unwrap().id, "Notepad++.Notepad++");
+    assert_eq!(super::super::match_entry(&db, &e).unwrap().unwrap().id, "Notepad++.Notepad++");
 }
 
 /// The upgrade code rung, for an entry whose product code changed between
@@ -1683,7 +1695,7 @@ fn a_product_code_that_is_not_a_guid_still_matches() {
 fn an_upgrade_code_matches_when_the_product_code_does_not() {
     let (_d, db) = db();
     let e = entry("{A1B2C3D4-0000-0000-0000-00000000F00D}", "Something Else", "1.0", "Nobody");
-    assert_eq!(super::match_entry(&db, &e).unwrap().unwrap().id, "Notepad++.Notepad++");
+    assert_eq!(super::super::match_entry(&db, &e).unwrap().unwrap().id, "Notepad++.Notepad++");
 }
 
 /// The name rung fires only with the publisher beside it.
@@ -1691,7 +1703,7 @@ fn an_upgrade_code_matches_when_the_product_code_does_not() {
 fn a_name_matches_when_the_publisher_agrees() {
     let (_d, db) = db();
     let e = entry("Obsidian_is_not_a_code", "Obsidian", "1.13.0", "Obsidian");
-    assert_eq!(super::match_entry(&db, &e).unwrap().unwrap().id, "Obsidian.Obsidian");
+    assert_eq!(super::super::match_entry(&db, &e).unwrap().unwrap().id, "Obsidian.Obsidian");
 }
 
 /// And not without it. This is the rung that would otherwise join every
@@ -1701,7 +1713,7 @@ fn a_name_matches_when_the_publisher_agrees() {
 fn a_name_alone_is_not_enough() {
     let (_d, db) = db();
     let e = entry("SomeKey", "Obsidian", "1.13.0", "A Different Company Entirely");
-    assert!(super::match_entry(&db, &e).unwrap().is_none());
+    assert!(super::super::match_entry(&db, &e).unwrap().is_none());
 }
 
 /// Something the catalogue has never heard of.
@@ -1709,7 +1721,7 @@ fn a_name_alone_is_not_enough() {
 fn an_unmatched_entry_is_none() {
     let (_d, db) = db();
     let e = entry("NothingLikeThis", "Bespoke Internal Tool", "4.2", "Our IT Department");
-    assert!(super::match_entry(&db, &e).unwrap().is_none());
+    assert!(super::super::match_entry(&db, &e).unwrap().is_none());
 }
 
 /// An older installed version against the catalogue's newest is an update,
@@ -1718,7 +1730,7 @@ fn an_unmatched_entry_is_none() {
 fn an_older_installed_version_is_an_update() {
     let (_d, db) = db();
     let e = entry("bd400747-f0c1-5638-a859-982036102edf", "Obsidian", "1.10.0", "Obsidian");
-    let ups = super::updates_from(&db, std::slice::from_ref(&e)).unwrap();
+    let ups = super::super::updates_from(&db, std::slice::from_ref(&e)).unwrap();
     assert_eq!(ups.len(), 1);
     assert_eq!(ups[0].from.as_deref(), Some("1.10.0"));
     assert_eq!(ups[0].to, "1.13.7");
@@ -1729,9 +1741,9 @@ fn an_older_installed_version_is_an_update() {
 fn an_up_to_date_entry_is_not_an_update() {
     let (_d, db) = db();
     let same = entry("bd400747-f0c1-5638-a859-982036102edf", "Obsidian", "1.13.7", "Obsidian");
-    assert!(super::updates_from(&db, std::slice::from_ref(&same)).unwrap().is_empty());
+    assert!(super::super::updates_from(&db, std::slice::from_ref(&same)).unwrap().is_empty());
     let ahead = entry("bd400747-f0c1-5638-a859-982036102edf", "Obsidian", "2.0.0", "Obsidian");
-    assert!(super::updates_from(&db, std::slice::from_ref(&ahead)).unwrap().is_empty());
+    assert!(super::super::updates_from(&db, std::slice::from_ref(&ahead)).unwrap().is_empty());
 }
 
 /// Installed packages carry the version that is on the machine, not the
@@ -1740,7 +1752,7 @@ fn an_up_to_date_entry_is_not_an_update() {
 fn installed_packages_report_the_installed_version() {
     let (_d, db) = db();
     let e = entry("7-zip", "7-Zip 26.00 (x64)", "26.00", "Igor Pavlov");
-    let ps = super::installed_from(&db, std::slice::from_ref(&e)).unwrap();
+    let ps = super::super::installed_from(&db, std::slice::from_ref(&e)).unwrap();
     assert_eq!(ps.len(), 1);
     assert!(ps[0].installed);
     assert_eq!(ps[0].installed_version.as_deref(), Some("26.00"));
