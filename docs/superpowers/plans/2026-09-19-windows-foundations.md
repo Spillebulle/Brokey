@@ -926,6 +926,7 @@ The registry holds 343 keys on the reference machine and roughly 157 application
 - Create: `crates/brokey-core/src/sources/windows/arp.rs`
 - Create: `crates/brokey-core/tests/fixtures/windows/arp/entries.json`
 - Modify: `crates/brokey-core/src/sources/windows/mod.rs`
+- Modify: `crates/brokey-core/src/sources/mod.rs` (drop the `#[cfg(windows)]` above `pub mod windows;`)
 
 **Interfaces:**
 - Consumes: Task 3's `SourceKind::Arp`.
@@ -1162,9 +1163,13 @@ mod tests {
     }
 
     /// Driver packages are kept rather than dropped. They are real things
-    /// on the machine and the second spec will want them. They are told
-    /// apart by kind, not by matching an English name prefix, which would
-    /// fail on a machine in another language.
+    /// on the machine and the second spec will want them listed. There is no
+    /// driver rule in the filter and there must not be one: a package like
+    /// this is kept because it has a name, no SystemComponent, no
+    /// ParentKeyName and no ReleaseType, exactly like any other entry. What
+    /// this test guards is that nobody later reaches for a name prefix such
+    /// as "Windows Driver Package", which would drop every driver on a
+    /// machine running in another language.
     #[test]
     fn a_driver_package_is_kept() {
         let entries = fixture();
@@ -1307,6 +1312,26 @@ pub fn is_application(e: &RawEntry) -> bool {
 
 Add `pub mod arp;` to `crates/brokey-core/src/sources/windows/mod.rs`.
 
+Then remove the gate above the module in `crates/brokey-core/src/sources/mod.rs`,
+so that `is_application` and its fixture tests are compiled on Linux too. It is a
+pure function of a checked-in JSON fixture and touches no Windows API, and the
+Linux runners are where most of this project's tests actually run. This is the
+shape `system/windows.rs` already has: the file compiles on both platforms and
+the gate sits on the items that call the Windows API, not on the tree above them.
+
+```rust
+#[cfg(unix)]
+pub mod linux;
+// Not gated: everything under it that calls the Windows API carries its own
+// `#[cfg(windows)]`, so the pure halves stay testable on both platforms, the
+// way `system::windows` does it. `linux` keeps its gate because its modules
+// call unix-only APIs throughout.
+pub mod windows;
+```
+
+Amend the module doc in `crates/brokey-core/src/sources/windows/mod.rs` to match:
+it currently says "Built only on Windows", which stops being true here.
+
 - [ ] **Step 5: Run the tests to verify they pass**
 
 ```powershell
@@ -1324,9 +1349,13 @@ git commit -m "Add/Remove Programs: the filter that decides what counts as an ap
 343 keys on the reference machine, 317 with a name, 160 of them
 SystemComponent. The filter is a pure function over the registry values
 with a fixture entry where each rule fires and a test on the total, the
-way group.rs requires of its own heuristics. Driver packages are kept and
-told apart by kind rather than by matching an English name prefix, which
-would fail on a machine in another language."
+way group.rs requires of its own heuristics. Driver packages fall through all
+four rules and are kept, with a test guarding against a later name prefix
+rule that would drop them on a machine running in another language.
+
+sources/windows/ loses its cfg gate so the filter runs on the Linux runners
+too. The gate belongs on the registry read, which is how system/windows.rs
+already does it."
 ```
 
 ---
@@ -1379,6 +1408,39 @@ Add to the `tests` module in `crates/brokey-core/src/sources/windows/arp.rs`:
     #[test]
     fn an_empty_command_line_is_not_a_command() {
         assert_eq!(split_command_line("   "), None);
+    }
+
+    /// The registry's paths are Windows paths whatever host reads them, so the
+    /// splitting is done on the text. `std::path::Path` would answer `Some("")`
+    /// for the first of these off Windows, and the install directory would be
+    /// silently wrong on the machine most of these tests run on.
+    #[test]
+    fn a_windows_parent_is_the_same_on_every_host() {
+        assert_eq!(
+            windows_parent("C:\\Program Files\\7-Zip\\Uninstall.exe"),
+            Some("C:\\Program Files\\7-Zip".to_string())
+        );
+        // Installers write forward slashes too, and Windows accepts them.
+        assert_eq!(
+            windows_parent("C:/Program Files/7-Zip/Uninstall.exe"),
+            Some("C:/Program Files/7-Zip".to_string())
+        );
+        // The drive's root. "C:" alone would name the drive's current
+        // directory, which is somewhere else.
+        assert_eq!(windows_parent("C:\\setup.exe"), Some("C:\\".to_string()));
+        assert_eq!(windows_parent("setup.exe"), None);
+    }
+
+    #[test]
+    fn a_windows_file_stem_is_the_same_on_every_host() {
+        assert_eq!(
+            windows_file_stem("C:\\PROGRA~1\\DIFX\\873032~1\\DPINST~1.EXE"),
+            "DPINST~1"
+        );
+        assert_eq!(windows_file_stem("MsiExec.exe"), "MsiExec");
+        assert_eq!(windows_file_stem("C:\\bin\\thing"), "thing");
+        // A leading dot is the whole name, not an empty stem.
+        assert_eq!(windows_file_stem(".gitignore"), ".gitignore");
     }
 
     /// The directory comes from the uninstaller, because InstallLocation is
@@ -1494,7 +1556,7 @@ Add to `crates/brokey-core/src/sources/windows/arp.rs`:
 
 ```rust
 use crate::model::{Package, PackageKind, Picture, SourceKind};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Split a registry command line into a program and its arguments, the way
 /// Windows does it: a leading quoted token may hold spaces, everything
@@ -1523,13 +1585,47 @@ pub fn split_command_line(s: &str) -> Option<(String, Vec<String>)> {
     Some((program, args))
 }
 
+/// The directory part of a Windows path, as text.
+///
+/// `std::path::Path` cannot do this. Off Windows a backslash is an ordinary
+/// character, so `Path::new(r"C:\Program Files\X\unins.exe").parent()` answers
+/// `Some("")` and every derivation below would be quietly wrong on the machine
+/// most of this project's tests run on. These strings come out of a Windows
+/// registry and describe a Windows machine whatever host is reading them, so
+/// the splitting is spelt out and behaves the same everywhere.
+fn windows_parent(path: &str) -> Option<String> {
+    let cut = path.rfind(['\\', '/'])?;
+    let parent = &path[..cut];
+    if parent.is_empty() {
+        // `\foo.exe`: the root of the current drive.
+        return Some("\\".to_string());
+    }
+    if parent.ends_with(':') {
+        // `C:\foo.exe` sits in the drive's root. `C:` alone would name the
+        // drive's current directory, which is a different place.
+        return Some(format!("{parent}\\"));
+    }
+    Some(parent.to_string())
+}
+
+/// The file name without its extension, as text, for the reason given on
+/// [`windows_parent`].
+fn windows_file_stem(path: &str) -> &str {
+    let name = match path.rfind(['\\', '/']) {
+        Some(cut) => &path[cut + 1..],
+        None => path,
+    };
+    match name.rfind('.') {
+        // A leading dot is the whole name, not an empty stem.
+        Some(dot) if dot > 0 => &name[..dot],
+        _ => name,
+    }
+}
+
 /// Whether a program is the Windows Installer rather than the
 /// application's own uninstaller.
 fn is_msiexec(program: &str) -> bool {
-    Path::new(program)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .is_some_and(|s| s.eq_ignore_ascii_case("msiexec"))
+    windows_file_stem(program).eq_ignore_ascii_case("msiexec")
 }
 
 /// Where the application lives.
@@ -1539,14 +1635,17 @@ fn is_msiexec(program: &str) -> bool {
 /// of the uninstaller is the first answer and `InstallLocation` the
 /// fallback. An `msiexec` uninstaller lives in the Windows directory and
 /// says nothing about the application, so it never supplies one.
+///
+/// The `PathBuf` is a Windows path and is only a path on Windows.
+/// Off it, take it apart with [`windows_parent`] rather than with `std::path`.
 pub fn install_dir(e: &RawEntry) -> Option<PathBuf> {
     let from_uninstaller = e
         .uninstall_string
         .as_deref()
         .and_then(split_command_line)
         .filter(|(program, _)| !is_msiexec(program))
-        .and_then(|(program, _)| Path::new(&program).parent().map(Path::to_path_buf))
-        .filter(|p| !p.as_os_str().is_empty());
+        .and_then(|(program, _)| windows_parent(&program))
+        .map(PathBuf::from);
     from_uninstaller.or_else(|| {
         e.install_location
             .as_deref()
@@ -1592,10 +1691,9 @@ fn is_driver(e: &RawEntry) -> bool {
         .as_deref()
         .and_then(split_command_line)
         .is_some_and(|(program, _)| {
-            Path::new(&program)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .is_some_and(|s| s.to_ascii_uppercase().starts_with("DPINST"))
+            windows_file_stem(&program)
+                .to_ascii_uppercase()
+                .starts_with("DPINST")
         })
 }
 
@@ -1632,7 +1730,7 @@ pub fn to_package(e: &RawEntry) -> Package {
 cargo test -p brokey-core --lib arp
 ```
 
-Expected: PASS, nineteen tests.
+Expected: PASS, twenty tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1646,6 +1744,11 @@ directory is the first answer and InstallLocation the fallback. An msiexec
 uninstaller lives in the Windows directory and says nothing about the
 application, so it never supplies one. DisplayIcon gives the picture and is
 never used as something to launch: it often points at the uninstaller.
+
+Windows paths are split as text rather than through std::path. Off Windows
+a backslash is an ordinary character, so Path::parent on a registry path
+answers an empty string and both derivations here would be wrong on the
+machine most of this project tests on.
 
 The command line splitter is the load-bearing piece. An uninstall string of
 \"C:\\Program Files\\X\\unins.exe\" /S split naively runs C:\\Program."
