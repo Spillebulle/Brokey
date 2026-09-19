@@ -1431,13 +1431,16 @@ impl Winget {
 }
 ```
 
-**Implementer note, second.** `status()` now advertises the Install winget
-button without proving Microsoft's release is reachable, and `setup()` returns
-`None` when it is not. Check what `transaction/plan.rs` does with an
-`Op::Setup` whose source answers `None`: if it silently plans nothing, the
-button would do nothing when the machine is offline. If that is what happens,
-say so in your report rather than changing `plan.rs` here, and it becomes a
-ruling for the controller. Do not widen this task to fix the planner.
+**Implementer note, second.** `status()` advertises the Install winget button
+without first proving Microsoft's release is reachable, and `setup()` returns
+`None` when it is not. This was checked before you were dispatched, so you do
+not need to: `transaction/plan.rs:87` turns a `None` from `setup()` into
+`Err(cannot_set_up(kind))`, so the button reports an error rather than doing
+nothing. The sentence it produces is the generic "winget cannot be set up on
+this system by Brokey", which is not quite right for a machine that is merely
+offline. That is a known and accepted wrinkle, recorded for the final review.
+Do not widen this task to fix it, and do not change `plan.rs` or the `Source`
+trait here.
 
 **Implementer note.** `crate::system::windows::which` is the function Task 4 of
 the Windows foundations plan added; check its exact name and signature before
