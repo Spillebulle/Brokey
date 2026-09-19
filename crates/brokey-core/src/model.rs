@@ -408,6 +408,16 @@ pub enum Event {
     },
 }
 
+/// Which operating system this is. The page needs it because the nav and
+/// the status bar differ; it must never be inferred from which sources
+/// happen to be present.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Platform {
+    Linux,
+    Windows,
+}
+
 /// The machine, as far as the sources need to know it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemInfo {
@@ -419,6 +429,7 @@ pub struct SystemInfo {
     pub arch: String,
     pub desktop: Option<String>,
     pub session: Option<String>,
+    pub platform: Platform,
 }
 
 impl SystemInfo {

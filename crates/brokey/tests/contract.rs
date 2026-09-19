@@ -618,6 +618,21 @@ fn everything_the_page_receives_matches_types_ts() {
         "SystemInfo",
         &brokey_core::system::from_os_release("ID=cachyos\nID_LIKE=arch\n"),
     );
+    // The Windows shape is checked on every runner, not only a Windows one.
+    // A field the Linux half never fills is exactly the kind of thing that
+    // would otherwise reach the page unchecked.
+    c.value(
+        "SystemInfo",
+        &brokey_core::system::from_registry_version(
+            &brokey_core::system::windows::RegistryVersion {
+                product_name: Some("Windows 10 Pro".into()),
+                edition_id: Some("Professional".into()),
+                display_version: Some("26H1".into()),
+                current_build: Some("28120".into()),
+                ubr: Some(2738),
+            },
+        ),
+    );
     c.value(
         "DriversReport",
         &DriversReport {

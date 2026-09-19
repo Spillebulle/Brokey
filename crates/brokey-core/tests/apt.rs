@@ -10,7 +10,7 @@ use brokey_core::appstream::Catalogue;
 use brokey_core::sources::linux::apt::{
     Apt, ListName, dpkg_compare, dpkg_is_newer, parse_control, parse_progress, parse_simulation,
 };
-use brokey_core::{Op, PackageKind, PackageRef, Query, Source, SourceKind, SystemInfo};
+use brokey_core::{Op, PackageKind, PackageRef, Platform, Query, Source, SourceKind, SystemInfo};
 use std::cmp::Ordering;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -28,6 +28,7 @@ fn debian() -> SystemInfo {
         arch: "x86_64".to_string(),
         desktop: None,
         session: None,
+        platform: Platform::Linux,
     }
 }
 
@@ -39,6 +40,7 @@ fn cachyos() -> SystemInfo {
         arch: "x86_64".to_string(),
         desktop: Some("COSMIC".to_string()),
         session: Some("wayland".to_string()),
+        platform: Platform::Linux,
     }
 }
 

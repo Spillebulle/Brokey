@@ -1,7 +1,7 @@
 //! What machine this is, on Linux: the distribution, the desktop, which
 //! tools exist and where things live.
 
-use crate::model::SystemInfo;
+use crate::model::{Platform, SystemInfo};
 use std::path::{Path, PathBuf};
 
 /// Read `/etc/os-release` and the session environment.
@@ -45,6 +45,7 @@ pub fn from_os_release(text: &str) -> SystemInfo {
         session: std::env::var("XDG_SESSION_TYPE")
             .ok()
             .filter(|s| !s.is_empty()),
+        platform: Platform::Linux,
     }
 }
 

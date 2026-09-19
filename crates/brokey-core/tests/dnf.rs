@@ -12,7 +12,7 @@ use brokey_core::sources::linux::dnf::{
     rpm_compare, rpmvercmp, search_glob,
 };
 use brokey_core::{
-    Error, Op, PackageKind, PackageRef, Query, Result, Source, SourceKind, SystemInfo,
+    Error, Op, PackageKind, PackageRef, Platform, Query, Result, Source, SourceKind, SystemInfo,
 };
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
@@ -33,6 +33,7 @@ fn fedora() -> SystemInfo {
         arch: "x86_64".to_string(),
         desktop: None,
         session: None,
+        platform: Platform::Linux,
     }
 }
 
@@ -44,6 +45,7 @@ fn cachyos() -> SystemInfo {
         arch: "x86_64".to_string(),
         desktop: Some("COSMIC".to_string()),
         session: Some("wayland".to_string()),
+        platform: Platform::Linux,
     }
 }
 

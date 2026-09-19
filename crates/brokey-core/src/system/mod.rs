@@ -17,6 +17,7 @@ pub use windows::detect;
 
 // Pure on both platforms, so it is always in scope.
 pub use linux::from_os_release;
+pub use windows::from_registry_version;
 
 // Also pure: no OS-specific API, just environment variables and the
 // portable `directories` crate. Read by `http`, `commands` and `settings`

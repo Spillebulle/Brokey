@@ -227,6 +227,7 @@ export interface SystemInfo {
   arch: string;
   desktop: string | null;
   session: string | null;
+  platform: "linux" | "windows";
 }
 
 export interface DriverProfile {
