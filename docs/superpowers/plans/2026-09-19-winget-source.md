@@ -89,11 +89,25 @@ them.
    assume a GUID.
 3. **The index deliberately folds a version family to one name.** Every
    `Python.Python.3.0` through `Python.Python.3.14` carries the `norm_names2`
-   row `python` and the `norm_publishers2` row `pythonsoftwarefoundation`. They
-   are meant to be one application with fifteen editions, and `group.rs` is what
-   makes them one, which is why Task 5 must populate `Package.developer`. A
-   winget source that leaves `developer` empty ships fifteen separate rows for
-   Python, and there is no later place to fix it.
+   row `python` and the `norm_publishers2` row `pythonsoftwarefoundation`.
+   That folding is what Task 6's registry join matches against, on the spec's
+   second rung, and it is why `Row` carries `publisher`.
+
+   **Correction, made during execution.** An earlier draft of this plan said
+   the folding is also what lets `group.rs` collapse the fifteen Pythons into
+   one application, and that Task 5 must put the publisher on
+   `Package.developer` to make it happen. That is false and it was checked:
+   `group.rs:489` opens `name_match` with `if a.source == b.source { return
+   None; }`, and the module doc says the same in words, because the source
+   that lists both is the authority on whether they are one thing. Fifteen
+   winget packages therefore stay fifteen, whatever any field holds, and
+   `group.rs` reads `developer` only after grouping is settled, to choose
+   which joined edition's value to show. The rungs of `group.rs` and the
+   rungs of the registry-to-catalogue ladder are different ladders; this plan
+   confused them. `Package.developer` stays empty for winget, because the v2
+   index has no human-readable publisher column and the normalised key is not
+   a name. What remains true is the winget-to-Add/Remove-Programs join, which
+   is cross-source and is Task 6's subject.
 
 ## The real schema, for reference
 
@@ -582,10 +596,16 @@ The other half is what the rule deliberately does **not** try to do. Searching
 `Python.Python.3.14`, and no ordering of them is right, because they are not
 fifteen answers. The index says so itself: all fifteen carry the `norm_names2`
 row `python` and the `norm_publishers2` row `pythonsoftwarefoundation`. They
-are one application with fifteen editions, and `group.rs` is what collapses
-them, on the spec's second rung, normalised name plus normalised publisher.
-That is why `Row` carries `publisher` and why Task 5 must put it on the
-`Package`. Do not add a version-family heuristic here.
+are one application with fifteen editions as far as the index is concerned.
+`Row` carries `publisher` because Task 6's registry join matches on it. Do
+not add a version-family heuristic here.
+
+Note that Brokey does not in fact collapse them on the page: `group.rs`
+never joins two packages from one source by name, so a search for `python`
+shows the family whole. That is the same behaviour the AUR already has for
+`firefox-git` and `firefox-nightly`, and it is the grouper's deliberate rule,
+not an oversight in this source. Whether winget's own family signal should
+earn an exception is recorded as an open question and is not settled here.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -677,10 +697,9 @@ mod tests {
         assert_eq!(ids(&search(&db, "OBSIDIAN", 10).unwrap())[0], "Obsidian.Obsidian");
     }
 
-    /// The version family is returned whole rather than ranked. Fifteen
-    /// Pythons are one application with fifteen editions and `group.rs`
-    /// joins them by normalised name and publisher, so the publisher has to
-    /// come back with the row.
+    /// The version family is returned whole rather than ranked, because no
+    /// ordering of fifteen Pythons is the right one. The publisher comes
+    /// back with the row because Task 6's registry join matches on it.
     #[test]
     fn a_version_family_comes_back_with_its_publisher() {
         let (_d, db) = db();
@@ -762,8 +781,8 @@ pub struct Row {
     pub name: String,
     pub moniker: Option<String>,
     pub latest_version: String,
-    /// From `norm_publishers2`, already normalised by the index. `group.rs`
-    /// joins a version family on this plus the normalised name, so it has to
+    /// From `norm_publishers2`, already normalised by the index. Task 6's
+    /// registry join matches on this plus the normalised name, so it has to
     /// travel with the row.
     pub publisher: Option<String>,
 }
