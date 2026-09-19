@@ -185,8 +185,10 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 /// What may run as Administrator on Windows.
 ///
 /// Two things, and the question asked of each is the same one: provenance.
-/// A command is admitted only if it is one a source in this crate would
-/// have built, or one the registry itself records.
+/// A winget command is admitted only if its arguments are ones a source in
+/// this crate would have built for the program it names; a removal from
+/// Add/Remove Programs is admitted only if its whole command is one the
+/// registry itself records.
 ///
 /// `winget.exe` is a fixed program with a fixed set of commands, and
 /// [`operation_step`](crate::sources::windows::winget::operation_step) and
@@ -202,10 +204,27 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 /// environment too: a winget command carries no `env`, because that is what
 /// the source builds.
 ///
-/// The program must be on a disk of this machine rather than merely
-/// absolute. A UNC path such as `\\somewhere\share\winget.exe` answers
-/// `true` to `Path::is_absolute` on Windows and would be started over the
-/// network, so [`on_a_local_disk`] asks for a drive letter instead.
+/// This arm's strength is in the arguments, not the program. The expected
+/// command is rebuilt using the command's *own* `program`, so the program is
+/// compared against itself and always agrees; a step is not admitted because
+/// its program is winget's real path, but because its arguments are exactly
+/// what a genuine plan builds for whatever program it names. A local
+/// absolute path ending in `winget.exe` that is not really winget still
+/// passes this arm if its arguments have the right shape.
+///
+/// The program must still answer [`on_a_local_disk`], which is a narrower
+/// question than "is this really winget": it only rules out a UNC path such
+/// as `\\somewhere\share\winget.exe`, which answers `true` to
+/// `Path::is_absolute` on Windows and would be started over the network.
+///
+/// What is left unaddressed, and cannot be addressed by a rule about the
+/// path: `winget_program` resolves to an app execution alias under the
+/// invoking user's own profile, which that user can replace with anything
+/// at any time. Elevating a program the user can overwrite is inherent to
+/// running winget as Administrator at all, on every machine, and is not a
+/// gap this check introduces or could close by naming a "real" path more
+/// precisely; there is no path to winget that is not, in the end, somewhere
+/// the user who is about to be granted Administrator can write.
 ///
 /// A removal from Add/Remove Programs cannot be rebuilt that way. The
 /// command is whatever the installer wrote into the registry years ago, so
@@ -316,14 +335,17 @@ fn check_winget(command: &Command) -> Result<(), String> {
     }
 }
 
-/// Whether `path` names a program on a disk of this machine.
+/// Whether `path` is absolute under a drive letter, `X:\...` or the
+/// `\\?\X:\...` form, rather than merely absolute.
 ///
-/// `Path::is_absolute` is not the whole question on Windows. A UNC path
-/// such as `\\somewhere\share\winget.exe` is absolute, and `Command::new`
-/// will start it over the network. Asking for a drive prefix is the
-/// narrower question, and every real resolution of winget answers it,
-/// because the app execution alias lives under the user's own profile on a
-/// local disk.
+/// This is not "is the program on a disk of this machine": `Prefix::Disk`
+/// also matches a mapped network drive and a `subst` drive, neither of
+/// which is local. What this refuses is narrower and is the part that
+/// matters here: a UNC path such as `\\somewhere\share\winget.exe` is
+/// absolute too, and `Command::new` would start it over the network, so
+/// `Path::is_absolute` alone is not enough to ask. Every real resolution of
+/// winget answers `true` to this, because the app execution alias lives
+/// under a drive letter in the user's own profile.
 #[cfg(windows)]
 fn on_a_local_disk(path: &Path) -> bool {
     use std::path::{Component, Prefix};
