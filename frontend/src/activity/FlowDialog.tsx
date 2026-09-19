@@ -8,14 +8,9 @@ import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
 import { Notice } from "../components/Notice";
 import { Skeleton } from "../components/Skeleton";
-import { useShell } from "../shell/store";
+import { selectIsWindows, useShell } from "../shell/store";
 import type { Step } from "../types";
 import { removalSentence, summarise, useFlow, verbFor } from "./flow";
-
-/** Whether this window is talking to a Windows machine. Linux is the default while `system` is still loading. */
-function isWindows(platform: "linux" | "windows" | undefined): boolean {
-  return platform === "windows";
-}
 
 /**
  * The word and the sentence for a step that runs elevated. There is no root
@@ -23,8 +18,8 @@ function isWindows(platform: "linux" | "windows" | undefined): boolean {
  * rather than asking for a password, so the two platforms are not the same
  * sentence with one word swapped.
  */
-function elevatedCopy(platform: "linux" | "windows" | undefined): { badge: string; title: string } {
-  if (isWindows(platform)) {
+function elevatedCopy(windows: boolean): { badge: string; title: string } {
+  if (windows) {
     return { badge: "needs Administrator", title: "This step runs as Administrator. Windows will ask you to allow it." };
   }
   return { badge: "needs your password", title: "This step runs as root through the helper." };
@@ -73,9 +68,9 @@ export function promptCount(steps: Step[]): number {
  * approve something. On Windows that approval is UAC's "allow this", never a
  * password, since the window has no polkit or AUR builds asking for one there.
  */
-function promptSentence(count: number, platform: "linux" | "windows" | undefined): string {
-  const word = isWindows(platform) ? "to allow this" : "for your password";
-  if (count === 0) return isWindows(platform) ? "Nothing here needs Administrator." : "Nothing here needs your password.";
+function promptSentence(count: number, windows: boolean): string {
+  const word = windows ? "to allow this" : "for your password";
+  if (count === 0) return windows ? "Nothing here needs Administrator." : "Nothing here needs your password.";
   if (count === 1) return `You will be asked ${word} once.`;
   return `You may be asked ${word} ${count} times: once for each group of steps marked below.`;
 }
@@ -120,13 +115,13 @@ export function FlowDialog() {
   const starting = useFlow((s) => s.starting);
   const confirm = useFlow((s) => s.confirm);
   const cancel = useFlow((s) => s.cancel);
-  const platform = useShell((s) => s.system?.platform);
+  const windows = useShell(selectIsWindows);
   if (!open) return null;
 
   const verb = verbFor(ops);
   const steps = preview?.plan.steps ?? [];
   const prompts = promptCount(steps);
-  const elevated = elevatedCopy(platform);
+  const elevated = elevatedCopy(windows);
   const removes = removalSentence(ops, steps);
   const disabledReason = error ?? (preview ? null : "The steps are still being worked out.");
 
@@ -174,7 +169,7 @@ export function FlowDialog() {
           <StepSkeleton />
         )}
         {preview ? (
-          <p className="bk-dim bk-small">{promptSentence(prompts, platform)}</p>
+          <p className="bk-dim bk-small">{promptSentence(prompts, windows)}</p>
         ) : null}
       </div>
     </Dialog>
