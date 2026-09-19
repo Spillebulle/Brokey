@@ -113,6 +113,23 @@ impl Installation {
     }
 }
 
+/// Whether an environment variable key matches the requested name.
+///
+/// On Windows, environment variable names are case-insensitive to the
+/// operating system, but `std::env::vars()` returns them as spelled by the
+/// parent process. A Git Bash shell passes `PATH`, whilst a GitHub Actions
+/// runner may pass `Path`. Unix treats environment variable names as
+/// case-sensitive and distinct, so an exact comparison must be used there.
+#[cfg(windows)]
+fn env_key_matches(actual: &str, requested: &str) -> bool {
+    actual.eq_ignore_ascii_case(requested)
+}
+
+#[cfg(not(windows))]
+fn env_key_matches(actual: &str, requested: &str) -> bool {
+    actual == requested
+}
+
 /// Everything [`detect`] is allowed to look at.
 ///
 /// A struct of injected readings rather than calls to `std::env` and
@@ -157,7 +174,7 @@ impl Probe {
     pub fn env(&self, key: &str) -> Option<&str> {
         self.env
             .iter()
-            .find(|(k, _)| k == key)
+            .find(|(k, _)| env_key_matches(k, key))
             .map(|(_, v)| v.as_str())
     }
 
@@ -324,6 +341,37 @@ mod tests {
         assert!(probe.env("PATH").is_some());
         assert!((probe.exists)(Path::new("/")));
         assert!(format!("{probe:?}").starts_with("Probe"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn env_key_lookup_is_case_insensitive_on_windows() {
+        // On Windows, the CI runner's shell passes `Path` whilst a Git Bash
+        // shell passes `PATH`. Both names should find the same variable,
+        // because Windows treats them as the same to the operating system.
+        let probe = Probe::fixed(
+            "C:\\Program Files\\brokey.exe",
+            &[("Path", "C:\\Windows")],
+            &[],
+        );
+        assert_eq!(probe.env("PATH"), Some("C:\\Windows"));
+        assert_eq!(probe.env("Path"), Some("C:\\Windows"));
+        assert_eq!(probe.env("path"), Some("C:\\Windows"));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn env_key_lookup_is_case_sensitive_on_unix() {
+        // On Unix, `PATH` and `Path` are distinct variables. A lookup for
+        // one must not find the other.
+        let probe = Probe::fixed(
+            "/usr/bin/brokey",
+            &[("PATH", "/usr/bin"), ("Path", "/home/user")],
+            &[],
+        );
+        assert_eq!(probe.env("PATH"), Some("/usr/bin"));
+        assert_eq!(probe.env("Path"), Some("/home/user"));
+        assert_eq!(probe.env("path"), None);
     }
 
     #[test]
