@@ -252,13 +252,15 @@ mod tests {
         ));
     }
 
-    /// `PATHEXT` supplies the extension's spelling and is conventionally upper
-    /// case, while the file on disk is usually lower case, so the path `which_in`
-    /// builds and the path the test wrote can differ in spelling while naming one
-    /// file. Canonicalising both is how the test says "the same file" rather than
-    /// "the same string". Returns `false` if either path cannot be canonicalised
-    /// (for instance, if it does not exist), which results in a plain assertion
-    /// failure and is acceptable for a test helper.
+    /// Says "the same file" rather than "the same string". The portable tests
+    /// write their fixtures in the same case as the `PATHEXT` entry they pass,
+    /// so for those two the spellings already agree. The `#[cfg(windows)]` test
+    /// is the one that needs this: `PATHEXT` is conventionally upper case and
+    /// the file on disk is usually lower case, and canonicalising is what lets
+    /// the assertion see one file under two spellings. Returns `false` when
+    /// either path cannot be canonicalised, for instance when it does not
+    /// exist, which reads as a plain assertion failure and is acceptable in a
+    /// test helper.
     fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
         match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
             (Ok(a), Ok(b)) => a == b,
