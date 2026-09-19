@@ -536,30 +536,39 @@ impl Source for Winget {
     }
 
     fn plan(&self, op: &crate::model::Op) -> Result<Vec<Step>> {
-        use crate::model::Op;
         // Resolved once, here, where the environment is the user's own. The
         // elevated helper is handed the result and searches nothing.
         let program = winget_program();
+        self.plan_with(op, &program)
+    }
+}
+
+impl Winget {
+    /// [`Source::plan`]'s body, with the resolved path to `winget.exe` taken
+    /// as a parameter rather than looked up here. That is what lets a test
+    /// drive every `Op` variant against a fixed path without winget being
+    /// installed on the machine running the test; `plan` itself still
+    /// resolves the program the normal way and is not otherwise changed.
+    fn plan_with(&self, op: &crate::model::Op, program: &str) -> Result<Vec<Step>> {
+        use crate::model::Op;
         let step = match op {
             Op::Install { package } if package.source == SourceKind::Winget => {
-                operation_step(OpKind::Install, &package.id, &program)
+                operation_step(OpKind::Install, &package.id, program)
             }
             Op::Update { package } if package.source == SourceKind::Winget => {
-                operation_step(OpKind::Update, &package.id, &program)
+                operation_step(OpKind::Update, &package.id, program)
             }
             Op::Remove { package } if package.source == SourceKind::Winget => {
-                operation_step(OpKind::Remove, &package.id, &program)
+                operation_step(OpKind::Remove, &package.id, program)
             }
-            Op::UpdateAll { source } if *source == SourceKind::Winget => update_all_step(&program),
+            Op::UpdateAll { source } if *source == SourceKind::Winget => update_all_step(program),
             // Refresh is Brokey's own catalogue, not winget's, and `catalogue`
             // fetches it when it is stale. There is nothing to run.
             _ => return Ok(Vec::new()),
         };
         Ok(vec![step])
     }
-}
 
-impl Winget {
     /// The catalogue's package count, read from whatever is already on disk.
     /// Never fetches: `status()` runs before every search, installed list,
     /// updates run and plan, and again whenever the page redraws its source
@@ -927,5 +936,84 @@ mod tests {
             .unwrap();
         assert_eq!(steps.len(), 1);
         assert!(steps[0].command.args.contains(&"--all".to_string()));
+    }
+
+    /// Ties `plan_with` to `allow`'s closed list, so a future producer added
+    /// to its match is caught here rather than by someone remembering to
+    /// grep for every place that builds a `winget.exe` command.
+    ///
+    /// Every `Op` variant is driven through, with the match below written
+    /// with no wildcard arm: a variant added to `Op` later makes this fail
+    /// to compile, which is what forces whoever adds it to also decide
+    /// whether the step it produces needs a place in `ops` and, if the step
+    /// needs root, that `check_step` actually admits it. Every step that
+    /// comes back with `needs_root == true` is checked against an `Allowed`
+    /// built the way the runner builds it, `with_registered_removals`,
+    /// because that is what stands between the step and Administrator in
+    /// the real path.
+    ///
+    /// `plan_with` takes the program as a parameter for exactly this: `plan`
+    /// itself resolves `winget.exe` by searching the machine, which would
+    /// make this test depend on winget being installed. The fixed path
+    /// below is the shape `winget_program` really returns, an app execution
+    /// alias under a user's profile, but no such file needs to exist for
+    /// this test: `plan_with` never touches the disk.
+    #[cfg(windows)]
+    #[test]
+    fn every_step_plan_with_returns_passes_the_closed_list() {
+        use crate::model::{Op, PackageRef};
+        use crate::transaction::allow::{self, Allowed};
+
+        const PROGRAM: &str = r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\winget.exe";
+        let package = PackageRef {
+            source: SourceKind::Winget,
+            id: "Valve.Steam".to_string(),
+        };
+        let ops = [
+            Op::Install {
+                package: package.clone(),
+            },
+            Op::Remove {
+                package: package.clone(),
+            },
+            Op::Update {
+                package: package.clone(),
+            },
+            Op::UpdateAll {
+                source: SourceKind::Winget,
+            },
+            Op::Refresh {
+                source: SourceKind::Winget,
+            },
+            Op::Setup {
+                source: SourceKind::Winget,
+            },
+        ];
+
+        let w = Winget::new(crate::http::Client::shared());
+        let allowed = Allowed::with_registered_removals();
+        for op in &ops {
+            // No wildcard: every current variant is named, so a variant
+            // added to `Op` without a matching entry above fails to
+            // compile here.
+            match op {
+                Op::Install { .. }
+                | Op::Remove { .. }
+                | Op::Update { .. }
+                | Op::UpdateAll { .. }
+                | Op::Refresh { .. }
+                | Op::Setup { .. } => {}
+            }
+            for step in w.plan_with(op, PROGRAM).unwrap() {
+                if step.needs_root {
+                    assert_eq!(
+                        allow::check_step(&step, &allowed),
+                        Ok(()),
+                        "plan_with({op:?}) produced a step the closed list refuses: {:?}",
+                        step.command
+                    );
+                }
+            }
+        }
     }
 }

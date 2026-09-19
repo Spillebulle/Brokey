@@ -1132,6 +1132,57 @@ mod tests {
         assert!(e.message.contains("nothing to remove"), "{}", e.message);
     }
 
+    /// Ties `Arp::plan` to `allow`'s closed list, the same way the winget
+    /// coverage test in `sources::windows::winget` ties `plan_with` to it.
+    /// `Arp`'s `entries` field is `pub(crate)`, so a fixture builds one
+    /// without the registry, and this drives every fixture application's
+    /// removal through the real `plan` and checks whatever comes back with
+    /// `needs_root` against an `Allowed` built the way the runner builds it
+    /// (`with_registered_removals`), except sourced from the fixture rather
+    /// than the live registry so the test does not depend on what is
+    /// installed on the machine running it.
+    ///
+    /// `Op` has other variants, but `Arp::plan` answers all of them with an
+    /// empty list; only `Op::Remove` is exercised here for that reason, the
+    /// same as `it_plans_a_removal_and_nothing_else` above.
+    #[cfg(windows)]
+    #[test]
+    fn every_removal_plan_step_that_needs_root_passes_the_closed_list() {
+        use crate::transaction::allow::{self, Allowed};
+
+        let arp = source_from_fixture();
+        let msiexec = msiexec_program();
+        let removals: Vec<Command> = arp
+            .entries
+            .iter()
+            .filter(|e| e.hive.needs_elevation())
+            .filter_map(|e| removal_step(e, &msiexec))
+            .map(|step| step.command)
+            .collect();
+        let allowed = Allowed {
+            removals,
+            ..Allowed::system()
+        };
+
+        for entry in arp.applications() {
+            let package = crate::model::PackageRef {
+                source: SourceKind::Arp,
+                id: package_id(entry),
+            };
+            for step in arp.plan(&Op::Remove { package }).unwrap_or_default() {
+                if step.needs_root {
+                    assert_eq!(
+                        allow::check_step(&step, &allowed),
+                        Ok(()),
+                        "removing {:?} produced a step the closed list refuses: {:?}",
+                        entry.display_name,
+                        step.command
+                    );
+                }
+            }
+        }
+    }
+
     /// The source is always there: the registry is part of Windows. It says
     /// how many applications it found, for the status bar.
     #[test]
