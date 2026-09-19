@@ -8,8 +8,27 @@ import { Button } from "../components/Button";
 import { Dialog } from "../components/Dialog";
 import { Notice } from "../components/Notice";
 import { Skeleton } from "../components/Skeleton";
+import { useShell } from "../shell/store";
 import type { Step } from "../types";
 import { removalSentence, summarise, useFlow, verbFor } from "./flow";
+
+/** Whether this window is talking to a Windows machine. Linux is the default while `system` is still loading. */
+function isWindows(platform: "linux" | "windows" | undefined): boolean {
+  return platform === "windows";
+}
+
+/**
+ * The word and the sentence for a step that runs elevated. There is no root
+ * on Windows, only Administrator, and UAC asks the user to allow the step
+ * rather than asking for a password, so the two platforms are not the same
+ * sentence with one word swapped.
+ */
+function elevatedCopy(platform: "linux" | "windows" | undefined): { badge: string; title: string } {
+  if (isWindows(platform)) {
+    return { badge: "needs Administrator", title: "This step runs as Administrator. Windows will ask you to allow it." };
+  }
+  return { badge: "needs your password", title: "This step runs as root through the helper." };
+}
 
 /** A step as one line for the dialog: the program and its arguments. */
 function commandLine(step: Step): string {
@@ -49,18 +68,24 @@ export function promptCount(steps: Step[]): number {
   return count;
 }
 
-function promptSentence(count: number): string {
-  if (count === 0) return "Nothing here needs your password.";
-  if (count === 1) return "You will be asked for your password once.";
-  return `You may be asked for your password ${count} times: once for each group of steps marked below.`;
+/**
+ * The sentence under the step list: how many times the user will be asked to
+ * approve something. On Windows that approval is UAC's "allow this", never a
+ * password, since the window has no polkit or AUR builds asking for one there.
+ */
+function promptSentence(count: number, platform: "linux" | "windows" | undefined): string {
+  const word = isWindows(platform) ? "to allow this" : "for your password";
+  if (count === 0) return isWindows(platform) ? "Nothing here needs Administrator." : "Nothing here needs your password.";
+  if (count === 1) return `You will be asked ${word} once.`;
+  return `You may be asked ${word} ${count} times: once for each group of steps marked below.`;
 }
 
-function StepRow({ step }: { step: Step }) {
+function StepRow({ step, elevated }: { step: Step; elevated: { badge: string; title: string } }) {
   return (
     <li className="bk-plan-step">
       <div className="bk-plan-step-head">
         <span className="bk-plan-step-title">{step.title}</span>
-        {step.needs_root ? <Badge title="This step runs as root through the helper.">needs your password</Badge> : null}
+        {step.needs_root ? <Badge title={elevated.title}>{elevated.badge}</Badge> : null}
         {asksItself(step) ? <Badge title={`${step.command.program} asks for the password itself for this step.`}>asks for your password</Badge> : null}
       </div>
       <div className="bk-plan-step-cmd" title={commandLine(step)}>
@@ -95,11 +120,13 @@ export function FlowDialog() {
   const starting = useFlow((s) => s.starting);
   const confirm = useFlow((s) => s.confirm);
   const cancel = useFlow((s) => s.cancel);
+  const platform = useShell((s) => s.system?.platform);
   if (!open) return null;
 
   const verb = verbFor(ops);
   const steps = preview?.plan.steps ?? [];
   const prompts = promptCount(steps);
+  const elevated = elevatedCopy(platform);
   const removes = removalSentence(ops, steps);
   const disabledReason = error ?? (preview ? null : "The steps are still being worked out.");
 
@@ -140,14 +167,14 @@ export function FlowDialog() {
         {preview ? (
           <ul className="bk-plan-steps" aria-label="Steps">
             {steps.map((step, i) => (
-              <StepRow key={i} step={step} />
+              <StepRow key={i} step={step} elevated={elevated} />
             ))}
           </ul>
         ) : error ? null : (
           <StepSkeleton />
         )}
         {preview ? (
-          <p className="bk-dim bk-small">{promptSentence(prompts)}</p>
+          <p className="bk-dim bk-small">{promptSentence(prompts, platform)}</p>
         ) : null}
       </div>
     </Dialog>

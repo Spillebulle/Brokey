@@ -10,7 +10,9 @@
 //! 2 when the arguments were wrong.
 
 use crate::commands::{logic, selfupdate_adapter, sentence};
-use brokey_core::{App, Op, PackageKind, PackageRef, Plan, Query, SourceKind, SourceStatus, Store};
+use brokey_core::{
+    App, Op, PackageKind, PackageRef, Plan, Platform, Query, SourceKind, SourceStatus, Store,
+};
 use std::io::IsTerminal;
 
 pub const USAGE: &str = "\
@@ -531,19 +533,49 @@ fn plan(args: &[String]) -> i32 {
     };
     print!(
         "{}",
-        plan_text(&plan, &logic::notices(&store, &ops), terminal_width())
+        plan_text(
+            &plan,
+            &logic::notices(&store, &ops),
+            store.system.platform,
+            terminal_width()
+        )
     );
     0
 }
 
+/// Who a privileged step runs as, for the summary sentence: there is no root
+/// on Windows, only Administrator, and UAC asks the user to allow the step
+/// rather than asking for a password.
+fn elevated_word(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Linux => "root",
+        Platform::Windows => "Administrator",
+    }
+}
+
+/// The same word, for the table header, which is title case throughout.
+/// "Administrator" is already the right case; "root" is not.
+fn elevated_header(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Linux => "Root",
+        Platform::Windows => "Administrator",
+    }
+}
+
 /// What `plan` prints: the steps as a table and a count, or that there is
 /// nothing to do, then every notice.
-pub fn plan_text(plan: &Plan, notices: &[String], width: Option<usize>) -> String {
+pub fn plan_text(
+    plan: &Plan,
+    notices: &[String],
+    platform: Platform,
+    width: Option<usize>,
+) -> String {
     let mut out = String::new();
+    let elevated = elevated_word(platform);
     if plan.steps.is_empty() {
         out.push_str("Nothing to do. Everything asked for is already in place.\n");
     } else {
-        let mut table = Table::new(&["#", "Source", "Root", "Step", "Command"]);
+        let mut table = Table::new(&["#", "Source", elevated_header(platform), "Step", "Command"]);
         for (i, step) in plan.steps.iter().enumerate() {
             let mut command = vec![step.command.program.clone()];
             command.extend(step.command.args.iter().cloned());
@@ -558,7 +590,7 @@ pub fn plan_text(plan: &Plan, notices: &[String], width: Option<usize>) -> Strin
         out.push_str(&table.render(width));
         let root = plan.steps.iter().filter(|s| s.needs_root).count();
         out.push_str(&format!(
-            "{} {}, {} {} root. Nothing was run.\n",
+            "{} {}, {} {} {elevated}. Nothing was run.\n",
             plan.steps.len(),
             plural(plan.steps.len(), "step", "steps"),
             root,
@@ -1086,6 +1118,7 @@ Firmware  no                            Firmware is not installed.
         let text = plan_text(
             &plan,
             &["Flatpak is not installed. It is installed and Flathub is added.".to_string()],
+            Platform::Linux,
             None,
         );
         assert_eq!(
@@ -1106,9 +1139,46 @@ Note: Flatpak is not installed. It is installed and Flathub is added.
                     steps: Vec::new()
                 },
                 &[],
+                Platform::Linux,
                 None
             ),
             "Nothing to do. Everything asked for is already in place.\n"
+        );
+    }
+
+    /// Windows has no root: the same plan says Administrator instead, in
+    /// both the column header and the summary.
+    #[test]
+    fn a_windows_plan_says_administrator_not_root() {
+        let plan = Plan {
+            id: "p".into(),
+            ops: vec![Op::Remove {
+                package: PackageRef {
+                    source: SourceKind::Arp,
+                    id: r"HKLM\7-Zip".to_string(),
+                },
+            }],
+            steps: vec![brokey_core::Step {
+                source: SourceKind::Arp,
+                title: "Removing 7-Zip".to_string(),
+                command: brokey_core::Command {
+                    program: r"C:\Program Files\7-Zip\Uninstall.exe".to_string(),
+                    args: vec!["/S".to_string()],
+                    env: Vec::new(),
+                    cwd: None,
+                },
+                needs_root: true,
+                weight: 1,
+            }],
+        };
+        let text = plan_text(&plan, &[], Platform::Windows, None);
+        assert!(
+            text.contains("Administrator"),
+            "the header and summary say Administrator: {text}"
+        );
+        assert!(
+            !text.contains("root"),
+            "root is a Linux word and should not appear on Windows: {text}"
         );
     }
 
