@@ -154,11 +154,32 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 ///
 /// A removal from Add/Remove Programs is not checkable that way. The
 /// command is whatever the installer wrote into the registry years ago, so
-/// no requirement about its shape would be honest. It is admitted because
-/// the step came from the Add/Remove Programs source, which read it out of
-/// the registry rather than inventing it, and because the confirm dialog
-/// shows the user that exact command line before anything runs. Widening
-/// this is a deliberate edit here with a test beside it.
+/// no requirement about its *shape* would be honest. The only honest check
+/// is provenance: is this command one the registry actually records?
+///
+/// **Today that provenance is trusted, not verified, and this is the
+/// weakest point of the Windows list.** The arm below admits any program
+/// with any arguments as long as the step says its source is
+/// `SourceKind::Arp` — and `source` is an ordinary field of a `Step`, so it
+/// is whatever the plan says it is. Against a forged plan this reduces to
+/// "label the step `Arp` and run anything as Administrator". The Linux half
+/// of this file has no such branch: it checks program and arguments for
+/// every step whatever the source claims.
+///
+/// What holds it up meanwhile is narrower than it looks: the plan reaches
+/// the helper over a pipe whose DACL admits only this user and
+/// Administrators, and the confirm dialog shows the user the exact command
+/// line before anything runs. Neither is a substitute for checking.
+///
+/// This is fixed where the fix belongs, in the helper that enforces the
+/// list: `arp::read` and `arp::removal_step` are public, so the set of
+/// removal commands the registry genuinely records can be computed and
+/// carried in `Allowed`, the way `package_dirs` already is, and compared
+/// against. Only `HKLM` removals ever arrive here — `removal_step` sets
+/// `needs_root` from `Hive::needs_elevation`, which is false for `HKCU` —
+/// so an elevated helper reading `HKLM` sees exactly the right set.
+///
+/// Widening this is a deliberate edit here with a test beside it.
 #[cfg(windows)]
 const WINGET_VERBS: [&str; 3] = ["install", "upgrade", "uninstall"];
 

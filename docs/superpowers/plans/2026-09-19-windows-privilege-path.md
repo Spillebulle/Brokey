@@ -1249,6 +1249,148 @@ git add crates/brokey-helper/
 git commit -m "Helper: a Windows body that answers on the pipe"
 ```
 
+- [ ] **Step 6: Verify the Add/Remove Programs provenance instead of trusting it**
+
+This closes the weakest point of the Windows closed list, and it is done here because the helper is the thing that enforces the list and the thing that can read the registry.
+
+`allow.rs`'s `check_step` currently admits **any** program with any arguments when `step.source` is `SourceKind::Arp`. `source` is an ordinary field of a `Step`, so against a forged plan that reduces to "label the step `Arp` and run anything as Administrator". The Linux half checks program and arguments for every step regardless of source. The doc comment above that arm already says all of this; your job is to make it stop being true.
+
+The mechanism already exists: `Allowed` is how the closed list receives facts it cannot derive, exactly as `package_dirs` carries the directories a package file may come from.
+
+Everything needed is already public and was checked: `arp::read() -> Vec<RawEntry>`, `arp::removal_step(&RawEntry) -> Option<Step>`, `Hive::needs_elevation()`, and `model::Command` derives `PartialEq` and `Eq`.
+
+1. Give `Allowed` a Windows field:
+
+```rust
+/// The removal commands the registry actually records, for the one kind
+/// of step whose shape cannot be checked. Empty means nothing from
+/// Add/Remove Programs may run, which is the safe direction to fail.
+#[cfg(windows)]
+pub removals: Vec<crate::model::Command>,
+```
+
+  Update every construction of `Allowed` so it still compiles, keeping the Linux ones byte-identical.
+
+2. Add the constructor that fills it, beside `system()` and `for_home`:
+
+```rust
+/// The system list plus the removal commands `HKLM` records. Only those
+/// ever reach the helper: `removal_step` sets `needs_root` from
+/// `Hive::needs_elevation`, which is false for `HKCU`, so a per-user
+/// removal is a session step and is never validated here at all. That is
+/// also why an elevated helper reading `HKLM` sees the right set despite
+/// `HKCU` being the administrator's under elevation.
+#[cfg(windows)]
+pub fn with_registered_removals() -> Allowed {
+    let removals = crate::sources::windows::arp::read()
+        .iter()
+        .filter(|e| e.hive.needs_elevation())
+        .filter_map(crate::sources::windows::arp::removal_step)
+        .map(|step| step.command)
+        .collect();
+    Allowed {
+        removals,
+        ..Allowed::system()
+    }
+}
+```
+
+  Check `arp`'s module path and whether it is `pub` from `sources::windows` before writing that path; use whatever is real.
+
+3. Change the arm in `check_step`:
+
+```rust
+SourceKind::Arp => {
+    if allowed.removals.contains(&step.command) {
+        Ok(())
+    } else {
+        Err(not_allowed(&step.command.program))
+    }
+}
+```
+
+  and delete the `let _ = allowed;` line, which now has a real use.
+
+4. **Call it from both sides.** The helper's `allowed()` uses it, and so must the runner: `execute_inner` validates every root run against `self.allowed` *before* the first prompt, so a runner left with an empty `removals` would refuse every removal before the user was ever asked. Find where the runner's `Allowed` is built and give it the same constructor on Windows.
+
+5. Replace the test `an_add_remove_programs_removal_is_allowed`. It currently passes for any input whatsoever, because the arm was an unconditional `Ok`, so it cannot catch a regression. It becomes two tests:
+
+```rust
+/// A removal the registry records is allowed.
+#[test]
+fn a_registered_removal_is_allowed() {
+    let step = step_from(
+        SourceKind::Arp,
+        r"C:\Program Files\Thing\unins000.exe",
+        &["/SILENT"],
+    );
+    let allowed = Allowed {
+        removals: vec![step.command.clone()],
+        ..Allowed::system()
+    };
+    assert_eq!(validate_with(&plan_of(vec![step]), &allowed), Ok(()));
+}
+
+/// A command the registry does not record is refused, however the step
+/// labels itself. This is the forged-plan case, and before this check
+/// existed it ran as Administrator.
+#[test]
+fn an_unregistered_removal_is_refused_even_when_labelled_arp() {
+    let registered = step_from(
+        SourceKind::Arp,
+        r"C:\Program Files\Thing\unins000.exe",
+        &["/SILENT"],
+    );
+    let forged = step_from(
+        SourceKind::Arp,
+        "powershell.exe",
+        &["-Command", "whoami"],
+    );
+    let allowed = Allowed {
+        removals: vec![registered.command],
+        ..Allowed::system()
+    };
+    let err = validate_with(&plan_of(vec![forged]), &allowed)
+        .expect_err("the registry does not record this command");
+    assert!(err.contains("powershell.exe"), "{err}");
+}
+
+/// Same program, different arguments, is a different command. An
+/// uninstaller that takes a path to delete must not be reachable with a
+/// path of someone else's choosing.
+#[test]
+fn a_registered_program_with_other_arguments_is_refused() {
+    let registered = step_from(
+        SourceKind::Arp,
+        r"C:\Program Files\Thing\unins000.exe",
+        &["/SILENT"],
+    );
+    let twisted = step_from(
+        SourceKind::Arp,
+        r"C:\Program Files\Thing\unins000.exe",
+        &["/SILENT", "C:\\Windows"],
+    );
+    let allowed = Allowed {
+        removals: vec![registered.command],
+        ..Allowed::system()
+    };
+    assert!(validate_with(&plan_of(vec![twisted]), &allowed).is_err());
+}
+```
+
+6. Update the doc comment above the arm: the paragraph beginning "**Today that provenance is trusted, not verified**" describes the state you have just ended. Say what is true now — the command is compared against what the registry records, and an empty list refuses everything — and keep the note about `HKCU` removals never arriving here, which stays true and is not obvious.
+
+- [ ] **Step 7: Run and commit the tightening**
+
+Run: `cargo test --workspace && cargo clippy --workspace --all-targets`
+
+Expected: PASS, clean, with the three new tests passing and the old always-true one gone.
+
+```bash
+git add crates/brokey-core/src/transaction/allow.rs crates/brokey-helper/ crates/brokey-core/src/transaction/runner.rs
+git commit -m "Allow: check that a removal is one the registry records"
+```
+
 ---
 
 ### Task 9: Let the application run a plan on Windows, and say the right thing while it does
