@@ -210,7 +210,13 @@ pub enum OpKind {
 /// terminal: a prompt would hang the plan rather than ask anybody anything.
 /// `--exact` because the id is exact and a near match would install something
 /// the user did not choose.
-pub fn operation_step(kind: OpKind, id: &str) -> Step {
+///
+/// `program` is the full path to `winget.exe`, resolved by the caller. It is
+/// a parameter rather than a lookup in here so that this stays a pure
+/// function of its arguments, and so that resolution happens once, in the
+/// one process whose environment is the right one to resolve it in. See
+/// [`winget_program`].
+pub fn operation_step(kind: OpKind, id: &str, program: &str) -> Step {
     let (verb, title) = match kind {
         OpKind::Install => ("install", format!("Installing {id}")),
         OpKind::Update => ("upgrade", format!("Updating {id}")),
@@ -233,7 +239,7 @@ pub fn operation_step(kind: OpKind, id: &str) -> Step {
         source: SourceKind::Winget,
         title,
         command: Command {
-            program: "winget.exe".to_string(),
+            program: program.to_string(),
             args,
             env: Vec::new(),
             cwd: None,
@@ -252,6 +258,47 @@ pub fn operation_step(kind: OpKind, id: &str) -> Step {
 #[cfg(windows)]
 pub fn winget_exe() -> Option<std::path::PathBuf> {
     crate::system::windows::which("winget")
+}
+
+/// The program a winget step names: the full path to `winget.exe`.
+///
+/// Resolution happens here, in the unelevated process, and never in the
+/// helper. `which` reads `PATH` from the calling process's own environment,
+/// and winget is reached through a per-user app execution alias in
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps`. When elevation is answered with
+/// an administrator's credentials the elevated helper has that
+/// administrator's profile, so a bare name looked up there would search the
+/// wrong profile and find nothing, or something else. The helper therefore
+/// searches nothing at all and refuses a program that is not a full path;
+/// this is the end that does the looking, because this is the end whose
+/// environment is the user's.
+///
+/// The alias is handed over as it stands, not canonicalised. It is a
+/// reparse point Windows resolves when the process starts, and opening it
+/// to read its target is refused: `std::fs::canonicalize` on it fails with
+/// "the file cannot be accessed by the system" (error 1920), checked on the
+/// development machine. The real executable it leads to lives under
+/// `C:\Program Files\WindowsApps`, which is not readable either. So the
+/// alias path is the most concrete thing there is, and it is already
+/// absolute, which is what the rule asks for.
+///
+/// When winget is not installed there is nothing to resolve and the bare
+/// name stands in. `status()` already reports the source unavailable in
+/// that case, so no plan should reach here; if one does, the helper refuses
+/// it by the absolute-path rule rather than searching for it.
+#[cfg(windows)]
+pub fn winget_program() -> String {
+    winget_exe()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "winget.exe".to_string())
+}
+
+/// There is no `winget.exe` to find off Windows, and `sources::all` never
+/// selects this source there, so nothing resolves: the bare name is what a
+/// step would carry, and the Linux closed list refuses it.
+#[cfg(not(windows))]
+pub fn winget_program() -> String {
+    "winget.exe".to_string()
 }
 
 const BY_CODE_SQL: &str = "
@@ -461,21 +508,24 @@ impl Source for Winget {
 
     fn plan(&self, op: &crate::model::Op) -> Result<Vec<Step>> {
         use crate::model::Op;
+        // Resolved once, here, where the environment is the user's own. The
+        // elevated helper is handed the result and searches nothing.
+        let program = winget_program();
         let step = match op {
             Op::Install { package } if package.source == SourceKind::Winget => {
-                operation_step(OpKind::Install, &package.id)
+                operation_step(OpKind::Install, &package.id, &program)
             }
             Op::Update { package } if package.source == SourceKind::Winget => {
-                operation_step(OpKind::Update, &package.id)
+                operation_step(OpKind::Update, &package.id, &program)
             }
             Op::Remove { package } if package.source == SourceKind::Winget => {
-                operation_step(OpKind::Remove, &package.id)
+                operation_step(OpKind::Remove, &package.id, &program)
             }
             Op::UpdateAll { source } if *source == SourceKind::Winget => Step {
                 source: SourceKind::Winget,
                 title: "Updating everything winget can".to_string(),
                 command: Command {
-                    program: "winget.exe".to_string(),
+                    program: program.clone(),
                     args: vec![
                         "upgrade".to_string(),
                         "--all".to_string(),
@@ -695,25 +745,50 @@ mod tests {
         assert!(!is_sha256("aa' -and $false -and 'bb"));
     }
 
+    /// A full path to winget, as the caller now resolves it. The shape is
+    /// the real one: an app execution alias under the user's own profile.
+    const WINGET: &str = r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\winget.EXE";
+
     /// Every operation is non-interactive, because the helper has no terminal
     /// and a prompt would hang the plan rather than ask anyone anything.
     #[test]
     fn every_operation_is_silent_and_pre_agreed() {
         for kind in [OpKind::Install, OpKind::Update, OpKind::Remove] {
-            let s = operation_step(kind, "Valve.Steam");
+            let s = operation_step(kind, "Valve.Steam", WINGET);
             let args = s.command.args.join(" ");
             assert!(args.contains("--silent"), "{args}");
             assert!(args.contains("--disable-interactivity"), "{args}");
             assert!(args.contains("--accept-source-agreements"), "{args}");
-            assert_eq!(s.command.program, "winget.exe");
+            assert_eq!(s.command.program, WINGET);
         }
+    }
+
+    /// A step carries the full path its caller resolved, not a bare name,
+    /// and the closed list still recognises it. The helper searches for
+    /// nothing, so a bare name would be refused there; this is the end that
+    /// makes the path concrete.
+    #[test]
+    fn a_step_carries_the_resolved_path() {
+        let s = operation_step(OpKind::Install, "Valve.Steam", WINGET);
+        assert!(
+            std::path::Path::new(&s.command.program).is_absolute(),
+            "{}",
+            s.command.program
+        );
+        assert_eq!(
+            std::path::Path::new(&s.command.program)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase()),
+            Some("winget.exe".to_string()),
+            "the closed list compares the file name, so this must still be winget"
+        );
     }
 
     /// An install names the package exactly. A near match would install
     /// something the user did not choose.
     #[test]
     fn an_install_is_exact_and_names_the_id() {
-        let s = operation_step(OpKind::Install, "Valve.Steam");
+        let s = operation_step(OpKind::Install, "Valve.Steam", WINGET);
         assert_eq!(s.command.args[0], "install");
         assert!(s.command.args.contains(&"--exact".to_string()));
         assert!(s.command.args.contains(&"Valve.Steam".to_string()));
@@ -782,7 +857,7 @@ mod tests {
     /// fail the step rather than be ignored. Checked against winget 1.30.140.
     #[test]
     fn a_removal_does_not_accept_a_package_agreement() {
-        let s = operation_step(OpKind::Remove, "Valve.Steam");
+        let s = operation_step(OpKind::Remove, "Valve.Steam", WINGET);
         assert_eq!(s.command.args[0], "uninstall");
         assert!(
             !s.command
