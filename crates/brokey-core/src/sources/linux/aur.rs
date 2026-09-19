@@ -29,10 +29,10 @@
 //! Setting the variable in the step's environment was tried first and does
 //! nothing.
 
+use super::alpmdb::{self, Desc, LocalDb, SyncDb, is_package_name, read_includes};
 use crate::appstream::Catalogue;
 use crate::http::Client;
 use crate::model::*;
-use crate::sources::alpmdb::{self, Desc, LocalDb, SyncDb, is_package_name, read_includes};
 use crate::system::{self, Dirs};
 use crate::vercmp::is_newer;
 use crate::{Error, Op, Query, Result, Source};

@@ -143,7 +143,19 @@ async fn launcher_notices(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<(brokey_core::SourceKind, String)>, String> {
     let state = state.inner().clone();
-    blocking(move || Ok(state.store().launcher_notices())).await
+    blocking(move || {
+        #[cfg(unix)]
+        {
+            Ok(state.store().launcher_notices())
+        }
+        #[cfg(windows)]
+        {
+            // No source lists applications a session cannot see yet.
+            let _ = state;
+            Ok(Vec::new())
+        }
+    })
+    .await
 }
 
 #[tauri::command]
@@ -246,13 +258,18 @@ pub fn sentence(message: &str) -> String {
 pub mod logic {
     use super::{PlanPreview, SelfUpdate, selfupdate_adapter, sentence};
     use crate::settings::Settings;
-    use crate::state::{AppState, PlanState, SELF_UPDATE_MAX_AGE, UPDATES_MAX_AGE};
+    #[cfg(unix)]
+    use crate::state::PlanState;
+    use crate::state::{AppState, SELF_UPDATE_MAX_AGE, UPDATES_MAX_AGE};
+    #[cfg(unix)]
+    use brokey_core::Plan;
+    #[cfg(unix)]
     use brokey_core::transaction::runner::Runner;
     use brokey_core::updates::UpdateList;
     use brokey_core::{
-        DriversReport, Event, Op, Package, PackageRef, Plan, Query, SearchResult, SourceStatus,
-        Store,
+        DriversReport, Event, Op, Package, PackageRef, Query, SearchResult, SourceStatus, Store,
     };
+    #[cfg(unix)]
     use std::sync::Arc;
 
     /// The most results a source is asked for. Above this the grouper and
@@ -377,10 +394,19 @@ pub mod logic {
     }
 
     pub fn launch_targets(state: &AppState, refs: &[PackageRef]) -> Vec<Option<String>> {
-        let store = state.store();
-        refs.iter()
-            .map(|r| store.launcher(r).map(|l| l.describe()))
-            .collect()
+        #[cfg(unix)]
+        {
+            let store = state.store();
+            refs.iter()
+                .map(|r| store.launcher(r).map(|l| l.describe()))
+                .collect()
+        }
+        #[cfg(windows)]
+        {
+            // No source opens anything on Windows yet; see `open_app`.
+            let _ = state;
+            refs.iter().map(|_| None).collect()
+        }
     }
 
     /// Opening an application is not a transaction, so it does not go
@@ -390,18 +416,34 @@ pub mod logic {
     /// for the application's lifetime (`flatpak run`) is started in a
     /// process group of its own and left to run, with a thread reaping it.
     pub fn open_app(state: &AppState, package: &PackageRef) -> Result<(), String> {
-        let store = state.store();
-        let Some(launch) = store.launcher(package) else {
-            return Err(format!(
-                "{} is not something Brokey can open. It may not be installed, or it has no application to start.",
-                package.id
-            ));
-        };
-        start(&launch)
+        #[cfg(unix)]
+        {
+            let store = state.store();
+            let Some(launch) = store.launcher(package) else {
+                return not_something_to_open(package);
+            };
+            start(&launch)
+        }
+        #[cfg(windows)]
+        {
+            let _ = state;
+            not_something_to_open(package)
+        }
+    }
+
+    /// The sentence for a package with nothing to open: not installed
+    /// through a source that has a launcher, or (Windows, for now) no
+    /// source has one at all.
+    fn not_something_to_open(package: &PackageRef) -> Result<(), String> {
+        Err(format!(
+            "{} is not something Brokey can open. It may not be installed, or it has no application to start.",
+            package.id
+        ))
     }
 
     /// Start what a [`brokey_core::launch::Launch`] describes, detached from
     /// the store's own process.
+    #[cfg(unix)]
     pub fn start(launch: &brokey_core::launch::Launch) -> Result<(), String> {
         use std::os::unix::process::CommandExt;
         let spec = launch.command();
@@ -491,7 +533,17 @@ pub mod logic {
                 "There is nothing to do. Everything asked for is already in place.".to_string(),
             );
         }
-        Ok(start_plan(state, store, plan, emit))
+        #[cfg(unix)]
+        {
+            Ok(start_plan(state, store, plan, emit))
+        }
+        #[cfg(windows)]
+        {
+            // The runner (pkexec, the helper's closed list) is Linux only
+            // for now; a later plan gives Windows its own privilege path.
+            let _ = (state, store, plan, emit);
+            Err("Running a plan is not available on Windows yet.".to_string())
+        }
     }
 
     /// Record the plan and run it on a thread of its own. The thread holds a
@@ -501,6 +553,12 @@ pub mod logic {
     /// plan has reset the state's store in the meantime. Every event is
     /// appended to the plan's record before it is sent, so a page that
     /// reacts to an event by asking `active_plans` already sees it there.
+    ///
+    /// Linux only: it is built on the runner (`pkexec`, the helper), which
+    /// has no Windows counterpart yet. `run_plan` and `self_update_apply`
+    /// are the callers, and each has its own Windows answer that never
+    /// reaches here.
+    #[cfg(unix)]
     pub fn start_plan(
         state: &AppState,
         store: Arc<Store>,
@@ -573,6 +631,7 @@ pub mod logic {
         emit(&event);
     }
 
+    #[cfg(unix)]
     fn run_to_completion(
         state: &AppState,
         store: &Store,
@@ -629,7 +688,15 @@ pub mod logic {
         if plan.steps.is_empty() {
             return Err("The update has no steps to run on this machine. The check says how to get it instead.".to_string());
         }
-        Ok(start_plan(state, state.store(), plan, emit))
+        #[cfg(unix)]
+        {
+            Ok(start_plan(state, state.store(), plan, emit))
+        }
+        #[cfg(windows)]
+        {
+            let _ = (state, plan, emit);
+            Err("Applying a self-update is not available on Windows yet.".to_string())
+        }
     }
 
     /// Remember that this edition does not belong to its group.
@@ -870,6 +937,10 @@ mod tests {
         assert_eq!(refreshes(), 2, "a forced check always refreshes");
     }
 
+    // pacman is always a source on Linux, whether or not it is installed;
+    // on Windows there is no source at all until Task 8, so this has
+    // nothing to preview against yet.
+    #[cfg(unix)]
     #[test]
     fn a_preview_is_a_dry_run_with_notices() {
         let state = scratch_state("preview");
@@ -883,11 +954,14 @@ mod tests {
         );
     }
 
+    // The AUR is always a source on Linux (its refresh is a no-op by
+    // design, its index being the RPC), so this reaches "nothing to do";
+    // on Windows there is no AUR source until Task 8, so it reaches "is
+    // not a source on this machine" instead.
+    #[cfg(unix)]
     #[test]
     fn a_plan_with_nothing_to_do_is_refused_before_it_starts() {
         let state = scratch_state("empty");
-        // Refreshing the AUR is a no-op by design (its index is the RPC), so
-        // the plan is empty on every machine.
         let err = run_plan(
             &state,
             vec![Op::Refresh {
@@ -900,6 +974,8 @@ mod tests {
         assert!(state.plans().is_empty());
     }
 
+    // Exercises `start_plan`, which is built on the Linux-only runner.
+    #[cfg(unix)]
     #[test]
     fn a_started_plan_settles_and_tells_the_page_when_the_runner_stops() {
         let state = state_with("start", empty_store());

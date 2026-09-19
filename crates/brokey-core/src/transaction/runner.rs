@@ -16,14 +16,13 @@
 //! helper stops after the step that is running; the events say so.
 
 use crate::model::*;
+use crate::transaction::CancelToken;
 use crate::transaction::allow::{self, Allowed};
 use crate::transaction::progress::{self, ProgressParser};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as Process, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -35,22 +34,6 @@ pub trait Sink: Send {
 impl<F: FnMut(Event) + Send> Sink for F {
     fn event(&mut self, event: Event) {
         self(event)
-    }
-}
-
-/// Shared with whoever may stop the run. Cloning gives the same token.
-#[derive(Clone, Debug, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
-
-impl CancelToken {
-    pub fn new() -> CancelToken {
-        CancelToken::default()
-    }
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
     }
 }
 

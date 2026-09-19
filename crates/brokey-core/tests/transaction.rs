@@ -11,6 +11,8 @@
 //! The fake helper needs `python3`, which every machine this store targets
 //! has.
 
+#![cfg(unix)]
+
 use brokey_core::model::*;
 use brokey_core::transaction::allow;
 use brokey_core::transaction::progress::{Reading, parser_for};

@@ -1,10 +1,11 @@
-//! What machine this is: the distribution, the desktop, which tools exist
-//! and where things live. Everything here is read once and cheap.
+//! What machine this is, on Linux: the distribution, the desktop, which
+//! tools exist and where things live.
 
 use crate::model::SystemInfo;
 use std::path::{Path, PathBuf};
 
 /// Read `/etc/os-release` and the session environment.
+#[cfg(unix)]
 pub fn detect() -> SystemInfo {
     let text = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
     from_os_release(&text)
@@ -48,6 +49,7 @@ pub fn from_os_release(text: &str) -> SystemInfo {
 }
 
 /// The first directory on `PATH` holding an executable of that name.
+#[cfg(unix)]
 pub fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
@@ -55,47 +57,12 @@ pub fn which(name: &str) -> Option<PathBuf> {
         .find(|p| is_executable(p))
 }
 
-fn is_executable(p: &Path) -> bool {
+#[cfg(unix)]
+pub fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p)
         .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
-}
-
-/// Run a program and return its stdout as text, or the sentence that
-/// explains why not. For read-only queries of tools like `flatpak` and
-/// `fwupdmgr`; never for anything that changes the machine (that is a Step).
-pub fn run(program: &str, args: &[&str]) -> crate::Result<String> {
-    let out = std::process::Command::new(program)
-        .args(args)
-        .env("LC_ALL", "C.UTF-8")
-        .output()
-        .map_err(|e| crate::Error::new(format!("Could not run {program}: {e}.")))?;
-    if !out.status.success() {
-        return Err(crate::Error::new(run_failure(
-            program,
-            args.first().copied().unwrap_or(""),
-            &String::from_utf8_lossy(&out.stderr),
-        )));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-/// The sentence for a tool that exited with an error: the program, its
-/// verb and the first line it printed. A full sentence, because three
-/// callers show it to the user as it is.
-fn run_failure(program: &str, verb: &str, stderr: &str) -> String {
-    let first = stderr.lines().next().unwrap_or("").trim();
-    let verb = if verb.is_empty() {
-        String::new()
-    } else {
-        format!(" {verb}")
-    };
-    if first.is_empty() {
-        format!("{program}{verb} failed.")
-    } else {
-        format!("{program}{verb} failed: {}.", first.trim_end_matches('.'))
-    }
 }
 
 /// An NVIDIA GPU is present, judged from sysfs vendor ids (0x10de) so no
@@ -193,6 +160,9 @@ mod tests {
         assert_eq!(s.pretty_name, "linux");
     }
 
+    // Only the closed list (`transaction::allow`) is Linux-only here; the
+    // paths themselves are plain strings. Gated because the list is.
+    #[cfg(unix)]
     #[test]
     fn the_cache_is_where_the_helper_allows_package_files_from() {
         let home = Path::new("/home/me");
@@ -206,24 +176,5 @@ mod tests {
             cache_dir_for(Path::new("/")),
             PathBuf::from("/.cache/brokey")
         );
-    }
-
-    #[test]
-    fn run_failures_are_sentences() {
-        assert_eq!(
-            run_failure(
-                "fwupdmgr",
-                "get-devices",
-                "error: failed to connect to daemon\nmore\n"
-            ),
-            "fwupdmgr get-devices failed: error: failed to connect to daemon."
-        );
-        assert_eq!(
-            run_failure("flatpak", "remotes", "error: Unable to load summary.\n"),
-            "flatpak remotes failed: error: Unable to load summary.",
-            "one full stop, not two"
-        );
-        assert_eq!(run_failure("chwd", "-i", "\n"), "chwd -i failed.");
-        assert_eq!(run_failure("chwd", "", ""), "chwd failed.");
     }
 }

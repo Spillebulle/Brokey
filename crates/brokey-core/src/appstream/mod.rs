@@ -424,6 +424,9 @@ fn read_file_memoised(
 mod tests {
     use super::*;
 
+    // The paths are Unix ones (a leading `/` is not `is_absolute()` on
+    // Windows), and Flatpak itself does not exist there yet.
+    #[cfg(unix)]
     #[test]
     fn extra_roots_splits_on_colons_and_drops_relative_entries() {
         assert!(extra_roots(None).is_empty());
@@ -434,6 +437,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn flatpak_roots_start_with_the_system_installation() {
         let roots = flatpak_roots();

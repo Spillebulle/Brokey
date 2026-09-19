@@ -47,20 +47,22 @@ pub fn parser_for(program: &str) -> Box<dyn ProgressParser> {
         // The Flatpak source owns its output format: a percentage line when
         // flatpak draws progress, or one "Installing <ref>" line per
         // operation under --noninteractive, which gives a sentence and no
-        // fraction.
+        // fraction. Linux only, along with the source itself.
+        #[cfg(unix)]
         "flatpak" => Box::new(FnParser(flatpak_line)),
         _ => Box::new(Generic),
     }
 }
 
+#[cfg(unix)]
 fn flatpak_line(line: &str) -> Option<Reading> {
-    if let Some((fraction, message)) = crate::sources::flatpak::parse_progress(line) {
+    if let Some((fraction, message)) = crate::sources::linux::flatpak::parse_progress(line) {
         return Some(Reading {
             fraction: Some(fraction),
             message: Some(message),
         });
     }
-    crate::sources::flatpak::parse_operation(line).map(Reading::message)
+    crate::sources::linux::flatpak::parse_operation(line).map(Reading::message)
 }
 
 /// Adapts a plain `fn(&str) -> Option<Reading>` so a source can ship its

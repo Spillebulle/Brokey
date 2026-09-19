@@ -13,6 +13,7 @@ pub mod appstream;
 pub mod drivers;
 pub mod group;
 pub mod http;
+#[cfg(unix)]
 pub mod launch;
 pub mod model;
 pub mod selfupdate;
@@ -163,6 +164,7 @@ pub trait Source: Send + Sync {
     /// the package is not installed through this source or has nothing a
     /// person opens (a library, a font, a command-line tool). Never runs
     /// anything; see [`launch`].
+    #[cfg(unix)]
     fn launcher(&self, _id: &str) -> Option<launch::Launch> {
         None
     }
@@ -170,6 +172,7 @@ pub trait Source: Send + Sync {
     /// A sentence when this source's applications are installed but the
     /// running desktop session cannot list them (Flatpak or snapd set up
     /// after the session started). `None` when there is nothing to say.
+    #[cfg(unix)]
     fn launcher_notice(&self) -> Option<String> {
         None
     }
@@ -224,11 +227,13 @@ impl Store {
     }
 
     /// How to open an installed package, asked of its own source.
+    #[cfg(unix)]
     pub fn launcher(&self, package: &PackageRef) -> Option<launch::Launch> {
         self.source(package.source)?.launcher(&package.id)
     }
 
     /// Every source's launcher notice, in interface order.
+    #[cfg(unix)]
     pub fn launcher_notices(&self) -> Vec<(SourceKind, String)> {
         self.sources
             .iter()

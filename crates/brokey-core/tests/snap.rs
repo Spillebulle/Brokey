@@ -4,7 +4,9 @@
 //! back those files; the one `live_` test talks to the real socket where
 //! there is one.
 
-use brokey_core::sources::snap::{
+#![cfg(unix)]
+
+use brokey_core::sources::linux::snap::{
     self, Presence, Response, ScriptedSnapStore, Snap, SnapInfo, SnapStore, Transport,
 };
 use brokey_core::transaction::allow::{Allowed, check_step};

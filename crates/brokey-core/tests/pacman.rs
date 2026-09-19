@@ -3,8 +3,10 @@
 //! without this machine's pacman. The `live_*` tests read the real
 //! databases and, for the refresh, the real mirrors.
 
+#![cfg(unix)]
+
 use brokey_core::appstream::{Catalogue, Component};
-use brokey_core::sources::pacman::{Pacman, Paths, SKIPPED_FOR_TIME, mirrors};
+use brokey_core::sources::linux::pacman::{Pacman, Paths, SKIPPED_FOR_TIME, mirrors};
 use brokey_core::{Op, PackageKind, PackageRef, Picture, Query, Screenshot, Source, SourceKind};
 use std::fs;
 use std::io::Write;

@@ -4,9 +4,11 @@
 //! these tests also pin which commands those are. The `live_*` tests reach
 //! flathub.org and run only when asked for.
 
+#![cfg(unix)]
+
 use brokey_core::appstream::{Catalogue, Component};
 use brokey_core::http::Client;
-use brokey_core::sources::flatpak::{
+use brokey_core::sources::linux::flatpak::{
     ADD_FLATHUB_NOTICE, FlathubApi, Flatpak, Installation, LiveFlathub, NO_REMOTES, NOT_INSTALLED,
     NOT_INSTALLED_NO_SETUP, NOT_INSTALLED_SEARCHABLE, SETUP_NOTICE, SETUP_SENTENCE,
     ScriptedFlathub, ScriptedRunner, parse_hits, parse_list, parse_operation, parse_progress,

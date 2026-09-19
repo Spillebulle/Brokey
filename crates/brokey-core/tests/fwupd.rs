@@ -1,7 +1,9 @@
 //! The fwupd source against JSON captured from this machine's fwupdmgr
 //! 2.1.7 (`fixtures/fwupd/`), and one live run of the real tool.
 
-use brokey_core::sources::fwupd::{self, Fwupd};
+#![cfg(unix)]
+
+use brokey_core::sources::linux::fwupd::{self, Fwupd};
 use brokey_core::{Op, PackageKind, PackageRef, Query, Source, SourceKind};
 
 const DEVICES: &str = include_str!("fixtures/fwupd/get-devices.json");

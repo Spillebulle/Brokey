@@ -131,7 +131,17 @@ impl Gatherer<'_> {
 /// running session already reads that format's export directory (see
 /// [`crate::launch`]).
 pub fn notices(store: &Store, ops: &[Op]) -> Vec<String> {
-    notices_in(store, ops, &crate::launch::this_session())
+    #[cfg(unix)]
+    {
+        notices_in(store, ops, &crate::launch::this_session())
+    }
+    #[cfg(windows)]
+    {
+        // No format here yet lists its applications by desktop entry, so
+        // there is no session to read. `log_out_notice` answers `None`
+        // itself; the empty session is never inspected.
+        notices_in(store, ops, &[])
+    }
 }
 
 /// [`notices`], for a session reading desktop entries from `session`.
@@ -146,22 +156,32 @@ pub fn notices_in(store: &Store, ops: &[Op], session: &[std::path::PathBuf]) -> 
 /// The sentence after a setup that installs a format's tool, when the
 /// session cannot yet list that format's applications.
 pub fn log_out_notice(kind: SourceKind, session: &[std::path::PathBuf]) -> Option<String> {
-    let (label, dirs) = match kind {
-        SourceKind::Flatpak => ("Flatpak", crate::sources::flatpak::export_dirs()),
-        SourceKind::Snap => (
-            "Snap",
-            vec![std::path::PathBuf::from(
-                crate::sources::snap::SNAP_DESKTOP_DIR,
-            )],
-        ),
-        _ => return None,
-    };
-    if dirs.iter().any(|d| crate::launch::sees(session, d)) {
-        return None;
+    #[cfg(unix)]
+    {
+        let (label, dirs) = match kind {
+            SourceKind::Flatpak => ("Flatpak", crate::sources::linux::flatpak::export_dirs()),
+            SourceKind::Snap => (
+                "Snap",
+                vec![std::path::PathBuf::from(
+                    crate::sources::linux::snap::SNAP_DESKTOP_DIR,
+                )],
+            ),
+            _ => return None,
+        };
+        if dirs.iter().any(|d| crate::launch::sees(session, d)) {
+            return None;
+        }
+        Some(format!(
+            "Your launcher lists {label} applications only after you log out and back in once. Until then, open them from Brokey."
+        ))
     }
-    Some(format!(
-        "Your launcher lists {label} applications only after you log out and back in once. Until then, open them from Brokey."
-    ))
+    #[cfg(windows)]
+    {
+        // Neither format exists on Windows yet, so there is nothing to
+        // catch up on after a log out.
+        let _ = (kind, session);
+        None
+    }
 }
 
 fn setup_notices(store: &Store, ops: &[Op], session: &[std::path::PathBuf]) -> Vec<String> {
@@ -541,14 +561,23 @@ mod tests {
     /// The notices for a session that already lists every format's
     /// applications, so the tests below do not depend on how the machine
     /// running them was logged in.
+    #[cfg(unix)]
     fn notices(store: &Store, ops: &[Op]) -> Vec<String> {
-        let mut seen: Vec<std::path::PathBuf> = crate::sources::flatpak::export_dirs();
+        let mut seen: Vec<std::path::PathBuf> = crate::sources::linux::flatpak::export_dirs();
         seen.push(std::path::PathBuf::from(
-            crate::sources::snap::SNAP_DESKTOP_DIR,
+            crate::sources::linux::snap::SNAP_DESKTOP_DIR,
         ));
         notices_in(store, ops, &seen)
     }
 
+    /// Until Task 8 there is no Windows source, so there is nothing for a
+    /// session to have missed.
+    #[cfg(windows)]
+    fn notices(store: &Store, ops: &[Op]) -> Vec<String> {
+        notices_in(store, ops, &[])
+    }
+
+    #[cfg(unix)]
     #[test]
     fn installing_flatpak_says_the_launcher_needs_a_new_session() {
         let blind = crate::launch::session_dirs(Some("/usr/share"), None);
@@ -919,6 +948,7 @@ mod tests {
         assert_eq!(plan.steps[0].title, "Updating 2 packages");
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_batch_table_names_only_pacman_verbs_the_helper_allows() {
         use crate::transaction::allow::{Allowed, check_step};

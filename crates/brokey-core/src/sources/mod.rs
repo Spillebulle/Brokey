@@ -1,17 +1,15 @@
 //! One module per source. [`all`] builds them in interface order; each one
 //! reports its own availability, so an unavailable source stays in the list
 //! and the page can say why.
+//!
+//! The set is per platform. `SourceKind` is not: every variant exists on
+//! every build so the page's types are checked whole. See the spec's
+//! "SourceKind keeps every variant on both platforms".
 
-pub mod alpmdb;
-pub mod apt;
-pub mod aur;
-pub mod chwd;
-pub mod dnf;
-pub mod flatpak;
-pub mod fwupd;
-pub mod github;
-pub mod pacman;
-pub mod snap;
+#[cfg(unix)]
+pub mod linux;
+#[cfg(windows)]
+pub mod windows;
 
 use crate::Source;
 use crate::appstream::Catalogue;
@@ -25,6 +23,25 @@ pub fn all(
     catalogue: Arc<Catalogue>,
     preferences: &crate::Preferences,
 ) -> Vec<Box<dyn Source>> {
+    #[cfg(unix)]
+    {
+        linux_all(system, client, catalogue, preferences)
+    }
+    #[cfg(windows)]
+    {
+        let _ = (system, client, catalogue, preferences);
+        Vec::new()
+    }
+}
+
+#[cfg(unix)]
+fn linux_all(
+    system: &SystemInfo,
+    client: Arc<Client>,
+    catalogue: Arc<Catalogue>,
+    preferences: &crate::Preferences,
+) -> Vec<Box<dyn Source>> {
+    use linux::*;
     let mut aur = aur::Aur::new(system, client.clone(), catalogue.clone());
     // Automatic stays lazy: the helper is looked for on first use. A named
     // choice is applied now, falling back to what is installed when the
@@ -51,4 +68,23 @@ pub fn all(
         Box::new(fwupd::Fwupd::new(system)),
         Box::new(chwd::Chwd::new(system)),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    /// Until Task 8 there is no Windows source. The point of the test is
+    /// that `all` answers rather than panicking or being absent, so the
+    /// application and the text mode both run on Windows from here on.
+    #[cfg(windows)]
+    #[test]
+    fn windows_has_no_sources_yet() {
+        let system = crate::system::detect();
+        let sources = super::all(
+            &system,
+            crate::http::Client::shared(),
+            crate::appstream::Catalogue::load_system(&system),
+            &crate::Preferences::default(),
+        );
+        assert!(sources.is_empty());
+    }
 }

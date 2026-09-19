@@ -4,8 +4,10 @@
 //! here reads the machine's own `/var/lib`; on a machine that is not
 //! Debian-based the source must say so, and that is tested too.
 
+#![cfg(unix)]
+
 use brokey_core::appstream::Catalogue;
-use brokey_core::sources::apt::{
+use brokey_core::sources::linux::apt::{
     Apt, ListName, dpkg_compare, dpkg_is_newer, parse_control, parse_progress, parse_simulation,
 };
 use brokey_core::{Op, PackageKind, PackageRef, Query, Source, SourceKind, SystemInfo};

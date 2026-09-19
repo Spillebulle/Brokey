@@ -20,30 +20,56 @@
 //!
 //! Exit codes: 0 finished, 1 a step failed or the run was cancelled, 2 the
 //! plan could not be read, 3 the plan was refused, 4 not root.
+//!
+//! Linux only for now: `pkexec` and the closed list it checks against
+//! (`brokey_core::transaction::allow`) are both Linux-specific. A later
+//! plan gives Windows its own privilege path and its own helper body.
 
+#[cfg(windows)]
+fn main() {
+    eprintln!("This build of brokey-helper does not run on Windows yet.");
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
 use brokey_core::transaction::allow::{self, Allowed};
+#[cfg(unix)]
 use brokey_core::{Event, Plan, Step};
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::sync::Arc;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
 use std::sync::mpsc;
 
+#[cfg(unix)]
 const EXIT_OK: i32 = 0;
+#[cfg(unix)]
 const EXIT_STEP_FAILED: i32 = 1;
+#[cfg(unix)]
 const EXIT_BAD_INPUT: i32 = 2;
+#[cfg(unix)]
 const EXIT_REFUSED: i32 = 3;
+#[cfg(unix)]
 const EXIT_NOT_ROOT: i32 = 4;
 
 /// Where a child's program is looked for, and the `PATH` it is given. A
 /// fixed list rather than the inherited one so a plan cannot pick up a
 /// program from anywhere else.
+#[cfg(unix)]
 const CHILD_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
+#[cfg(unix)]
 const USAGE: &str = "Usage: brokey-helper run | check | --version. \
 Reads a JSON plan on stdin; run needs root and is meant to be started through pkexec.";
 
+#[cfg(unix)]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
@@ -61,6 +87,7 @@ fn main() {
     std::process::exit(code);
 }
 
+#[cfg(unix)]
 fn check() -> i32 {
     let mut text = String::new();
     if let Err(e) = std::io::stdin().lock().read_to_string(&mut text) {
@@ -86,6 +113,7 @@ fn check() -> i32 {
     }
 }
 
+#[cfg(unix)]
 fn run() -> i32 {
     if geteuid() != 0 {
         eprintln!(
@@ -182,6 +210,7 @@ fn run() -> i32 {
 
 /// Run one step with a minimal environment, streaming its output as log
 /// events. `Err` is the sentence for the step's failure.
+#[cfg(unix)]
 fn run_step(plan: &str, index: usize, step: &Step) -> Result<(), String> {
     let Some(program) = resolve(&step.command.program) else {
         return Err(format!(
@@ -244,6 +273,7 @@ fn run_step(plan: &str, index: usize, step: &Step) -> Result<(), String> {
     }
 }
 
+#[cfg(unix)]
 fn pump(reader: impl Read, stderr: bool, tx: mpsc::Sender<(String, bool)>) {
     let mut reader = BufReader::new(reader);
     let mut buf = Vec::new();
@@ -264,6 +294,7 @@ fn pump(reader: impl Read, stderr: bool, tx: mpsc::Sender<(String, bool)>) {
 }
 
 /// The first executable named `program` in [`CHILD_PATH`].
+#[cfg(unix)]
 fn resolve(program: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     CHILD_PATH
@@ -278,6 +309,7 @@ fn resolve(program: &str) -> Option<PathBuf> {
 
 /// One event, one line, flushed at once so the runner sees it as it
 /// happens rather than when the buffer fills.
+#[cfg(unix)]
 fn emit(event: &Event) {
     let mut out = std::io::stdout().lock();
     if let Ok(text) = serde_json::to_string(event) {
@@ -291,6 +323,7 @@ fn emit(event: &Event) {
 /// system caches plus the invoking user's `~/.cache/brokey`. Under
 /// pkexec the invoking user is `PKEXEC_UID`; the home comes from passwd
 /// because the user's environment has been scrubbed.
+#[cfg(unix)]
 fn allowed() -> Allowed {
     let home = std::env::var("PKEXEC_UID")
         .ok()
@@ -310,6 +343,7 @@ fn allowed() -> Allowed {
 }
 
 /// The home directory of `uid` in a passwd file.
+#[cfg(unix)]
 fn home_of(passwd: &str, uid: u32) -> Option<PathBuf> {
     passwd.lines().find_map(|line| {
         let fields: Vec<&str> = line.split(':').collect();
@@ -327,11 +361,12 @@ fn home_of(passwd: &str, uid: u32) -> Option<PathBuf> {
 // libc's geteuid(2), declared here rather than through the libc crate the
 // workspace does not carry. Reading /proc/self/status was the alternative
 // and would have added a parser for one number.
+#[cfg(unix)]
 unsafe extern "C" {
     safe fn geteuid() -> u32;
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

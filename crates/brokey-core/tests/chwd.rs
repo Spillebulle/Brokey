@@ -2,7 +2,9 @@
 //! 1.24.1, an Intel and an NVIDIA GPU), in `fixtures/chwd/`, and one live
 //! run of the real tool.
 
-use brokey_core::sources::chwd::{self, Chwd};
+#![cfg(unix)]
+
+use brokey_core::sources::linux::chwd::{self, Chwd};
 use brokey_core::{Op, PackageKind, PackageRef, Query, Source, SourceKind};
 
 const LIST: &str = include_str!("fixtures/chwd/list.txt");

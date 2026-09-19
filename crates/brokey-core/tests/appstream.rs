@@ -9,7 +9,9 @@
 //! `icons/`) and run `cargo test -p brokey-core -- --ignored live_`.
 
 use brokey_core::Picture;
-use brokey_core::appstream::{Catalogue, extra_roots};
+use brokey_core::appstream::Catalogue;
+#[cfg(unix)]
+use brokey_core::appstream::extra_roots;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -634,6 +636,10 @@ fn the_callers_origin_overrides_the_files() {
     assert!(catalogue.components().iter().all(|c| c.icon.is_none()));
 }
 
+// `extra_roots` splits on `:`, which is also how a Windows path names its
+// drive (`C:\...`), so a real path is not representable in the variable
+// there yet. Linux only, like `BROKEY_APPSTREAM_DIR` itself for now.
+#[cfg(unix)]
 #[test]
 fn brokey_appstream_dir_names_roots_that_load_like_the_system_ones() {
     // What `load_system` does with the variable, without touching the

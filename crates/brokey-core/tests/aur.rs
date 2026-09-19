@@ -2,10 +2,12 @@
 //! (`tests/fixtures/aur/`), plus `live_*` tests that ask aur.archlinux.org
 //! and read this machine's pacman database.
 
+#![cfg(unix)]
+
 use brokey_core::appstream::{Catalogue, Component};
 use brokey_core::http::Client;
-use brokey_core::sources::alpmdb::Desc;
-use brokey_core::sources::aur::{self, Aur, Helper, Paths, RpcPackage};
+use brokey_core::sources::linux::alpmdb::Desc;
+use brokey_core::sources::linux::aur::{self, Aur, Helper, Paths, RpcPackage};
 use brokey_core::system::from_os_release;
 use brokey_core::{Op, PackageKind, PackageRef, Picture, Query, Source, SourceKind, SystemInfo};
 use std::path::{Path, PathBuf};

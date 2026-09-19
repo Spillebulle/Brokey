@@ -930,12 +930,16 @@ fn the_flatpak_bundle_installer_plans_as_the_user_if_ever_used() {
         installer: Installer::FlatpakBundle,
         sentence: "S.".into(),
     };
-    let steps = plan(&r, Path::new("/d")).expect("a plan");
+    let dir = Path::new("/d");
+    let steps = plan(&r, dir).expect("a plan");
     assert_eq!(steps[1].command.program, "flatpak");
-    assert_eq!(
-        steps[1].command.args,
-        ["install", "--user", "-y", "/d/brokey-0.2.0-x86_64.flatpak"]
-    );
+    // Joined rather than a literal: `display` renders the platform's own
+    // separator, which the plan's own file path also went through.
+    let file = dir
+        .join("brokey-0.2.0-x86_64.flatpak")
+        .display()
+        .to_string();
+    assert_eq!(steps[1].command.args, ["install", "--user", "-y", &file]);
     assert!(!steps[1].needs_root);
     assert_eq!(steps[1].source, SourceKind::Flatpak);
 }

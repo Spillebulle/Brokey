@@ -4,8 +4,10 @@
 //! Nothing here runs dnf or rpm; on a machine that is not Fedora-based the
 //! source must say so, and that is tested too.
 
+#![cfg(unix)]
+
 use brokey_core::appstream::Catalogue;
-use brokey_core::sources::dnf::{
+use brokey_core::sources::linux::dnf::{
     Dnf, Output, QUERY_FORMAT, RPM_FORMAT, Runner, parse_check_update, parse_rows, parse_time,
     rpm_compare, rpmvercmp, search_glob,
 };

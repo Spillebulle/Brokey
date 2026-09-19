@@ -2,10 +2,16 @@
 //! (`fixtures/github/`): a search for "heroic", Heroic's latest release
 //! (every Linux package kind plus macOS and Windows noise) and neovim's
 //! (AppImages for both architectures). One live search at the end.
+//!
+//! The source itself is Linux only for now (`sources::linux::github`).
+
+#![cfg(unix)]
 
 use brokey_core::appstream::Catalogue;
 use brokey_core::http::Client;
-use brokey_core::sources::github::{self, Arch, AssetKind, Github, InstallRecord, InstallTarget};
+use brokey_core::sources::linux::github::{
+    self, Arch, AssetKind, Github, InstallRecord, InstallTarget,
+};
 use brokey_core::system::from_os_release;
 use brokey_core::{Op, PackageKind, PackageRef, Picture, Query, Source, SourceKind, SystemInfo};
 use std::path::Path;
