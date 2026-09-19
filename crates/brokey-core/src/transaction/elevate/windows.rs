@@ -115,10 +115,15 @@ fn current_user_sid() -> io::Result<String> {
         return Err(io::Error::last_os_error());
     }
 
-    let mut buffer = vec![0u8; len as usize];
-    // SAFETY: `buffer` is exactly `len` bytes, the size the call above
-    // reported it needs, so this fills it with one `TOKEN_USER` without
-    // overrunning it.
+    // A `Vec<u8>` is only 1-byte aligned by its type, but `TOKEN_USER`
+    // contains a pointer and needs 8-byte alignment to read from. A
+    // `Vec<u64>`, sized in words rather than bytes, is 8-byte aligned by
+    // construction, so casting its pointer to `*const TOKEN_USER` below is
+    // sound regardless of what the allocator happens to hand back.
+    let mut buffer = vec![0u64; (len as usize).div_ceil(8)];
+    // SAFETY: `buffer` holds at least `len` bytes (rounded up to whole
+    // `u64`s), the size the call above reported it needs, so this fills it
+    // with one `TOKEN_USER` without overrunning it.
     let filled = unsafe {
         GetTokenInformation(
             token.as_raw_handle() as HANDLE,
@@ -133,7 +138,9 @@ fn current_user_sid() -> io::Result<String> {
     }
 
     // SAFETY: `buffer` now holds a `TOKEN_USER` written by the call above,
-    // which is why it was sized to at least `size_of::<TOKEN_USER>()`.
+    // which is why it was sized to at least `size_of::<TOKEN_USER>()`
+    // bytes, and it is 8-byte aligned because it is a `Vec<u64>`, which is
+    // what a pointer-containing `TOKEN_USER` requires.
     let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
 
     let mut sid_string: windows_sys::core::PWSTR = ptr::null_mut();
@@ -234,7 +241,7 @@ impl PipeServer {
     pub fn accept(&mut self) -> io::Result<std::fs::File> {
         let Some(handle) = self.handle.as_ref() else {
             return Err(io::Error::other(
-                "this pipe has already accepted its client",
+                "This pipe has already accepted its client. Call listen() again for another connection.",
             ));
         };
 
@@ -278,17 +285,66 @@ mod tests {
         assert!(a.starts_with(r"\\.\pipe\brokey-"), "{a}");
     }
 
+    /// The current user's SID, read independently of `current_user_sid` so
+    /// the test below proves the descriptor names the real SID rather than
+    /// merely agreeing with itself. Shells out to the real `whoami.exe`
+    /// (found via `%SystemRoot%`, not whatever `whoami` a Git Bash or other
+    /// shell might have put earlier on `PATH`, which does not understand
+    /// `/user`), matching this repo's existing practice of checking parsers
+    /// against real programs (`vercmp`, `desktop-file-validate`).
+    fn expected_sid() -> String {
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let whoami = format!(r"{system_root}\System32\whoami.exe");
+        let output = std::process::Command::new(&whoami)
+            .args(["/user", "/fo", "csv", "/nh"])
+            .output()
+            .unwrap_or_else(|e| panic!("{whoami} runs: {e}"));
+        assert!(
+            output.status.success(),
+            "{whoami} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // CSV, no header: "DOMAIN\user","S-1-5-21-...". The SID is the last
+        // field and contains no comma, so splitting on the last comma and
+        // trimming the quotes is exact.
+        let text = String::from_utf8_lossy(&output.stdout);
+        text.trim()
+            .rsplit(',')
+            .next()
+            .expect("whoami.exe prints a SID column")
+            .trim_matches('"')
+            .to_string()
+    }
+
     /// The descriptor names this user and the Administrators group and
-    /// nobody else. `BA` is the Administrators alias; the user arrives as a
-    /// SID string, so this checks the shape rather than a fixed value.
+    /// nobody else. `BA` is the Administrators alias; the user's SID is
+    /// checked against `whoami.exe`'s own answer, not against
+    /// `current_user_sid` again, which would only prove that function
+    /// equals itself. The negative assertions cover both the well-known
+    /// aliases for Everyone/Anonymous (`WD`/`AN`) and the raw SIDs those
+    /// aliases stand for (`S-1-1-0`/`S-1-5-7`): the code builds the SDDL
+    /// itself today, so neither form appears, but a future edit could add
+    /// either and only checking one form would miss it.
     #[test]
     fn the_descriptor_admits_this_user_and_administrators() {
         let sddl = sddl_for_current_user().expect("this user has a SID");
         assert!(sddl.starts_with("D:"), "{sddl}");
         assert!(sddl.contains("(A;;GA;;;BA)"), "{sddl}");
-        assert!(sddl.contains("(A;;GA;;;S-1-5-"), "{sddl}");
+        let sid = expected_sid();
+        assert!(
+            sddl.contains(&format!("(A;;GA;;;{sid})")),
+            "expected the real SID {sid} in {sddl}"
+        );
         assert!(!sddl.contains(";;;WD)"), "everyone can open it: {sddl}");
         assert!(!sddl.contains(";;;AN)"), "anonymous can open it: {sddl}");
+        assert!(
+            !sddl.contains(";;;S-1-1-0)"),
+            "everyone as a raw SID can open it: {sddl}"
+        );
+        assert!(
+            !sddl.contains(";;;S-1-5-7)"),
+            "anonymous as a raw SID can open it: {sddl}"
+        );
     }
 
     /// The descriptor is not merely a plausible string: Windows parses it
