@@ -16,11 +16,9 @@
 //! the list is a deliberate edit here with a test beside it, never a special
 //! case in a source.
 
-use crate::model::Plan;
-#[cfg(unix)]
-use crate::model::{Command, Step};
 #[cfg(windows)]
-use crate::model::{SourceKind, Step};
+use crate::model::SourceKind;
+use crate::model::{Command, Plan, Step};
 #[cfg(unix)]
 use std::path::Component;
 use std::path::{Path, PathBuf};
@@ -186,26 +184,42 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 
 /// What may run as Administrator on Windows.
 ///
-/// Two things, and the reasoning differs for each.
+/// Two things, and the question asked of each is the same one: provenance.
+/// A command is admitted only if it is one a source in this crate would
+/// have built, or one the registry itself records.
 ///
-/// `winget.exe` is a fixed program with a fixed set of verbs, so it is
-/// checked the way the Linux list checks a package manager: the program is
-/// named and the verb comes from a short list.
+/// `winget.exe` is a fixed program with a fixed set of commands, and
+/// [`operation_step`](crate::sources::windows::winget::operation_step) and
+/// [`update_all_step`](crate::sources::windows::winget::update_all_step)
+/// are the only things that build them. Both are pure functions of the
+/// program path and the package id, so the arm below rebuilds the command
+/// the source would have made and compares the whole `Command` against it:
+/// program, arguments, environment and working directory. Naming the
+/// program and checking the verb was not enough, because everything after
+/// the verb was then free, and `winget install --manifest` with a yaml of
+/// the caller's choosing, or `--override` with a command line, is arbitrary
+/// elevated execution through a genuine `winget.exe`. Rebuilding closes the
+/// environment too: a winget command carries no `env`, because that is what
+/// the source builds.
 ///
-/// A removal from Add/Remove Programs is not checkable that way. The
+/// The program must be on a disk of this machine rather than merely
+/// absolute. A UNC path such as `\\somewhere\share\winget.exe` answers
+/// `true` to `Path::is_absolute` on Windows and would be started over the
+/// network, so [`on_a_local_disk`] asks for a drive letter instead.
+///
+/// A removal from Add/Remove Programs cannot be rebuilt that way. The
 /// command is whatever the installer wrote into the registry years ago, so
 /// no requirement about its *shape* would be honest. The only honest check
-/// is provenance: is this command one the registry actually records?
+/// is the same question put differently: is this command one the registry
+/// actually records?
 ///
-/// That is what the arm below asks. `Allowed::removals` carries the removal
-/// commands read back out of the registry, the way `package_dirs` carries
-/// the directories a package file may come from, and a step is admitted
-/// only if its whole command (program, arguments, environment and working
-/// directory) is one of them. Labelling a step `SourceKind::Arp` buys a
-/// forged plan nothing, because `source` now only chooses which question is
-/// asked. An empty list refuses every removal, which is the safe direction
-/// to fail: a caller that has not read the registry cannot run anything
-/// from it.
+/// `Allowed::removals` carries the removal commands read back out of the
+/// registry, the way `package_dirs` carries the directories a package file
+/// may come from, and a step is admitted only if its whole command is one
+/// of them. Labelling a step `SourceKind::Arp` buys a forged plan nothing,
+/// because `source` now only chooses which question is asked. An empty list
+/// refuses every removal, which is the safe direction to fail: a caller
+/// that has not read the registry cannot run anything from it.
 ///
 /// Both sides fill the list, through `Allowed::with_registered_removals`.
 /// The helper does because it is what enforces the list; the runner does
@@ -221,9 +235,14 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 /// administrator's rather than the user's.
 ///
 /// Widening this is a deliberate edit here with a test beside it.
-#[cfg(windows)]
-const WINGET_VERBS: [&str; 3] = ["install", "upgrade", "uninstall"];
-
+///
+/// Only the steps that need Administrator are checked, because a step that
+/// does not is one the runner runs in the user's own session and never
+/// sends to the helper. A per-user removal from `HKCU` is exactly that, and
+/// checking it here would refuse every one of them before the user was ever
+/// asked. What makes that filter safe is at the other end: the helper
+/// refuses a whole plan that carries a step which does not need root, so
+/// nothing reaches an elevated process without passing through here.
 #[cfg(windows)]
 pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
     for step in plan.steps.iter().filter(|s| s.needs_root) {
@@ -234,21 +253,8 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 
 #[cfg(windows)]
 pub fn check_step(step: &Step, allowed: &Allowed) -> Result<(), String> {
-    let program = Path::new(&step.command.program)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
     match step.source {
-        SourceKind::Winget => {
-            if program != "winget.exe" {
-                return Err(not_allowed(&step.command.program));
-            }
-            let verb = step.command.args.first().map(String::as_str).unwrap_or("");
-            if !WINGET_VERBS.contains(&verb) {
-                return Err(not_allowed(verb));
-            }
-            Ok(())
-        }
+        SourceKind::Winget => check_winget(&step.command),
         SourceKind::Arp => {
             if allowed.removals.contains(&step.command) {
                 Ok(())
@@ -258,6 +264,82 @@ pub fn check_step(step: &Step, allowed: &Allowed) -> Result<(), String> {
         }
         other => Err(not_allowed(&format!("{other:?}"))),
     }
+}
+
+/// Whether `command` is one the winget source would have built, rebuilt
+/// from the command's own program and package id and compared whole.
+#[cfg(windows)]
+fn check_winget(command: &Command) -> Result<(), String> {
+    use crate::sources::windows::winget::{OpKind, operation_step, update_all_step};
+
+    let path = Path::new(&command.program);
+    if !on_a_local_disk(path) {
+        return Err(not_allowed(&command.program));
+    }
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if file_name != "winget.exe" {
+        return Err(not_allowed(&command.program));
+    }
+    let verb = command.args.first().map(String::as_str).unwrap_or("");
+    let expected = if verb == "upgrade" && command.args.get(1).map(String::as_str) == Some("--all")
+    {
+        update_all_step(&command.program).command
+    } else {
+        let kind = match verb {
+            "install" => OpKind::Install,
+            "upgrade" => OpKind::Update,
+            "uninstall" => OpKind::Remove,
+            other => return Err(not_a_winget_command(other)),
+        };
+        // Where `operation_step` puts the id, and the only one of its eight
+        // arguments that is not a fixed word. An id is a package id and
+        // never an option: without this, an argument beginning with a dash
+        // would be rebuilt into the very command it was taken from and the
+        // comparison below would agree with itself.
+        let id = command.args.get(3).map(String::as_str).unwrap_or("");
+        if id.is_empty() || id.starts_with('-') {
+            return Err(not_a_winget_command(&describe(command)));
+        }
+        operation_step(kind, id, &command.program).command
+    };
+    if *command == expected {
+        Ok(())
+    } else {
+        Err(not_a_winget_command(&describe(command)))
+    }
+}
+
+/// Whether `path` names a program on a disk of this machine.
+///
+/// `Path::is_absolute` is not the whole question on Windows. A UNC path
+/// such as `\\somewhere\share\winget.exe` is absolute, and `Command::new`
+/// will start it over the network. Asking for a drive prefix is the
+/// narrower question, and every real resolution of winget answers it,
+/// because the app execution alias lives under the user's own profile on a
+/// local disk.
+#[cfg(windows)]
+fn on_a_local_disk(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    path.is_absolute()
+        && matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        )
+}
+
+/// The sentence a winget step Brokey did not build produces. It names the
+/// whole command rather than the program, because the difference is usually
+/// in the arguments and a reader needs to see which ones.
+#[cfg(windows)]
+fn not_a_winget_command(what: &str) -> String {
+    format!(
+        "The helper refused a winget step Brokey did not build: {what}. Only the exact install, \
+         upgrade and uninstall commands the winget source produces may run as Administrator."
+    )
 }
 
 /// The one sentence a refusal produces, in the register the Linux list
@@ -280,7 +362,10 @@ pub fn refusal(command: &Command, reason: &str) -> String {
     )
 }
 
-#[cfg(unix)]
+/// A command as one line, for a refusal to name. Both platforms use it:
+/// Linux through [`refusal`], Windows through the winget arm, where the
+/// difference between a command Brokey built and one it did not is often in
+/// the arguments rather than the program.
 fn describe(command: &Command) -> String {
     let mut text = command.program.clone();
     for arg in &command.args {
@@ -1247,6 +1332,7 @@ mod tests {
 mod windows_tests {
     use super::*;
     use crate::model::{Command, SourceKind};
+    use crate::sources::windows::winget::{OpKind, operation_step, update_all_step};
 
     fn step_from(source: SourceKind, program: &str, args: &[&str]) -> Step {
         Step {
@@ -1271,26 +1357,37 @@ mod windows_tests {
         }
     }
 
-    /// The three things winget is asked to do, and nothing else.
+    /// The path a winget step really carries: the app execution alias under
+    /// the user's own profile, which is what `winget_program` resolves to.
+    const WINGET: &str = r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\winget.exe";
+
+    /// The three things winget is asked to do, exactly as the source
+    /// builds them, and nothing else.
     #[test]
-    fn the_winget_verbs_are_allowed() {
-        for verb in ["install", "upgrade", "uninstall"] {
-            let plan = plan_of(vec![step_from(
-                SourceKind::Winget,
-                "winget.exe",
-                &[verb, "--id", "Valve.Steam"],
-            )]);
-            assert_eq!(validate(&plan), Ok(()), "{verb} should be allowed");
+    fn the_winget_operations_are_allowed() {
+        for kind in [OpKind::Install, OpKind::Update, OpKind::Remove] {
+            let plan = plan_of(vec![operation_step(kind, "Valve.Steam", WINGET)]);
+            assert_eq!(validate(&plan), Ok(()), "{kind:?} should be allowed");
         }
     }
 
-    /// A verb that is not one of the three is refused even from winget.
+    /// Updating everything winget can is a different command from any one
+    /// package's, and it is one the source builds, so the list knows it.
+    /// Without this the Updates page's "Update all" would be refused after
+    /// the prompt rather than before anyone asked for it.
+    #[test]
+    fn updating_everything_winget_can_is_allowed() {
+        assert_eq!(validate(&plan_of(vec![update_all_step(WINGET)])), Ok(()));
+    }
+
+    /// A verb that is not one of the three is refused even from a real
+    /// winget.
     #[test]
     fn another_winget_verb_is_refused() {
         let plan = plan_of(vec![step_from(
             SourceKind::Winget,
-            "winget.exe",
-            &["export", "--output", "C:/everything.json"],
+            WINGET,
+            &["export", "--output", r"C:\everything.json"],
         )]);
         let err = validate(&plan).expect_err("export is not on the list");
         assert!(err.contains("export"), "the refusal names the verb: {err}");
@@ -1298,29 +1395,110 @@ mod windows_tests {
         assert!(!err.contains('\u{2014}'), "no em dashes: {err}");
     }
 
-    /// The list is about the program, not the source that claims it. A step
+    /// The list is about the command, not the source that claims it. A step
     /// that says it is winget and runs something else is refused.
     #[test]
     fn a_step_cannot_claim_to_be_winget_and_run_something_else() {
         let plan = plan_of(vec![step_from(
             SourceKind::Winget,
-            "powershell.exe",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
             &["-Command", "Remove-Item C:/Windows -Recurse"],
         )]);
         let err = validate(&plan).expect_err("the program decides, not the source");
         assert!(err.contains("powershell.exe"), "{err}");
     }
 
-    /// A full path to winget is the same program as a bare name. Both the
-    /// registry and the catalogue produce absolute paths.
+    /// A bare name is refused. The helper searches for nothing, so the
+    /// unelevated side resolves the path, and a step that has not had that
+    /// done to it is not one Brokey built.
     #[test]
-    fn winget_is_recognised_by_a_full_path_too() {
+    fn a_bare_winget_name_is_refused() {
+        let mut step = operation_step(OpKind::Install, "Valve.Steam", WINGET);
+        step.command.program = "winget.exe".to_string();
+        let err = validate(&plan_of(vec![step])).expect_err("a bare name is not a full path");
+        assert!(err.contains("winget.exe"), "{err}");
+    }
+
+    /// `winget.exe` on a network share is not this machine's winget. A UNC
+    /// path is absolute, so absolute is not the question; a drive letter
+    /// is.
+    #[test]
+    fn a_winget_on_a_share_is_refused() {
+        let step = operation_step(
+            OpKind::Install,
+            "Valve.Steam",
+            r"\\attacker\share\winget.exe",
+        );
+        let err =
+            validate(&plan_of(vec![step])).expect_err("a share is not a disk of this machine");
+        assert!(err.contains("winget.exe"), "{err}");
+    }
+
+    /// `--manifest` runs an installer of the caller's choosing through a
+    /// genuine winget, which is arbitrary elevated execution. The source
+    /// never builds it, so it is refused.
+    #[test]
+    fn a_manifest_is_refused() {
         let plan = plan_of(vec![step_from(
             SourceKind::Winget,
-            r"C:\Program Files\WindowsApps\winget.exe",
-            &["install", "--id", "Valve.Steam"],
+            WINGET,
+            &["install", "--manifest", r"C:\Users\me\Downloads\evil.yaml"],
         )]);
-        assert_eq!(validate(&plan), Ok(()));
+        let err = validate(&plan).expect_err("--manifest is not a command Brokey builds");
+        assert!(err.contains("--manifest"), "the refusal names it: {err}");
+        assert!(err.ends_with('.'), "the reason is a sentence: {err}");
+    }
+
+    /// `--override` hands a command line straight to the installer. Same
+    /// answer, and it is why the whole argument vector is compared rather
+    /// than the verb alone.
+    #[test]
+    fn an_override_is_refused() {
+        let mut step = operation_step(OpKind::Install, "Valve.Steam", WINGET);
+        step.command.args.push("--override".to_string());
+        step.command
+            .args
+            .push("/C powershell -Command whoami".to_string());
+        let err =
+            validate(&plan_of(vec![step])).expect_err("--override is not a command Brokey builds");
+        assert!(err.contains("--override"), "{err}");
+    }
+
+    /// A winget step carries no environment, because `operation_step`
+    /// builds none. Comparing the whole command is what says so, rather
+    /// than a Windows list of permitted variables that does not exist.
+    #[test]
+    fn a_winget_step_with_an_environment_is_refused() {
+        let mut step = operation_step(OpKind::Install, "Valve.Steam", WINGET);
+        step.command
+            .env
+            .push(("PATH".to_string(), r"C:\somewhere\else".to_string()));
+        assert!(validate(&plan_of(vec![step])).is_err());
+    }
+
+    /// A working directory is not something the source sets either, and it
+    /// is part of the same comparison.
+    #[test]
+    fn a_winget_step_with_a_working_directory_is_refused() {
+        let mut step = operation_step(OpKind::Install, "Valve.Steam", WINGET);
+        step.command.cwd = Some(std::path::PathBuf::from(r"C:\somewhere\else"));
+        assert!(validate(&plan_of(vec![step])).is_err());
+    }
+
+    /// An id beginning with a dash is an option to winget, and rebuilding
+    /// the command around it would agree with itself. The id is checked
+    /// before the rebuild for exactly that reason, and an empty one with
+    /// it.
+    #[test]
+    fn an_id_that_is_not_an_id_is_refused() {
+        let smuggled = operation_step(OpKind::Install, "--override", WINGET);
+        let err = validate(&plan_of(vec![smuggled])).expect_err("an id is never an option");
+        assert!(err.contains("--override"), "{err}");
+        let empty = operation_step(OpKind::Install, "", WINGET);
+        assert!(
+            validate(&plan_of(vec![empty])).is_err(),
+            "an id is never empty"
+        );
     }
 
     /// A removal the registry records is allowed.
@@ -1411,10 +1589,13 @@ mod windows_tests {
         );
     }
 
-    /// A session step is not the helper's business at all. The Linux list
-    /// makes the same check; this is the Windows half of it.
+    /// A session step is not the helper's business at all: the runner runs
+    /// it itself, and a per-user removal from `HKCU` is one, so checking it
+    /// here would refuse every one of them. The helper refuses a plan that
+    /// carries such a step outright, which is what keeps this filter from
+    /// being a way past the list.
     #[test]
-    fn a_session_step_never_reaches_the_helper() {
+    fn a_session_step_is_not_checked_by_this_list() {
         let mut step = step_from(SourceKind::Winget, "winget.exe", &["install"]);
         step.needs_root = false;
         assert_eq!(validate(&plan_of(vec![step])), Ok(()));
@@ -1424,8 +1605,12 @@ mod windows_tests {
     #[test]
     fn one_bad_step_refuses_the_whole_plan() {
         let plan = plan_of(vec![
-            step_from(SourceKind::Winget, "winget.exe", &["install", "--id", "A"]),
-            step_from(SourceKind::Winget, "cmd.exe", &["/c", "whoami"]),
+            operation_step(OpKind::Install, "Valve.Steam", WINGET),
+            step_from(
+                SourceKind::Winget,
+                r"C:\Windows\System32\cmd.exe",
+                &["/c", "whoami"],
+            ),
         ]);
         assert!(validate(&plan).is_err());
     }
