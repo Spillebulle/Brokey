@@ -2131,6 +2131,10 @@ pub struct Arp {
 }
 
 impl Arp {
+    /// Gated because it reads the registry. The `Source` implementation
+    /// below is not: it answers from `entries`, so the fixture tests
+    /// compile and run on Linux as well.
+    #[cfg(windows)]
     pub fn new() -> Arp {
         Arp { entries: read() }
     }
@@ -2144,6 +2148,7 @@ impl Arp {
     }
 }
 
+#[cfg(windows)]
 impl Default for Arp {
     fn default() -> Arp {
         Arp::new()
@@ -2210,7 +2215,10 @@ impl Source for Arp {
     }
 }
 
-/// Read the three uninstall keys. The only impure function in the module.
+/// Read the three uninstall keys. The only impure function in the module,
+/// and the only one gated: `windows-registry` is a Windows-only dependency,
+/// so everything else here stays compiled and tested on both platforms.
+#[cfg(windows)]
 pub fn read() -> Vec<RawEntry> {
     let mut entries = Vec::new();
     let roots: [(Hive, &windows_registry::Key, &str); 3] = [
@@ -2244,6 +2252,7 @@ pub fn read() -> Vec<RawEntry> {
                 install_location: sub.get_string("InstallLocation").ok(),
                 uninstall_string: sub.get_string("UninstallString").ok(),
                 quiet_uninstall_string: sub.get_string("QuietUninstallString").ok(),
+                windows_installer: sub.get_u32("WindowsInstaller").ok(),
                 display_icon: sub.get_string("DisplayIcon").ok(),
                 system_component: sub.get_u32("SystemComponent").ok(),
                 parent_key_name: sub.get_string("ParentKeyName").ok(),
@@ -2257,7 +2266,7 @@ pub fn read() -> Vec<RawEntry> {
 }
 ```
 
-Put `#[serde(default)]` on the `RawEntry` struct itself, so the fixture may leave any optional field out rather than having to spell `null` fifteen times per entry. That needs `Default` on `Hive`; give it `#[derive(Default)]` with `#[default]` on `Machine`.
+Leave `RawEntry`'s derives as Task 5 wrote them. The fixture spells every field and `read` fills every field, so there is nothing for `#[serde(default)]` to do except turn a field missing from the fixture into a silent `None` instead of a parse error.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -2265,7 +2274,7 @@ Put `#[serde(default)]` on the `RawEntry` struct itself, so the fixture may leav
 cargo test -p brokey-core --lib arp
 ```
 
-Expected: PASS, thirty-one tests.
+Expected: PASS, thirty-two tests, with the live test ignored.
 
 - [ ] **Step 5: Wire it into the source list**
 
@@ -2291,6 +2300,7 @@ Add to `crates/brokey-core/src/sources/windows/arp.rs`, in the `tests` module:
     /// with `cargo test -- --ignored live_arp` when the parser changes.
     #[test]
     #[ignore]
+    #[cfg(windows)]
     fn live_arp_reads_this_machine() {
         let arp = Arp::new();
         let installed = arp.installed().unwrap();
@@ -2353,7 +2363,7 @@ In `CHANGELOG.md`, add the entry for the current version, as `crates/brokey/test
 cargo fmt --all --check; if ($?) { cargo clippy --workspace --all-targets }; if ($?) { cargo test --workspace }
 ```
 
-Then push and read the `rust ubuntu-22.04`, `rust ubuntu-22.04-arm` and `rust windows-latest` jobs. All three must pass.
+Do not push. This branch has not been pushed, and doing so is the controller's call rather than this task's. It would also tell you nothing: this repository's CI runs on a push to `main`, on a pull request, or on a manual dispatch, so a plain branch push starts no jobs. Report the Linux and ARM runners as unverified from here, and say what you reasoned about them instead of running them.
 
 - [ ] **Step 11: Commit**
 
