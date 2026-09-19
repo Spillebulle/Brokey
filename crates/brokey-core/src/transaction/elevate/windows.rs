@@ -32,7 +32,9 @@ use windows_sys::Win32::System::Pipes::{
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcessToken, WaitForSingleObject,
 };
-use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows_sys::Win32::UI::Shell::{
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
 use super::Elevated;
@@ -290,9 +292,13 @@ pub fn shell_execute_info_size() -> u32 {
     std::mem::size_of::<SHELLEXECUTEINFOW>() as u32
 }
 
-/// ShellExecuteEx takes one parameter string, so the arguments are joined
-/// and anything with a space in it is quoted. A pipe name never contains a
-/// space; a helper path very often does.
+/// ShellExecuteEx takes one parameter string, so `helper_arguments` is
+/// joined into one before it goes into `lpParameters`. The helper path
+/// itself is not part of this: it goes into the discrete `lpFile` field and
+/// needs no quoting at all. Nothing this function is actually called on
+/// today contains a space, since `helper_arguments` is two literals and a
+/// generated pipe name; the quoting is defensive, for whatever a joined
+/// parameter string carries next.
 fn join_arguments(args: &[String]) -> String {
     args.iter()
         .map(|a| {
@@ -351,7 +357,11 @@ pub fn start(helper: &Path, wrapper: &[String]) -> io::Result<Elevated> {
 
     let mut info = SHELLEXECUTEINFOW {
         cbSize: shell_execute_info_size(),
-        fMask: SEE_MASK_NOCLOSEPROCESS,
+        // `NOCLOSEPROCESS` so `hProcess` comes back to wait on;
+        // `FLAG_NO_UI` so a failure (a missing helper file, say) is reported
+        // through our own `Err` rather than a native Windows error dialog
+        // Brokey did not write and cannot style.
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI,
         lpVerb: verb_wide.as_ptr(),
         lpFile: helper_wide.as_ptr(),
         lpParameters: parameters_wide.as_ptr(),
@@ -377,15 +387,36 @@ pub fn start(helper: &Path, wrapper: &[String]) -> io::Result<Elevated> {
     // set, which is documented to fill `hProcess` with a fresh handle this
     // call now owns exclusively.
     let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess as RawHandle) };
+    // Built immediately so every error path below, not just the success
+    // path, owns the process and can wait on it rather than abandoning it.
+    let mut inner = Inner { process };
 
-    let stream = server.accept()?;
-    let reader = stream.try_clone()?;
+    let stream = match server.accept() {
+        Ok(stream) => stream,
+        Err(e) => {
+            // `server` is dropped when this returns, closing the pipe before
+            // the helper ever connects to it; its connect then fails and it
+            // exits on its own, so this wait is bounded, not indefinite.
+            let _ = inner.wait();
+            return Err(e);
+        }
+    };
+    let reader = match stream.try_clone() {
+        Ok(reader) => reader,
+        Err(e) => {
+            // `stream` is dropped when this returns, closing the pipe the
+            // helper is already connected to; its next read or write then
+            // fails and it exits on its own, so this wait is bounded too.
+            let _ = inner.wait();
+            return Err(e);
+        }
+    };
     let lines = crate::transaction::runner::stream_lines_from(reader);
 
     Ok(Elevated {
         input: Some(Box::new(stream)),
         lines,
-        inner: Inner { process },
+        inner,
     })
 }
 
