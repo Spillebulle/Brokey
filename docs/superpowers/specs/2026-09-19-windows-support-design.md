@@ -109,9 +109,23 @@ of them runs anything: `plan()` returns steps and the Runner executes them.
 Microsoft publishes at `https://cdn.winget.microsoft.com/cache`, which Brokey
 fetches and caches itself rather than relying on winget having refreshed its
 own copy. `source.msix` is 20.5 MB and `source2.msix` is 3.6 MB; both are
-plain zip archives wrapping a SQLite `index.db`. The spec does not fix which
-of the two to read; the implementation opens both once and takes the one whose
-schema it can read, and records the answer here.
+plain zip archives wrapping a SQLite `index.db`. Brokey reads `source2.msix`.
+Opening both settled what the smaller one is: not a delta but a complete index
+in a newer schema, carrying the same 14,896 packages in an 8.4 MB database
+where the older one needs 42 MB. `metadata` in each names its own
+`majorVersion`, 2 against 1, and that is what the reader checks before
+trusting a schema.
+
+Its `packages` table is flat: `id`, `name`, `moniker`, `latest_version` and an
+optional ARP version range, one row per package. Side tables map a package's
+rowid to its product codes, upgrade codes, normalised names, normalised
+publishers and tags. `productcodes2` is the exact join to Add/Remove Programs
+that the grouping section below leans on, and it has two properties worth
+writing down because neither is guessable: the codes are stored lower-case,
+and not all of them are GUIDs. `7-zip` and `notepad++` sit there beside
+`{23170f69-40c1-2701-1604-000001000000}`, because the column holds whatever
+the uninstall key is named. So the join folds case on both sides and must
+never assume a GUID.
 
 Reading the index rather than parsing `winget search` output is the same
 decision as reading the pacman sync tarball rather than parsing `pacman -Ss`,
@@ -368,16 +382,47 @@ the impossible sentences never appear, as it does for the Linux arms.
 
 ### Packaging
 
-MSI through the Tauri bundler, then a winget manifest submitted to
-`microsoft/winget-pkgs`, a Scoop manifest, and a Chocolatey package. That is
-the Windows mirror of what the sibling `Packages` repository does for apt and
-rpm, and it means Brokey is distributed by the managers it brokers.
+Two assets per architecture, the same pair Muster and Umber publish, built by
+the same machinery and for the same reasons.
+
+**`brokey-<version>-<arch>.msi`**, from a hand-written
+`packaging/windows/brokey.wxs` built by WiX 5 directly rather than by Tauri's
+bundler. The bundler's default MSI carries no branding and its WiX 3 template
+is not the one the siblings use; `wix build` with `WixToolset.UI.wixext` is,
+and it takes the installer's banner and dialog artwork, its licence page and
+its exit-dialog "Start Brokey" checkbox from files this repository owns. The
+artwork is generated from the palette by `tools/make-art.py`, the way the
+icons already are, so a change to `--accent-h` in `tokens.css` and a rerun of
+the script cannot disagree with the application they install.
+
+**`brokey-setup-<version>-<arch>.exe`**, the application binary with that MSI
+concatenated onto it and a footer giving the payload's length. On a
+double-click the binary sees that it carries a payload and shows Brokey's own
+window rather than Windows Installer's, running `msiexec` silently underneath.
+This is `update::payload` and `make-setup` in both siblings, and the format is
+ported rather than reinvented.
+
+That window is the one place Brokey cannot follow the siblings directly. Both
+of them draw it with the toolkit the application already uses; Brokey's window
+is a WebView, and an installer that needs WebView2 in order to paint depends
+on the machine already having a component it may be there to deliver. So the
+setup executable draws a small Win32 window of its own, in the palette's
+colours, with a hairline, one primary button and an empty progress track while
+`msiexec` runs. Umber set this precedent for the same reason: its installer
+runs before wgpu exists and its splash has to paint without a GPU.
 
 MSI rather than NSIS, for a reason this spec turned up: an MSI gets a
 ProductCode in the uninstall keys, so Brokey lands among the 245 applications
 on the reference machine that can be removed silently and cleanly rather than
 among the 72 that cannot. Shipping a store that leaves behind the kind of mess
 its second feature exists to clean up would be indefensible.
+
+Both assets are published. The setup executable is how a person installs
+Brokey; the MSI stays available for a silent or scripted install, and is what
+a winget manifest submitted to `microsoft/winget-pkgs`, a Scoop manifest and a
+Chocolatey package would each point at. That is the Windows mirror of what the
+sibling `Packages` repository does for apt and rpm, and it means Brokey is
+distributed by the managers it brokers.
 
 ### The page
 
@@ -484,8 +529,6 @@ stay `#[ignore]` and named `live_*`.
   fall back to reading the value as text and parsing it, with a fixture entry
   for each.
 
-- Which of `source.msix` and `source2.msix` to read, and whether the smaller
-  one is a complete index or a delta. Settled by opening both.
 - `rusqlite` with `bundled` links a statically compiled SQLite. The objection
   recorded in `docs/architecture.md` was to libalpm and libapt, which tie one
   binary to one distribution's library version; a statically bundled SQLite is
@@ -539,6 +582,12 @@ than described.
 | `ProductName` in `CurrentVersion`, on a Windows 11 machine | `Windows 10 Pro` |
 | `https://cdn.winget.microsoft.com/cache/source.msix` | 20,544,365 bytes |
 | `https://cdn.winget.microsoft.com/cache/source2.msix` | 3,615,306 bytes |
+| `Public/index.db` in `source2.msix` | 8,409,088 bytes, schema 2.0 |
+| `Public/index.db` in `source.msix` | 42,270,720 bytes, schema 1.7 |
+| Packages in either index | 14,896 |
+| Applications here joined to a winget package by product code | 68 of 157 |
+| Joined by normalised name after that | 17 |
+| Left unmatched | 72 |
 | `chocolatey.nupkg` from the community feed | 5,713,666 bytes |
 | App Installer bundle, `winget-cli` v1.29.290 | 216,783,252 bytes, with a published SHA-256 |
 
