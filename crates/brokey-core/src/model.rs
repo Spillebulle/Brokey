@@ -21,10 +21,16 @@ pub enum SourceKind {
     Github,
     Fwupd,
     Chwd,
+    Winget,
+    Arp,
+    Choco,
+    Scoop,
+    Msix,
+    Features,
 }
 
 impl SourceKind {
-    pub const ALL: [SourceKind; 9] = [
+    pub const ALL: [SourceKind; 15] = [
         SourceKind::Pacman,
         SourceKind::Aur,
         SourceKind::Flatpak,
@@ -34,6 +40,12 @@ impl SourceKind {
         SourceKind::Github,
         SourceKind::Fwupd,
         SourceKind::Chwd,
+        SourceKind::Winget,
+        SourceKind::Arp,
+        SourceKind::Choco,
+        SourceKind::Scoop,
+        SourceKind::Msix,
+        SourceKind::Features,
     ];
 
     /// The stable, lower-case word used in settings, plans and the page.
@@ -48,6 +60,12 @@ impl SourceKind {
             Self::Github => "github",
             Self::Fwupd => "fwupd",
             Self::Chwd => "chwd",
+            Self::Winget => "winget",
+            Self::Arp => "arp",
+            Self::Choco => "choco",
+            Self::Scoop => "scoop",
+            Self::Msix => "msix",
+            Self::Features => "features",
         }
     }
 
@@ -63,6 +81,15 @@ impl SourceKind {
             Self::Github => "GitHub",
             Self::Fwupd => "Firmware",
             Self::Chwd => "Drivers",
+            Self::Winget => "winget",
+            // What Add/Remove Programs holds is everything the machine has,
+            // whoever put it there. "Installed" is what a person calls it;
+            // "ARP" is a registry key name and means nothing to them.
+            Self::Arp => "Installed",
+            Self::Choco => "Chocolatey",
+            Self::Scoop => "Scoop",
+            Self::Msix => "Store",
+            Self::Features => "Features",
         }
     }
 
@@ -561,5 +588,52 @@ mod tests {
             .source(),
             SourceKind::Aur
         );
+    }
+}
+
+#[cfg(test)]
+mod source_kind_tests {
+    use super::SourceKind;
+
+    /// Every variant exists on every platform so the page's types can be
+    /// checked whole in one run. 0.1.0 shipped a self-update button that
+    /// never appeared because two sides spelt a tag differently and each
+    /// tested its own.
+    #[test]
+    fn every_kind_round_trips_through_its_id() {
+        assert_eq!(SourceKind::ALL.len(), 15);
+        for kind in SourceKind::ALL {
+            assert_eq!(SourceKind::parse(kind.id()), Some(kind), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn the_windows_kinds_are_spelt_as_the_settings_file_spells_them() {
+        assert_eq!(SourceKind::parse("winget"), Some(SourceKind::Winget));
+        assert_eq!(SourceKind::parse("arp"), Some(SourceKind::Arp));
+        assert_eq!(SourceKind::parse("choco"), Some(SourceKind::Choco));
+        assert_eq!(SourceKind::parse("scoop"), Some(SourceKind::Scoop));
+        assert_eq!(SourceKind::parse("msix"), Some(SourceKind::Msix));
+        assert_eq!(SourceKind::parse("features"), Some(SourceKind::Features));
+    }
+
+    /// Badges are neutral words a person recognises, sentence case.
+    #[test]
+    fn the_windows_badges_read_as_people_name_them() {
+        assert_eq!(SourceKind::Winget.label(), "winget");
+        assert_eq!(SourceKind::Arp.label(), "Installed");
+        assert_eq!(SourceKind::Choco.label(), "Chocolatey");
+        assert_eq!(SourceKind::Scoop.label(), "Scoop");
+        assert_eq!(SourceKind::Msix.label(), "Store");
+        assert_eq!(SourceKind::Features.label(), "Features");
+    }
+
+    #[test]
+    fn no_two_kinds_share_an_id() {
+        let mut ids: Vec<&str> = SourceKind::ALL.iter().map(|k| k.id()).collect();
+        ids.sort_unstable();
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), before);
     }
 }

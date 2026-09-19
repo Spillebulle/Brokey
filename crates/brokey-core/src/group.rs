@@ -665,6 +665,12 @@ fn edition_rank(source: SourceKind) -> u8 {
         SourceKind::Github => 6,
         SourceKind::Fwupd => 7,
         SourceKind::Chwd => 8,
+        SourceKind::Winget => 9,
+        SourceKind::Arp => 10,
+        SourceKind::Choco => 11,
+        SourceKind::Scoop => 12,
+        SourceKind::Msix => 13,
+        SourceKind::Features => 14,
     }
 }
 
@@ -682,6 +688,12 @@ fn metadata_rank(source: SourceKind) -> u8 {
         SourceKind::Github => 6,
         SourceKind::Fwupd => 7,
         SourceKind::Chwd => 8,
+        SourceKind::Winget => 9,
+        SourceKind::Arp => 10,
+        SourceKind::Choco => 11,
+        SourceKind::Scoop => 12,
+        SourceKind::Msix => 13,
+        SourceKind::Features => 14,
     }
 }
 

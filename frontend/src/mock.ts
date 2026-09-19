@@ -77,6 +77,7 @@ const SYSTEM: SystemInfo = {
   arch: "x86_64",
   desktop: "COSMIC",
   session: "wayland",
+  platform: "linux",
 };
 
 const SOURCES: SourceStatus[] = [

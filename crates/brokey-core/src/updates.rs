@@ -188,7 +188,14 @@ fn is_self_package(package: &PackageRef) -> bool {
         }
         SourceKind::Flatpak => package.id.contains(APP_ID),
         SourceKind::Github => package.id.eq_ignore_ascii_case("Spillebulle/Brokey"),
-        SourceKind::Fwupd | SourceKind::Chwd => false,
+        SourceKind::Fwupd
+        | SourceKind::Chwd
+        | SourceKind::Winget
+        | SourceKind::Arp
+        | SourceKind::Choco
+        | SourceKind::Scoop
+        | SourceKind::Msix
+        | SourceKind::Features => false,
     }
 }
 

@@ -12,7 +12,13 @@ export type SourceKind =
   | "dnf"
   | "github"
   | "fwupd"
-  | "chwd";
+  | "chwd"
+  | "winget"
+  | "arp"
+  | "choco"
+  | "scoop"
+  | "msix"
+  | "features";
 
 /** Interface order, which is also search order (`SourceKind::ALL`). */
 export const SOURCE_KINDS: SourceKind[] = [
@@ -25,6 +31,12 @@ export const SOURCE_KINDS: SourceKind[] = [
   "github",
   "fwupd",
   "chwd",
+  "winget",
+  "arp",
+  "choco",
+  "scoop",
+  "msix",
+  "features",
 ];
 
 /** What a badge says (`SourceKind::label`). Neutral words; colour is never per source. */
@@ -48,6 +60,21 @@ export function sourceLabel(kind: SourceKind): string {
       return "Firmware";
     case "chwd":
       return "Drivers";
+    case "winget":
+      return "winget";
+    // What Add/Remove Programs holds is everything the machine has,
+    // whoever put it there. "Installed" is what a person calls it; "ARP"
+    // is a registry key name and means nothing to them.
+    case "arp":
+      return "Installed";
+    case "choco":
+      return "Chocolatey";
+    case "scoop":
+      return "Scoop";
+    case "msix":
+      return "Store";
+    case "features":
+      return "Features";
   }
 }
 
