@@ -141,19 +141,30 @@ pub fn split_command_line(s: &str) -> Option<(String, Vec<String>)> {
 /// most of this project's tests run on. These strings come out of a Windows
 /// registry and describe a Windows machine whatever host is reading them, so
 /// the splitting is spelt out and behaves the same everywhere.
+///
+/// Takes a path to a file. Given a path that already ends in a separator it
+/// answers that same directory rather than its parent, which no caller here
+/// wants and none asks for: the only input is an executable path out of
+/// [`split_command_line`].
 fn windows_parent(path: &str) -> Option<String> {
     let cut = path.rfind(['\\', '/'])?;
-    let parent = &path[..cut];
-    if parent.is_empty() {
-        // `\foo.exe`: the root of the current drive.
-        return Some("\\".to_string());
+    Some(windows_dir(&path[..cut]))
+}
+
+/// A directory as text, with any trailing separator removed unless removing
+/// it would change which directory is named.
+///
+/// `C:\` is a drive's root and `C:` is that drive's current directory, which
+/// is somewhere else entirely and is never what a registry value meant. A
+/// leftover scan reads [`install_dir`], so the difference between the two is
+/// the difference between one folder and a whole drive.
+fn windows_dir(text: &str) -> String {
+    let trimmed = text.trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        format!("{trimmed}\\")
+    } else {
+        trimmed.to_string()
     }
-    if parent.ends_with(':') {
-        // `C:\foo.exe` sits in the drive's root. `C:` alone would name the
-        // drive's current directory, which is a different place.
-        return Some(format!("{parent}\\"));
-    }
-    Some(parent.to_string())
 }
 
 /// The file name without its extension, as text, for the reason given on
@@ -199,7 +210,7 @@ pub fn install_dir(e: &RawEntry) -> Option<PathBuf> {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(|s| PathBuf::from(s.trim_end_matches(['\\', '/'])))
+            .map(|s| PathBuf::from(windows_dir(s)))
     })
 }
 
@@ -245,6 +256,10 @@ fn is_driver(e: &RawEntry) -> bool {
         })
 }
 
+/// Everything the page draws for one entry. The registry records one version
+/// and knows nothing about a newer one, so the installed version is also the
+/// available version; saying anything else would draw an update that is not
+/// there.
 pub fn to_package(e: &RawEntry) -> Package {
     let name = e.display_name.clone().unwrap_or_default();
     let mut p = Package::new(SourceKind::Arp, package_id(e), name);
@@ -425,7 +440,22 @@ mod tests {
         // The drive's root. "C:" alone would name the drive's current
         // directory, which is somewhere else.
         assert_eq!(windows_parent("C:\\setup.exe"), Some("C:\\".to_string()));
+        // The root of the current drive, which a registry value can name.
+        assert_eq!(windows_parent("\\setup.exe"), Some("\\".to_string()));
         assert_eq!(windows_parent("setup.exe"), None);
+    }
+
+    /// `C:\` and `C:` name different places: the second is the drive's
+    /// current directory. A leftover scan reads this value, so trimming the
+    /// separator away would point it at a whole drive instead of a folder.
+    #[test]
+    fn a_drive_root_install_location_keeps_its_separator() {
+        let entries = fixture();
+        let odd = RawEntry {
+            install_location: Some("C:\\".to_string()),
+            ..named(&entries, "A per-user application").clone()
+        };
+        assert_eq!(install_dir(&odd), Some(std::path::PathBuf::from("C:\\")));
     }
 
     #[test]
