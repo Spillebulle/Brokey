@@ -10,7 +10,9 @@
 //! it is tested against a fixture rather than against whatever happens to
 //! be installed on the machine running the tests.
 
+use crate::model::{Package, PackageKind, Picture, SourceKind};
 use serde::Deserialize;
+use std::path::PathBuf;
 
 /// Which of the three uninstall keys an entry came from. It is part of the
 /// package id, because the same key name can appear in more than one.
@@ -102,6 +104,172 @@ pub fn is_application(e: &RawEntry) -> bool {
         return false;
     }
     true
+}
+
+/// Split a registry command line into a program and its arguments, the way
+/// Windows does it: a leading quoted token may hold spaces, everything
+/// after is split on whitespace. `None` when there is nothing to run.
+///
+/// This matters more than it looks. An uninstall string of
+/// `"C:\Program Files\X\unins.exe" /S` split naively runs `C:\Program`.
+pub fn split_command_line(s: &str) -> Option<(String, Vec<String>)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (program, rest) = if let Some(after) = s.strip_prefix('"') {
+        let (program, rest) = after.split_once('"')?;
+        (program.to_string(), rest)
+    } else {
+        match s.split_once(char::is_whitespace) {
+            Some((program, rest)) => (program.to_string(), rest),
+            None => (s.to_string(), ""),
+        }
+    };
+    if program.is_empty() {
+        return None;
+    }
+    let args = rest.split_whitespace().map(str::to_string).collect();
+    Some((program, args))
+}
+
+/// The directory part of a Windows path, as text.
+///
+/// `std::path::Path` cannot do this. Off Windows a backslash is an ordinary
+/// character, so `Path::new(r"C:\Program Files\X\unins.exe").parent()` answers
+/// `Some("")` and every derivation below would be quietly wrong on the machine
+/// most of this project's tests run on. These strings come out of a Windows
+/// registry and describe a Windows machine whatever host is reading them, so
+/// the splitting is spelt out and behaves the same everywhere.
+fn windows_parent(path: &str) -> Option<String> {
+    let cut = path.rfind(['\\', '/'])?;
+    let parent = &path[..cut];
+    if parent.is_empty() {
+        // `\foo.exe`: the root of the current drive.
+        return Some("\\".to_string());
+    }
+    if parent.ends_with(':') {
+        // `C:\foo.exe` sits in the drive's root. `C:` alone would name the
+        // drive's current directory, which is a different place.
+        return Some(format!("{parent}\\"));
+    }
+    Some(parent.to_string())
+}
+
+/// The file name without its extension, as text, for the reason given on
+/// [`windows_parent`].
+fn windows_file_stem(path: &str) -> &str {
+    let name = match path.rfind(['\\', '/']) {
+        Some(cut) => &path[cut + 1..],
+        None => path,
+    };
+    match name.rfind('.') {
+        // A leading dot is the whole name, not an empty stem.
+        Some(dot) if dot > 0 => &name[..dot],
+        _ => name,
+    }
+}
+
+/// Whether a program is the Windows Installer rather than the
+/// application's own uninstaller.
+fn is_msiexec(program: &str) -> bool {
+    windows_file_stem(program).eq_ignore_ascii_case("msiexec")
+}
+
+/// Where the application lives.
+///
+/// `InstallLocation` is empty for 221 of the reference machine's 317
+/// entries, including every NSIS-built application on it, so the directory
+/// of the uninstaller is the first answer and `InstallLocation` the
+/// fallback. An `msiexec` uninstaller lives in the Windows directory and
+/// says nothing about the application, so it never supplies one.
+///
+/// The `PathBuf` is a Windows path and is only a path on Windows.
+/// Off it, take it apart with [`windows_parent`] rather than with `std::path`.
+pub fn install_dir(e: &RawEntry) -> Option<PathBuf> {
+    let from_uninstaller = e
+        .uninstall_string
+        .as_deref()
+        .and_then(split_command_line)
+        .filter(|(program, _)| !is_msiexec(program))
+        .and_then(|(program, _)| windows_parent(&program))
+        .map(PathBuf::from);
+    from_uninstaller.or_else(|| {
+        e.install_location
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| PathBuf::from(s.trim_end_matches(['\\', '/'])))
+    })
+}
+
+/// The application's own icon. `DisplayIcon` is a path, optionally followed
+/// by a comma and a resource index; the index is dropped because the page
+/// asks the shell for the picture rather than for one numbered resource.
+///
+/// This value is never used as something to launch: it frequently points at
+/// an uninstaller or at a file with no code in it at all.
+pub fn icon(e: &RawEntry) -> Option<Picture> {
+    let raw = e.display_icon.as_deref()?.trim();
+    let raw = raw.strip_prefix('"').unwrap_or(raw);
+    let path = match raw.rsplit_once(',') {
+        // Only a trailing integer is an index. A bare comma in a path is not.
+        Some((path, index)) if index.trim().parse::<i32>().is_ok() => path,
+        _ => raw,
+    };
+    let path = path.trim().trim_end_matches('"');
+    if path.is_empty() {
+        return None;
+    }
+    Some(Picture::File(PathBuf::from(path)))
+}
+
+/// The id this source uses, naming the hive as well as the key, because the
+/// same key name can appear in more than one of the three.
+pub fn package_id(e: &RawEntry) -> String {
+    format!("{}\\{}", e.hive.id(), e.key_name)
+}
+
+/// Whether the entry describes a driver rather than an application. Told by
+/// the uninstaller being the Driver Install Frameworks tool, which is the
+/// same on every machine, rather than by the display name, which is in the
+/// language the machine was installed in.
+fn is_driver(e: &RawEntry) -> bool {
+    e.uninstall_string
+        .as_deref()
+        .and_then(split_command_line)
+        .is_some_and(|(program, _)| {
+            windows_file_stem(&program)
+                .to_ascii_uppercase()
+                .starts_with("DPINST")
+        })
+}
+
+pub fn to_package(e: &RawEntry) -> Package {
+    let name = e.display_name.clone().unwrap_or_default();
+    let mut p = Package::new(SourceKind::Arp, package_id(e), name);
+    p.kind = if is_driver(e) {
+        PackageKind::Driver
+    } else {
+        PackageKind::App
+    };
+    p.installed = true;
+    p.installed_version = e.display_version.clone();
+    // The registry records one version and it is the installed one. Saying
+    // it is also the available version keeps the Installed page from
+    // drawing an update that does not exist.
+    p.version = e.display_version.clone();
+    p.developer = e.publisher.clone();
+    p.homepage = e.url_info_about.clone();
+    p.icon = icon(e);
+    // EstimatedSize is kilobytes; Package counts bytes.
+    p.installed_size = e.estimated_size.map(|kb| kb * 1024);
+    if let Some(dir) = install_dir(e) {
+        p.facts
+            .push(("Installed to".to_string(), dir.display().to_string()));
+    }
+    p.facts.push(("Registry key".to_string(), package_id(e)));
+    p
 }
 
 #[cfg(test)]
@@ -204,5 +372,178 @@ mod tests {
             .filter_map(|e| e.display_name.as_deref())
             .collect();
         assert_eq!(kept.len(), 5, "{kept:?}");
+    }
+
+    /// Windows quoting: a quoted first token can hold spaces, and what
+    /// follows is split on whitespace. Getting this wrong means running
+    /// "C:\Program" with an argument of "Files\...".
+    #[test]
+    fn a_quoted_program_with_spaces_splits_correctly() {
+        let (program, args) = split_command_line(
+            "\"C:\\Program Files\\Obsidian\\Uninstall Obsidian.exe\" /allusers /S",
+        )
+        .expect("it splits");
+        assert_eq!(
+            program,
+            "C:\\Program Files\\Obsidian\\Uninstall Obsidian.exe"
+        );
+        assert_eq!(args, ["/allusers", "/S"]);
+    }
+
+    /// The DIFX driver uninstallers are unquoted, in 8.3 short form, and
+    /// take a path as an argument.
+    #[test]
+    fn an_unquoted_program_splits_on_whitespace() {
+        let (program, args) = split_command_line(
+            "C:\\PROGRA~1\\DIFX\\873032~1\\DPINST~1.EXE /u C:\\WINDOWS\\System32\\a.inf",
+        )
+        .expect("it splits");
+        assert_eq!(program, "C:\\PROGRA~1\\DIFX\\873032~1\\DPINST~1.EXE");
+        assert_eq!(args, ["/u", "C:\\WINDOWS\\System32\\a.inf"]);
+    }
+
+    #[test]
+    fn an_empty_command_line_is_not_a_command() {
+        assert_eq!(split_command_line("   "), None);
+    }
+
+    /// The registry's paths are Windows paths whatever host reads them, so the
+    /// splitting is done on the text. `std::path::Path` would answer `Some("")`
+    /// for the first of these off Windows, and the install directory would be
+    /// silently wrong on the machine most of these tests run on.
+    #[test]
+    fn a_windows_parent_is_the_same_on_every_host() {
+        assert_eq!(
+            windows_parent("C:\\Program Files\\7-Zip\\Uninstall.exe"),
+            Some("C:\\Program Files\\7-Zip".to_string())
+        );
+        // Installers write forward slashes too, and Windows accepts them.
+        assert_eq!(
+            windows_parent("C:/Program Files/7-Zip/Uninstall.exe"),
+            Some("C:/Program Files/7-Zip".to_string())
+        );
+        // The drive's root. "C:" alone would name the drive's current
+        // directory, which is somewhere else.
+        assert_eq!(windows_parent("C:\\setup.exe"), Some("C:\\".to_string()));
+        assert_eq!(windows_parent("setup.exe"), None);
+    }
+
+    #[test]
+    fn a_windows_file_stem_is_the_same_on_every_host() {
+        assert_eq!(
+            windows_file_stem("C:\\PROGRA~1\\DIFX\\873032~1\\DPINST~1.EXE"),
+            "DPINST~1"
+        );
+        assert_eq!(windows_file_stem("MsiExec.exe"), "MsiExec");
+        assert_eq!(windows_file_stem("C:\\bin\\thing"), "thing");
+        // A leading dot is the whole name, not an empty stem.
+        assert_eq!(windows_file_stem(".gitignore"), ".gitignore");
+    }
+
+    /// The directory comes from the uninstaller, because InstallLocation is
+    /// empty for 221 of the reference machine's 317 entries.
+    #[test]
+    fn the_install_directory_comes_from_the_uninstaller() {
+        let entries = fixture();
+        let obsidian = named(&entries, "Obsidian");
+        assert_eq!(obsidian.install_location, None);
+        assert_eq!(
+            install_dir(obsidian),
+            Some(std::path::PathBuf::from("C:\\Program Files\\Obsidian"))
+        );
+    }
+
+    /// Where both agree, the answer is the same, which is what makes the
+    /// derivation safe to rely on.
+    #[test]
+    fn install_location_and_the_uninstaller_agree_where_both_are_present() {
+        let entries = fixture();
+        assert_eq!(
+            install_dir(named(&entries, "7-Zip 26.00 (x64)")),
+            Some(std::path::PathBuf::from("C:\\Program Files\\7-Zip"))
+        );
+    }
+
+    /// An MSI uninstaller lives in the Windows directory and says nothing
+    /// about where the application is, so it is never used as the source of
+    /// a directory. InstallLocation is the only answer here.
+    #[test]
+    fn an_msiexec_uninstaller_never_supplies_a_directory() {
+        let entries = fixture();
+        let per_user = named(&entries, "A per-user application");
+        assert_eq!(
+            install_dir(per_user),
+            Some(std::path::PathBuf::from(
+                "C:\\Users\\test\\AppData\\Local\\Example"
+            ))
+        );
+    }
+
+    /// DisplayIcon carries a resource index after a comma. The file is what
+    /// matters; the index is dropped.
+    #[test]
+    fn an_icon_index_is_stripped() {
+        let entries = fixture();
+        let icon = icon(named(&entries, "Obsidian")).expect("there is an icon");
+        assert_eq!(
+            icon,
+            crate::model::Picture::File(std::path::PathBuf::from(
+                "C:\\Program Files\\Obsidian\\Obsidian.exe"
+            ))
+        );
+    }
+
+    #[test]
+    fn an_entry_with_no_icon_has_none() {
+        let entries = fixture();
+        assert_eq!(icon(named(&entries, "A per-user application")), None);
+    }
+
+    /// The id names the hive as well as the key, because the same key name
+    /// can appear in more than one of the three. The second spec addresses
+    /// entries by this id.
+    #[test]
+    fn the_id_names_the_hive_and_the_key() {
+        let entries = fixture();
+        assert_eq!(
+            package_id(named(&entries, "7-Zip 26.00 (x64)")),
+            "HKLM\\7-Zip"
+        );
+        assert_eq!(
+            package_id(named(&entries, "A per-user application")),
+            "HKCU\\{6f320b93-ee3c-4826-85e0-000000000002}"
+        );
+    }
+
+    #[test]
+    fn a_package_carries_what_the_page_draws() {
+        let entries = fixture();
+        let p = to_package(named(&entries, "7-Zip 26.00 (x64)"));
+        assert_eq!(p.source, crate::model::SourceKind::Arp);
+        assert_eq!(p.name, "7-Zip 26.00 (x64)");
+        assert_eq!(p.installed_version.as_deref(), Some("26.00"));
+        assert_eq!(p.version.as_deref(), Some("26.00"));
+        assert!(p.installed);
+        assert_eq!(p.developer.as_deref(), Some("Igor Pavlov"));
+        assert_eq!(p.homepage.as_deref(), Some("https://www.7-zip.org/"));
+        assert_eq!(p.kind, crate::model::PackageKind::App);
+        // EstimatedSize is kilobytes in the registry and bytes in Package.
+        assert_eq!(p.installed_size, Some(5133 * 1024));
+    }
+
+    /// A driver package is an application by the filter and a driver by
+    /// kind, so the page can tell them apart without reading the name.
+    #[test]
+    fn a_driver_package_is_marked_as_a_driver() {
+        let entries = fixture();
+        let driver = entries
+            .iter()
+            .find(|e| {
+                e.display_name
+                    .as_deref()
+                    .is_some_and(|n| n.contains("Arduino"))
+            })
+            .expect("the fixture has one");
+        assert_eq!(to_package(driver).kind, crate::model::PackageKind::Driver);
     }
 }
