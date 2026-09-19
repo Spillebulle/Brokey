@@ -950,6 +950,7 @@ The registry holds 343 keys on the reference machine and roughly 157 application
     "install_location": "C:\\Program Files\\7-Zip\\",
     "uninstall_string": "\"C:\\Program Files\\7-Zip\\Uninstall.exe\"",
     "quiet_uninstall_string": "\"C:\\Program Files\\7-Zip\\Uninstall.exe\" /S",
+    "windows_installer": null,
     "display_icon": "C:\\Program Files\\7-Zip\\7zFM.exe",
     "system_component": null,
     "parent_key_name": null,
@@ -966,6 +967,7 @@ The registry holds 343 keys on the reference machine and roughly 157 application
     "install_location": null,
     "uninstall_string": "\"C:\\Program Files\\Obsidian\\Uninstall Obsidian.exe\" /allusers",
     "quiet_uninstall_string": "\"C:\\Program Files\\Obsidian\\Uninstall Obsidian.exe\" /allusers /S",
+    "windows_installer": null,
     "display_icon": "C:\\Program Files\\Obsidian\\Obsidian.exe,0",
     "system_component": null,
     "parent_key_name": null,
@@ -982,6 +984,7 @@ The registry holds 343 keys on the reference machine and roughly 157 application
     "install_location": null,
     "uninstall_string": null,
     "quiet_uninstall_string": null,
+    "windows_installer": null,
     "display_icon": null,
     "system_component": 1,
     "parent_key_name": null,
@@ -998,6 +1001,7 @@ The registry holds 343 keys on the reference machine and roughly 157 application
     "install_location": null,
     "uninstall_string": null,
     "quiet_uninstall_string": null,
+    "windows_installer": null,
     "display_icon": null,
     "system_component": null,
     "parent_key_name": null,
@@ -1014,6 +1018,7 @@ The registry holds 343 keys on the reference machine and roughly 157 application
     "install_location": null,
     "uninstall_string": "\"C:\\Program Files\\Example\\unins000.exe\"",
     "quiet_uninstall_string": null,
+    "windows_installer": null,
     "display_icon": null,
     "system_component": null,
     "parent_key_name": "TheSuite",
@@ -1030,6 +1035,7 @@ The registry holds 343 keys on the reference machine and roughly 157 application
     "install_location": null,
     "uninstall_string": null,
     "quiet_uninstall_string": null,
+    "windows_installer": null,
     "display_icon": null,
     "system_component": null,
     "parent_key_name": null,
@@ -1046,6 +1052,7 @@ The registry holds 343 keys on the reference machine and roughly 157 application
     "install_location": null,
     "uninstall_string": "C:\\PROGRA~1\\DIFX\\873032~1\\DPINST~1.EXE /u C:\\WINDOWS\\System32\\DriverStore\\FileRepository\\arduino.inf_amd64_6cb1adf1bc8e1d48\\arduino.inf",
     "quiet_uninstall_string": null,
+    "windows_installer": null,
     "display_icon": "C:\\PROGRA~1\\DIFX\\873032~1\\DPINST~1.EXE,0",
     "system_component": null,
     "parent_key_name": null,
@@ -1062,6 +1069,7 @@ The registry holds 343 keys on the reference machine and roughly 157 application
     "install_location": "C:\\Users\\test\\AppData\\Local\\Example",
     "uninstall_string": "MsiExec.exe /I{6F320B93-EE3C-4826-85E0-000000000002}",
     "quiet_uninstall_string": null,
+    "windows_installer": 1,
     "display_icon": null,
     "system_component": null,
     "parent_key_name": null,
@@ -1078,6 +1086,7 @@ The registry holds 343 keys on the reference machine and roughly 157 application
     "install_location": "C:\\Program Files (x86)\\Notepad++",
     "uninstall_string": "\"C:\\Program Files (x86)\\Notepad++\\uninstall.exe\"",
     "quiet_uninstall_string": null,
+    "windows_installer": null,
     "display_icon": "C:\\Program Files (x86)\\Notepad++\\notepad++.exe",
     "system_component": null,
     "parent_key_name": null,
@@ -1266,6 +1275,11 @@ pub struct RawEntry {
     pub install_location: Option<String>,
     pub uninstall_string: Option<String>,
     pub quiet_uninstall_string: Option<String>,
+    /// `1` when the Windows Installer owns this product. It is the flag
+    /// Windows itself sets, and the only trustworthy way to tell a real MSI
+    /// from an entry that merely happens to be keyed by a GUID, which the
+    /// driver packages on the reference machine are.
+    pub windows_installer: Option<u32>,
     /// A path to an `.exe` or `.ico`, optionally followed by `,` and a
     /// resource index.
     pub display_icon: Option<String>,
@@ -1805,6 +1819,12 @@ Add to the `tests` module in `crates/brokey-core/src/sources/windows/arp.rs`:
 
     /// What is left opens the publisher's own uninstaller, and the
     /// interface says so rather than drawing a rail that cannot move.
+    ///
+    /// The driver package is the entry that makes this rule load-bearing. Its
+    /// key name is a well-formed GUID, so a filter that went on shape alone
+    /// would call it an MSI and answer `msiexec /x` on something the Windows
+    /// Installer has never heard of. It has no `WindowsInstaller` flag, which
+    /// is what settles it.
     #[test]
     fn everything_else_opens_the_publishers_uninstaller() {
         let entries = fixture();
@@ -1813,7 +1833,7 @@ Add to the `tests` module in `crates/brokey-core/src/sources/windows/arp.rs`:
             .find(|e| e.display_name.as_deref().is_some_and(|n| n.contains("Arduino")))
             .expect("the fixture has one");
         let Some(Removal::Interactive(command)) = removal(driver) else {
-            panic!("a DIFX driver has neither a quiet string nor a ProductCode");
+            panic!("a DIFX driver has no quiet string and is not a Windows Installer product");
         };
         assert_eq!(command.program, "C:\\PROGRA~1\\DIFX\\873032~1\\DPINST~1.EXE");
     }
@@ -1886,15 +1906,19 @@ use crate::model::{Command, Step};
 pub enum Removal {
     /// The publisher gave a silent switch. Nothing opens.
     Quiet(Command),
-    /// The key is named by an MSI ProductCode, so the Windows Installer
-    /// removes it silently whatever the uninstall string says.
+    /// The uninstall key carries `WindowsInstaller = 1` and is named by a
+    /// well-formed ProductCode, so the Windows Installer removes it silently
+    /// whatever the uninstall string says.
     Msi { product_code: String },
     /// The publisher's own uninstaller opens a window the user clicks
     /// through. The interface says so rather than drawing a progress rail.
     Interactive(Command),
 }
 
-/// Whether a key name is an MSI ProductCode: braces around a GUID.
+/// Whether a key name is shaped like an MSI ProductCode: braces around a
+/// GUID. The shape alone proves nothing, because plenty of things are keyed
+/// by a GUID without being MSI products; `removal` asks for the
+/// `WindowsInstaller` flag as well.
 fn product_code(key_name: &str) -> Option<&str> {
     let inner = key_name.strip_prefix('{')?.strip_suffix('}')?;
     let groups: Vec<&str> = inner.split('-').collect();
@@ -1924,7 +1948,13 @@ pub fn removal(e: &RawEntry) -> Option<Removal> {
     if let Some(quiet) = e.quiet_uninstall_string.as_deref().and_then(command) {
         return Some(Removal::Quiet(quiet));
     }
-    if let Some(code) = product_code(&e.key_name) {
+    // The flag says the Windows Installer owns this product; the shape says
+    // the key name is safe to hand it as an argument. A DIFX driver package
+    // is keyed by a GUID and has the shape without the flag, and msiexec
+    // would fail on it while Brokey reported a silent removal.
+    if e.windows_installer == Some(1)
+        && let Some(code) = product_code(&e.key_name)
+    {
         return Some(Removal::Msi {
             product_code: code.to_string(),
         });
@@ -1968,7 +1998,7 @@ pub fn removal_step(e: &RawEntry) -> Option<Step> {
 cargo test -p brokey-core --lib arp
 ```
 
-Expected: PASS, twenty-six tests.
+Expected: PASS, twenty-seven tests.
 
 - [ ] **Step 5: Commit**
 
