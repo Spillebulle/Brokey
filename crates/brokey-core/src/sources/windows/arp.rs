@@ -10,7 +10,9 @@
 //! it is tested against a fixture rather than against whatever happens to
 //! be installed on the machine running the tests.
 
+use crate::model::Op;
 use crate::model::{Command, Package, PackageKind, Picture, SourceKind, Step};
+use crate::{Error, Query, Result, Source, SourceStatus, Update};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -382,6 +384,147 @@ pub fn removal_step(e: &RawEntry) -> Option<Step> {
         needs_root: e.hive.needs_elevation(),
         weight: 10,
     })
+}
+
+/// The Add/Remove Programs source. The entries are read once when the
+/// source is built, as the pacman source reads its database once.
+pub struct Arp {
+    pub(crate) entries: Vec<RawEntry>,
+}
+
+impl Arp {
+    /// Gated because it reads the registry. The `Source` implementation
+    /// below is not: it answers from `entries`, so the fixture tests
+    /// compile and run on Linux as well.
+    #[cfg(windows)]
+    pub fn new() -> Arp {
+        Arp { entries: read() }
+    }
+
+    fn applications(&self) -> impl Iterator<Item = &RawEntry> {
+        self.entries.iter().filter(|e| is_application(e))
+    }
+
+    fn find(&self, id: &str) -> Option<&RawEntry> {
+        self.applications().find(|e| package_id(e) == id)
+    }
+}
+
+#[cfg(windows)]
+impl Default for Arp {
+    fn default() -> Arp {
+        Arp::new()
+    }
+}
+
+impl Source for Arp {
+    fn kind(&self) -> SourceKind {
+        SourceKind::Arp
+    }
+
+    fn status(&self) -> SourceStatus {
+        let found = self.applications().count();
+        SourceStatus {
+            kind: SourceKind::Arp,
+            available: true,
+            reason: None,
+            detail: Some(format!("{found} applications")),
+            searchable: false,
+            setup: None,
+        }
+    }
+
+    /// The registry is a record of what is here, not a catalogue of what
+    /// could be. Searching it would return only what is already installed,
+    /// which the Installed page already shows.
+    fn search(&self, _query: &Query) -> Result<Vec<crate::Package>> {
+        Ok(Vec::new())
+    }
+
+    fn installed(&self) -> Result<Vec<crate::Package>> {
+        Ok(self.applications().map(to_package).collect())
+    }
+
+    /// An uninstall key records one version, the installed one, and knows
+    /// nothing about a newer one.
+    fn updates(&self) -> Result<Vec<Update>> {
+        Ok(Vec::new())
+    }
+
+    fn details(&self, id: &str) -> Result<crate::Package> {
+        self.find(id).map(to_package).ok_or_else(|| {
+            Error::from_source(
+                SourceKind::Arp,
+                format!("{id} is not in the uninstall registry. It may have been removed already."),
+            )
+        })
+    }
+
+    fn plan(&self, op: &Op) -> Result<Vec<Step>> {
+        let Op::Remove { package } = op else {
+            return Ok(Vec::new());
+        };
+        let entry = self.find(&package.id).ok_or_else(|| {
+            Error::from_source(
+                SourceKind::Arp,
+                format!(
+                    "{} is not in the uninstall registry, so there is nothing to remove.",
+                    package.id
+                ),
+            )
+        })?;
+        Ok(removal_step(entry).into_iter().collect())
+    }
+}
+
+/// Read the three uninstall keys. The only impure function in the module,
+/// and the only one gated: `windows-registry` is a Windows-only dependency,
+/// so everything else here stays compiled and tested on both platforms.
+#[cfg(windows)]
+pub fn read() -> Vec<RawEntry> {
+    let mut entries = Vec::new();
+    let roots: [(Hive, &windows_registry::Key, &str); 3] = [
+        (
+            Hive::Machine,
+            windows_registry::LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        ),
+        (
+            Hive::Machine32,
+            windows_registry::LOCAL_MACHINE,
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        ),
+        (
+            Hive::User,
+            windows_registry::CURRENT_USER,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        ),
+    ];
+    for (hive, root, path) in roots {
+        let Ok(key) = root.open(path) else { continue };
+        let Ok(names) = key.keys() else { continue };
+        for name in names {
+            let Ok(sub) = key.open(&name) else { continue };
+            entries.push(RawEntry {
+                hive,
+                key_name: name,
+                display_name: sub.get_string("DisplayName").ok(),
+                display_version: sub.get_string("DisplayVersion").ok(),
+                publisher: sub.get_string("Publisher").ok(),
+                install_location: sub.get_string("InstallLocation").ok(),
+                uninstall_string: sub.get_string("UninstallString").ok(),
+                quiet_uninstall_string: sub.get_string("QuietUninstallString").ok(),
+                windows_installer: sub.get_u32("WindowsInstaller").ok(),
+                display_icon: sub.get_string("DisplayIcon").ok(),
+                system_component: sub.get_u32("SystemComponent").ok(),
+                parent_key_name: sub.get_string("ParentKeyName").ok(),
+                release_type: sub.get_string("ReleaseType").ok(),
+                estimated_size: sub.get_u32("EstimatedSize").ok().map(u64::from),
+                url_info_about: sub.get_string("URLInfoAbout").ok(),
+            });
+        }
+    }
+    entries
 }
 
 #[cfg(test)]
@@ -797,5 +940,99 @@ mod tests {
                 "/norestart"
             ]
         );
+    }
+
+    use crate::{Op, Query, Source};
+
+    fn source_from_fixture() -> Arp {
+        Arp { entries: fixture() }
+    }
+
+    /// The registry has no notion of a newer version, so this source never
+    /// searches and never reports an update. A source that answered either
+    /// would be inventing something.
+    #[test]
+    fn it_neither_searches_nor_updates() {
+        let arp = source_from_fixture();
+        assert!(arp.search(&Query::new("obsidian")).unwrap().is_empty());
+        assert!(arp.updates().unwrap().is_empty());
+    }
+
+    #[test]
+    fn installed_is_the_filtered_entries_as_packages() {
+        let arp = source_from_fixture();
+        let installed = arp.installed().unwrap();
+        assert_eq!(installed.len(), 5);
+        assert!(installed.iter().all(|p| p.installed));
+        assert!(
+            installed
+                .iter()
+                .any(|p| p.name == "Obsidian" && p.id == "HKLM\\Obsidian")
+        );
+    }
+
+    #[test]
+    fn details_answers_for_an_id_it_has_and_says_so_for_one_it_does_not() {
+        let arp = source_from_fixture();
+        assert_eq!(arp.details("HKLM\\Obsidian").unwrap().name, "Obsidian");
+        let e = arp.details("HKLM\\Nothing").unwrap_err();
+        assert!(e.message.contains("HKLM\\Nothing"), "{}", e.message);
+    }
+
+    /// The only operation this source plans. Anything else is a source that
+    /// has nothing to do, which is an empty list rather than an error.
+    #[test]
+    fn it_plans_a_removal_and_nothing_else() {
+        let arp = source_from_fixture();
+        let reference = crate::model::PackageRef {
+            source: SourceKind::Arp,
+            id: "HKLM\\Obsidian".to_string(),
+        };
+        let steps = arp
+            .plan(&Op::Remove {
+                package: reference.clone(),
+            })
+            .unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].title, "Removing Obsidian");
+
+        let install = arp.plan(&Op::Install { package: reference }).unwrap();
+        assert!(install.is_empty());
+    }
+
+    /// The source is always there: the registry is part of Windows. It says
+    /// how many applications it found, for the status bar.
+    #[test]
+    fn it_is_always_available_and_says_how_much_it_found() {
+        let arp = source_from_fixture();
+        let status = arp.status();
+        assert!(status.available);
+        assert_eq!(status.reason, None);
+        assert_eq!(status.detail.as_deref(), Some("5 applications"));
+    }
+
+    /// The real registry on the machine running the tests. Ignored by
+    /// default because its answer depends on what is installed, and run
+    /// with `cargo test -- --ignored live_arp` when the parser changes.
+    #[test]
+    #[ignore]
+    #[cfg(windows)]
+    fn live_arp_reads_this_machine() {
+        let arp = Arp::new();
+        let installed = arp.installed().unwrap();
+        assert!(
+            installed.len() > 10,
+            "a real Windows machine has more than ten applications, found {}",
+            installed.len()
+        );
+        assert!(installed.iter().all(|p| !p.name.is_empty()));
+        // Every one of them must be removable somehow, or the ladder has a
+        // gap that the fixture did not show.
+        let stuck: Vec<&str> = arp
+            .applications()
+            .filter(|e| removal(e).is_none())
+            .filter_map(|e| e.display_name.as_deref())
+            .collect();
+        assert!(stuck.is_empty(), "no route off the machine for {stuck:?}");
     }
 }

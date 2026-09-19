@@ -33,7 +33,7 @@ pub fn all(
     #[cfg(windows)]
     {
         let _ = (system, client, catalogue, preferences);
-        Vec::new()
+        vec![Box::new(windows::arp::Arp::new())]
     }
 }
 
@@ -75,12 +75,12 @@ fn linux_all(
 
 #[cfg(test)]
 mod tests {
-    /// Until Task 8 there is no Windows source. The point of the test is
-    /// that `all` answers rather than panicking or being absent, so the
-    /// application and the text mode both run on Windows from here on.
+    /// The point of the test is that `all` answers rather than panicking or
+    /// being absent, so the application and the text mode both run on
+    /// Windows from here on.
     #[cfg(windows)]
     #[test]
-    fn windows_has_no_sources_yet() {
+    fn windows_has_the_add_remove_programs_source() {
         let system = crate::system::detect();
         let sources = super::all(
             &system,
@@ -88,6 +88,7 @@ mod tests {
             crate::appstream::Catalogue::load_system(&system),
             &crate::Preferences::default(),
         );
-        assert!(sources.is_empty());
+        let kinds: Vec<_> = sources.iter().map(|s| s.kind()).collect();
+        assert_eq!(kinds, [crate::SourceKind::Arp]);
     }
 }
