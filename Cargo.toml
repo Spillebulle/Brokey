@@ -30,6 +30,13 @@ ruzstd = "0.9"
 tar = "0.4"
 directories = "6"
 regex = "1"
+# The winget catalogue is a SQLite database inside a zip. `bundled` compiles
+# SQLite from source rather than linking the host's: the objection in
+# docs/architecture.md was to libalpm and libapt, which tie one binary to one
+# distribution's library version. A statically bundled SQLite is the opposite.
+rusqlite = { version = "0.37", features = ["bundled"] }
+# Only to unwrap that one member. No encryption, no zip64 writing.
+zip = { version = "6", default-features = false, features = ["deflate"] }
 
 # Debug builds keep our own crates cheap to recompile while dependencies are
 # built optimised: parsing a 36 MB package database in an unoptimised

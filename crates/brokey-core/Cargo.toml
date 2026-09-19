@@ -20,6 +20,8 @@ ruzstd = { workspace = true }
 tar = { workspace = true }
 directories = { workspace = true }
 regex = { workspace = true }
+rusqlite = { workspace = true }
+zip = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
