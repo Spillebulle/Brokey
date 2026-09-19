@@ -7,6 +7,7 @@
 //! Windows 11 begins.
 
 use crate::model::{Platform, SystemInfo};
+use std::path::{Path, PathBuf};
 
 /// The values read from `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion`.
 /// Kept apart from the reading so the naming is a pure function with tests.
@@ -91,6 +92,40 @@ fn read_registry_version() -> RegistryVersion {
     }
 }
 
+/// The first directory on `PATH` holding an executable of that name.
+/// Windows has no executable bit: a name without an extension is tried
+/// against each extension in `PATHEXT`, in that order, the way the shell
+/// does it.
+#[cfg(windows)]
+pub fn which(name: &str) -> Option<PathBuf> {
+    let path = std::env::var("PATH").ok()?;
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    which_in(name, &path, &pathext)
+}
+
+/// The pure half of [`which`], taking the two environment variables as
+/// text. Compiled on both platforms so its tests run on both; only the
+/// wrapper that reads the real environment is Windows-only.
+pub fn which_in(name: &str, path: &str, pathext: &str) -> Option<PathBuf> {
+    let has_extension = Path::new(name).extension().is_some();
+    for dir in path.split(';').filter(|d| !d.is_empty()) {
+        let base = Path::new(dir).join(name);
+        if has_extension {
+            if base.is_file() {
+                return Some(base);
+            }
+            continue;
+        }
+        for extension in pathext.split(';').filter(|e| !e.is_empty()) {
+            let candidate = Path::new(dir).join(format!("{name}{extension}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +194,88 @@ mod tests {
             from_registry_version(&core).pretty_name,
             "Windows 11 Home 26H1 (build 28120.2738)"
         );
+    }
+
+    /// The directories and the extensions come in as text so the search is
+    /// a pure function. Nothing here touches the real PATH.
+    #[test]
+    fn a_bare_name_finds_the_executable_with_an_extension() {
+        let dir = tempdir();
+        std::fs::write(dir.join("choco.exe"), b"").unwrap();
+        let found = which_in("choco", dir.to_str().unwrap(), ".COM;.EXE;.BAT");
+        assert!(same_file(
+            &found.expect("it is found"),
+            &dir.join("choco.exe")
+        ));
+    }
+
+    /// PATHEXT is tried in its own order, so a .com wins over a .exe when
+    /// it comes first, which is what the shell does.
+    #[test]
+    fn pathext_is_tried_in_order() {
+        let dir = tempdir();
+        std::fs::write(dir.join("thing.exe"), b"").unwrap();
+        std::fs::write(dir.join("thing.com"), b"").unwrap();
+        let found = which_in("thing", dir.to_str().unwrap(), ".COM;.EXE");
+        assert!(same_file(
+            &found.expect("it is found"),
+            &dir.join("thing.com")
+        ));
+    }
+
+    /// A name that already carries an extension is taken as it is.
+    #[test]
+    fn a_name_with_an_extension_is_not_extended_again() {
+        let dir = tempdir();
+        std::fs::write(dir.join("winget.exe"), b"").unwrap();
+        let found = which_in("winget.exe", dir.to_str().unwrap(), ".EXE");
+        assert_eq!(found, Some(dir.join("winget.exe")));
+    }
+
+    #[test]
+    fn a_name_that_is_not_there_is_not_found() {
+        let dir = tempdir();
+        assert_eq!(which_in("absent", dir.to_str().unwrap(), ".EXE"), None);
+    }
+
+    /// Directories earlier in PATH win.
+    #[test]
+    fn the_first_directory_on_the_path_wins() {
+        let first = tempdir();
+        let second = tempdir();
+        std::fs::write(first.join("dup.exe"), b"").unwrap();
+        std::fs::write(second.join("dup.exe"), b"").unwrap();
+        let path = format!("{};{}", first.display(), second.display());
+        assert!(same_file(
+            &which_in("dup", &path, ".EXE").expect("it is found"),
+            &first.join("dup.exe")
+        ));
+    }
+
+    /// `PATHEXT` supplies the extension's spelling and is conventionally upper
+    /// case, while the file on disk is usually lower case, so the path `which_in`
+    /// builds and the path the test wrote can differ in spelling while naming one
+    /// file. Canonicalising both is how the test says "the same file" rather than
+    /// "the same string".
+    fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// A unique directory under the system temporary directory, removed by
+    /// the operating system rather than by the test, so a failing test
+    /// leaves its evidence behind.
+    fn tempdir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "brokey-which-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

@@ -13,7 +13,7 @@ pub mod windows;
 #[cfg(unix)]
 pub use linux::{detect, is_executable, which};
 #[cfg(windows)]
-pub use windows::detect;
+pub use windows::{detect, which};
 
 // Pure on both platforms, so it is always in scope.
 pub use linux::from_os_release;
