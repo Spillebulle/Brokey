@@ -39,8 +39,12 @@ fn parts(v: &str) -> Vec<Part<'_>> {
         }
         let slice = &v[start..i];
         out.push(if digit {
-            // A segment longer than u64 is not a version anyone ships; if one
-            // turns up, compare it as text rather than panicking.
+            // A segment longer than u64 is not a version anyone ships; if
+            // one turns up, keep it as text rather than panicking. Note what
+            // that means when the other side has an ordinary number at the
+            // same position: the rule below makes the number win, so an
+            // oversized segment loses to a smaller one. Nothing real reaches
+            // this, and losing beats panicking.
             match slice.parse::<u64>() {
                 Ok(n) => Part::Number(n),
                 Err(_) => Part::Text(slice),
@@ -64,7 +68,10 @@ pub fn cmp(a: &str, b: &str) -> Ordering {
             (Some(Part::Number(x)), Some(Part::Number(y))) => x.cmp(y),
             (Some(Part::Text(x)), Some(Part::Text(y))) => x.cmp(y),
             // A number is a release, text beside it is a qualifier, and a
-            // release beats a qualifier: 26.03 is newer than 26.02-v1.
+            // release beats a qualifier: 1.0.0.1 is newer than 1.0.0-rc1.
+            // This arm only fires when the two meet at the same position; a
+            // version that merely has text somewhere later, like
+            // 26.02-v1.5.7-R2, is settled by its numbers long before.
             (Some(Part::Number(_)), Some(Part::Text(_))) => Ordering::Greater,
             (Some(Part::Text(_)), Some(Part::Number(_))) => Ordering::Less,
         };
@@ -106,8 +113,18 @@ mod tests {
             ("1.02", "1.2", Ordering::Equal),
             // A missing segment is lower, so 1.0 is older than 1.0.1.
             ("1.0", "1.0.1", Ordering::Less),
-            // Real catalogue shapes with text in them.
+            // Real catalogue shapes with text in them. Note this one is
+            // settled by 2 against 3 at the second segment and never reaches
+            // the text, which is why the two rows after it exist.
             ("26.02-v1.5.7-R2", "26.03", Ordering::Less),
+            // A release beats a qualifier when they meet at the same
+            // position. Every other row in this table diverges on a pair of
+            // numbers first, so without these two the rule is never run.
+            ("1.0.0-rc1", "1.0.0.1", Ordering::Less),
+            ("26.02-v1", "26.02-2", Ordering::Less),
+            // A string with no recognisable segment at all sorts below one
+            // that has any, the same way a missing segment does.
+            ("...", "1.0", Ordering::Less),
             ("8.9.8", "8.9.8", Ordering::Equal),
             // A version that is only text falls back to comparing text.
             ("unknown", "unknown", Ordering::Equal),
