@@ -65,6 +65,10 @@ pub fn run(args: &[String]) -> i32 {
             println!("{USAGE}");
             0
         }
+        "--version" | "-V" => {
+            println!("brokey {}", env!("CARGO_PKG_VERSION"));
+            0
+        }
         "search" => search(rest),
         "sources" => sources(rest),
         "updates" => updates(rest),
