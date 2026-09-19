@@ -182,6 +182,57 @@ pub fn is_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpKind {
+    Install,
+    Update,
+    Remove,
+}
+
+/// One `winget.exe` call.
+///
+/// `--silent` and `--disable-interactivity` because the helper runs with no
+/// terminal: a prompt would hang the plan rather than ask anybody anything.
+/// `--exact` because the id is exact and a near match would install something
+/// the user did not choose.
+pub fn operation_step(kind: OpKind, id: &str) -> Step {
+    let (verb, title) = match kind {
+        OpKind::Install => ("install", format!("Installing {id}")),
+        OpKind::Update => ("upgrade", format!("Updating {id}")),
+        OpKind::Remove => ("uninstall", format!("Removing {id}")),
+    };
+    let mut args = vec![
+        verb.to_string(),
+        "--exact".to_string(),
+        "--id".to_string(),
+        id.to_string(),
+        "--silent".to_string(),
+        "--disable-interactivity".to_string(),
+        "--accept-source-agreements".to_string(),
+    ];
+    if kind != OpKind::Remove {
+        // Nothing is being agreed to when something is taken off.
+        args.push("--accept-package-agreements".to_string());
+    }
+    Step {
+        source: SourceKind::Winget,
+        title,
+        command: Command {
+            program: "winget.exe".to_string(),
+            args,
+            env: Vec::new(),
+            cwd: None,
+        },
+        // `--disable-interactivity` tells winget not to prompt, so it cannot
+        // ask for elevation on its own: a machine-scope package fails unless
+        // the step is already elevated, and most popular winget packages are
+        // machine scope. Choosing the scope per package needs the manifest,
+        // which is the metadata ladder in a later plan.
+        needs_root: true,
+        weight: 10,
+    }
+}
+
 /// Where `winget.exe` is, if it is anywhere.
 #[cfg(windows)]
 pub fn winget_exe() -> Option<std::path::PathBuf> {
@@ -397,8 +448,42 @@ impl Source for Winget {
         Ok(to_package(&row))
     }
 
-    fn plan(&self, _op: &crate::model::Op) -> Result<Vec<Step>> {
-        todo!("Task 7")
+    fn plan(&self, op: &crate::model::Op) -> Result<Vec<Step>> {
+        use crate::model::Op;
+        let step = match op {
+            Op::Install { package } if package.source == SourceKind::Winget => {
+                operation_step(OpKind::Install, &package.id)
+            }
+            Op::Update { package } if package.source == SourceKind::Winget => {
+                operation_step(OpKind::Update, &package.id)
+            }
+            Op::Remove { package } if package.source == SourceKind::Winget => {
+                operation_step(OpKind::Remove, &package.id)
+            }
+            Op::UpdateAll { source } if *source == SourceKind::Winget => Step {
+                source: SourceKind::Winget,
+                title: "Updating everything winget can".to_string(),
+                command: Command {
+                    program: "winget.exe".to_string(),
+                    args: vec![
+                        "upgrade".to_string(),
+                        "--all".to_string(),
+                        "--silent".to_string(),
+                        "--disable-interactivity".to_string(),
+                        "--accept-source-agreements".to_string(),
+                        "--accept-package-agreements".to_string(),
+                    ],
+                    env: Vec::new(),
+                    cwd: None,
+                },
+                needs_root: true,
+                weight: 10,
+            },
+            // Refresh is Brokey's own catalogue, not winget's, and `catalogue`
+            // fetches it when it is stale. There is nothing to run.
+            _ => return Ok(Vec::new()),
+        };
+        Ok(vec![step])
     }
 }
 
@@ -583,5 +668,89 @@ mod tests {
         assert!(!is_sha256(""));
         assert!(!is_sha256("<!DOCTYPE html><html>404</html>"));
         assert!(!is_sha256("aa' -and $false -and 'bb"));
+    }
+
+    /// Every operation is non-interactive, because the helper has no terminal
+    /// and a prompt would hang the plan rather than ask anyone anything.
+    #[test]
+    fn every_operation_is_silent_and_pre_agreed() {
+        for kind in [OpKind::Install, OpKind::Update, OpKind::Remove] {
+            let s = operation_step(kind, "Valve.Steam");
+            let args = s.command.args.join(" ");
+            assert!(args.contains("--silent"), "{args}");
+            assert!(args.contains("--disable-interactivity"), "{args}");
+            assert!(args.contains("--accept-source-agreements"), "{args}");
+            assert_eq!(s.command.program, "winget.exe");
+        }
+    }
+
+    /// An install names the package exactly. A near match would install
+    /// something the user did not choose.
+    #[test]
+    fn an_install_is_exact_and_names_the_id() {
+        let s = operation_step(OpKind::Install, "Valve.Steam");
+        assert_eq!(s.command.args[0], "install");
+        assert!(s.command.args.contains(&"--exact".to_string()));
+        assert!(s.command.args.contains(&"Valve.Steam".to_string()));
+        assert_eq!(s.title, "Installing Valve.Steam");
+    }
+
+    /// Uninstall takes no package agreement. Nothing is being agreed to, and
+    /// `winget uninstall` does not accept the flag at all, so passing it would
+    /// fail the step rather than be ignored. Checked against winget 1.30.140.
+    #[test]
+    fn a_removal_does_not_accept_a_package_agreement() {
+        let s = operation_step(OpKind::Remove, "Valve.Steam");
+        assert_eq!(s.command.args[0], "uninstall");
+        assert!(
+            !s.command
+                .args
+                .contains(&"--accept-package-agreements".to_string())
+        );
+    }
+
+    /// Refreshing is Brokey's own catalogue, which `catalogue()` fetches when it
+    /// is stale, and setting up is expanded by the planner from `setup()`.
+    /// Neither is a `winget.exe` call, so neither plans one.
+    #[test]
+    fn refresh_and_setup_plan_nothing() {
+        let w = Winget::new(crate::http::Client::shared());
+        for op in [
+            crate::model::Op::Refresh {
+                source: SourceKind::Winget,
+            },
+            crate::model::Op::Setup {
+                source: SourceKind::Winget,
+            },
+        ] {
+            assert!(w.plan(&op).unwrap().is_empty(), "{op:?}");
+        }
+    }
+
+    /// A plan for an operation this source has nothing to do with is empty, not
+    /// an error. The store asks every source about every operation.
+    #[test]
+    fn an_operation_for_another_source_plans_nothing() {
+        let w = Winget::new(crate::http::Client::shared());
+        let op = crate::model::Op::Install {
+            package: crate::model::PackageRef {
+                source: SourceKind::Flatpak,
+                id: "org.videolan.VLC".to_string(),
+            },
+        };
+        assert!(w.plan(&op).unwrap().is_empty());
+    }
+
+    /// Updating everything winget can update is one step, not one per package.
+    #[test]
+    fn update_all_is_a_single_step() {
+        let w = Winget::new(crate::http::Client::shared());
+        let steps = w
+            .plan(&crate::model::Op::UpdateAll {
+                source: SourceKind::Winget,
+            })
+            .unwrap();
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].command.args.contains(&"--all".to_string()));
     }
 }
