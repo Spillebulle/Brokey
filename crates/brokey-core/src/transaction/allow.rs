@@ -292,7 +292,11 @@ fn check_winget(command: &Command) -> Result<(), String> {
             "install" => OpKind::Install,
             "upgrade" => OpKind::Update,
             "uninstall" => OpKind::Remove,
-            other => return Err(not_a_winget_command(other)),
+            // `describe(command)`, not `verb` alone: `not_a_winget_command`
+            // is given the whole command everywhere else it is called, and
+            // a bare empty-args command has an empty verb, which would
+            // otherwise refuse a step by a name with nothing in it.
+            _ => return Err(not_a_winget_command(&describe(command))),
         };
         // Where `operation_step` puts the id, and the only one of its eight
         // arguments that is not a fixed word. An id is a package id and
@@ -1393,6 +1397,25 @@ mod windows_tests {
         assert!(err.contains("export"), "the refusal names the verb: {err}");
         assert!(err.ends_with('.'), "the reason is a sentence: {err}");
         assert!(!err.contains('\u{2014}'), "no em dashes: {err}");
+    }
+
+    /// A winget command with no arguments at all has no verb to name, so
+    /// the refusal must fall back to the whole command rather than naming
+    /// nothing. Before this the sentence read "...Brokey did not build: .
+    /// Only..." with an empty name where the offending command should be.
+    #[test]
+    fn a_winget_command_with_no_arguments_names_the_program_not_nothing() {
+        let plan = plan_of(vec![step_from(SourceKind::Winget, WINGET, &[])]);
+        let err = validate(&plan).expect_err("no verb is on the list");
+        assert!(
+            err.contains(WINGET),
+            "the refusal names the command it refused: {err}"
+        );
+        assert!(
+            !err.contains(": .\u{0020}"),
+            "the name must not be empty: {err}"
+        );
+        assert!(err.ends_with('.'), "the reason is a sentence: {err}");
     }
 
     /// The list is about the command, not the source that claims it. A step
