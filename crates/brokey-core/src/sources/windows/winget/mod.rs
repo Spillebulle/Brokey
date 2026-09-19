@@ -188,6 +188,118 @@ pub fn winget_exe() -> Option<std::path::PathBuf> {
     crate::system::windows::which("winget")
 }
 
+const BY_CODE_SQL: &str = "
+SELECT p.id, p.name, p.moniker, p.latest_version, np.norm_publisher
+FROM packages p
+LEFT JOIN norm_publishers2 np ON np.package = p.rowid
+WHERE p.rowid = (SELECT package FROM productcodes2 WHERE productcode = :code LIMIT 1)
+   OR p.rowid = (SELECT package FROM upgradecodes2 WHERE upgradecode = :code LIMIT 1)
+LIMIT 1
+";
+
+const BY_NAME_AND_PUBLISHER_SQL: &str = "
+SELECT p.id, p.name, p.moniker, p.latest_version, np.norm_publisher
+FROM packages p
+JOIN norm_names2 nn ON nn.package = p.rowid AND nn.norm_name = :name
+JOIN norm_publishers2 np ON np.package = p.rowid AND np.norm_publisher = :publisher
+LIMIT 2
+";
+
+/// The catalogue package an uninstall entry is, if it is one.
+///
+/// Three rungs, exact first. The product and upgrade code rungs are exact.
+/// The name rung requires the publisher to agree as well, and then requires
+/// the answer to be unique: the index folds version families, so `python` and
+/// `pythonsoftwarefoundation` name every Python at once. Nothing is returned
+/// when more than one package fits, because a wrong join offers an update
+/// that replaces one application with a different one.
+pub fn match_entry(
+    db: &rusqlite::Connection,
+    e: &crate::sources::windows::arp::RawEntry,
+) -> Result<Option<query::Row>> {
+    // Codes are stored lower-case in the catalogue and spelt however the
+    // installer felt in the registry. Fold both sides.
+    let code = e.key_name.trim().to_lowercase();
+    if let Some(row) = query::rows(db, BY_CODE_SQL, &[(":code", &code)])?
+        .into_iter()
+        .next()
+    {
+        return Ok(Some(row));
+    }
+    let (Some(name), Some(publisher)) = (&e.display_name, &e.publisher) else {
+        return Ok(None);
+    };
+    let found = query::rows(
+        db,
+        BY_NAME_AND_PUBLISHER_SQL,
+        &[
+            (":name", &query::normalise(name)),
+            (":publisher", &query::normalise(publisher)),
+        ],
+    )?;
+    // Exactly one, or none. See the note above about version families.
+    match found.len() {
+        1 => Ok(found.into_iter().next()),
+        _ => Ok(None),
+    }
+}
+
+/// Everything the catalogue recognises on this machine.
+pub fn installed_from(
+    db: &rusqlite::Connection,
+    entries: &[crate::sources::windows::arp::RawEntry],
+) -> Result<Vec<crate::model::Package>> {
+    let mut out = Vec::new();
+    for e in entries
+        .iter()
+        .filter(|e| crate::sources::windows::arp::is_application(e))
+    {
+        if let Some(row) = match_entry(db, e)? {
+            let mut p = to_package(&row);
+            p.installed = true;
+            p.installed_version = e.display_version.clone();
+            out.push(p);
+        }
+    }
+    Ok(out)
+}
+
+/// Those of them the catalogue has a newer version of.
+pub fn updates_from(
+    db: &rusqlite::Connection,
+    entries: &[crate::sources::windows::arp::RawEntry],
+) -> Result<Vec<crate::model::Update>> {
+    let mut out = Vec::new();
+    for e in entries
+        .iter()
+        .filter(|e| crate::sources::windows::arp::is_application(e))
+    {
+        let Some(row) = match_entry(db, e)? else {
+            continue;
+        };
+        let have = e.display_version.clone().unwrap_or_default();
+        if !version::newer(&have, &row.latest_version) {
+            continue;
+        }
+        out.push(crate::model::Update {
+            package: crate::model::PackageRef {
+                source: SourceKind::Winget,
+                id: row.id.clone(),
+            },
+            name: row.name.clone(),
+            kind: crate::model::PackageKind::App,
+            summary: None,
+            icon: None,
+            from: Some(have),
+            to: row.latest_version.clone(),
+            download_size: None,
+            published: None,
+            is_self: false,
+        });
+    }
+    Ok(out)
+}
+
 impl Source for Winget {
     fn kind(&self) -> SourceKind {
         SourceKind::Winget
@@ -255,11 +367,23 @@ impl Source for Winget {
     }
 
     fn installed(&self) -> Result<Vec<crate::model::Package>> {
-        todo!("Task 6")
+        #[cfg(windows)]
+        {
+            let db = self.catalogue()?;
+            installed_from(&db, &crate::sources::windows::arp::read())
+        }
+        #[cfg(not(windows))]
+        Ok(Vec::new())
     }
 
     fn updates(&self) -> Result<Vec<crate::model::Update>> {
-        todo!("Task 6")
+        #[cfg(windows)]
+        {
+            let db = self.catalogue()?;
+            updates_from(&db, &crate::sources::windows::arp::read())
+        }
+        #[cfg(not(windows))]
+        Ok(Vec::new())
     }
 
     fn details(&self, id: &str) -> Result<crate::model::Package> {

@@ -129,6 +129,23 @@ pub fn count(db: &rusqlite::Connection) -> Result<i64> {
         .map_err(|e| failed("counted", e))
 }
 
+/// Run a statement and collect its rows. The caller decides what more than
+/// one of them means; the statement's own `LIMIT` decides how many can come
+/// back at all.
+pub fn rows(db: &rusqlite::Connection, sql: &str, params: &[(&str, &String)]) -> Result<Vec<Row>> {
+    let mut stmt = db.prepare_cached(sql).map_err(|e| failed("read", e))?;
+    let bound: Vec<(&str, &dyn rusqlite::ToSql)> = params
+        .iter()
+        .map(|(k, v)| (*k, *v as &dyn rusqlite::ToSql))
+        .collect();
+    let found = stmt
+        .query_map(bound.as_slice(), row_from)
+        .map_err(|e| failed("read", e))?;
+    found
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| failed("read", e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +339,224 @@ mod tests {
             "{:?}",
             p.facts
         );
+    }
+
+    fn entry(
+        key: &str,
+        name: &str,
+        version: &str,
+        publisher: &str,
+    ) -> crate::sources::windows::arp::RawEntry {
+        crate::sources::windows::arp::RawEntry {
+            hive: crate::sources::windows::arp::Hive::Machine,
+            key_name: key.to_string(),
+            display_name: Some(name.to_string()),
+            display_version: Some(version.to_string()),
+            publisher: Some(publisher.to_string()),
+            install_location: None,
+            uninstall_string: None,
+            quiet_uninstall_string: None,
+            windows_installer: None,
+            display_icon: None,
+            system_component: None,
+            parent_key_name: None,
+            release_type: None,
+            estimated_size: None,
+            url_info_about: None,
+        }
+    }
+
+    /// The exact rung. The registry spells the GUID in capitals and the
+    /// catalogue stores it in lower case, so the join has to fold.
+    #[test]
+    fn an_uninstall_key_matches_its_product_code_whatever_the_case() {
+        let (_d, db) = db();
+        let e = entry(
+            "{23170F69-40C1-2701-2603-000001000000}",
+            "7-Zip 26.03 (x64)",
+            "26.03",
+            "Igor Pavlov",
+        );
+        let row = super::super::match_entry(&db, &e).unwrap().unwrap();
+        assert_eq!(row.id, "7zip.7zip");
+    }
+
+    /// Not every product code is a GUID. The column holds whatever the key is
+    /// named, and `notepad++` is a real row in the real catalogue.
+    #[test]
+    fn a_product_code_that_is_not_a_guid_still_matches() {
+        let (_d, db) = db();
+        let e = entry(
+            "notepad++",
+            "Notepad++ (64-bit x64)",
+            "8.9.8",
+            "Notepad++ Team",
+        );
+        assert_eq!(
+            super::super::match_entry(&db, &e).unwrap().unwrap().id,
+            "Notepad++.Notepad++"
+        );
+    }
+
+    /// The upgrade code rung, for an entry whose product code changed between
+    /// versions but whose upgrade code did not.
+    #[test]
+    fn an_upgrade_code_matches_when_the_product_code_does_not() {
+        let (_d, db) = db();
+        let e = entry(
+            "{A1B2C3D4-0000-0000-0000-00000000F00D}",
+            "Something Else",
+            "1.0",
+            "Nobody",
+        );
+        assert_eq!(
+            super::super::match_entry(&db, &e).unwrap().unwrap().id,
+            "Notepad++.Notepad++"
+        );
+    }
+
+    /// The name rung fires only with the publisher beside it.
+    #[test]
+    fn a_name_matches_when_the_publisher_agrees() {
+        let (_d, db) = db();
+        let e = entry("Obsidian_is_not_a_code", "Obsidian", "1.13.0", "Obsidian");
+        assert_eq!(
+            super::super::match_entry(&db, &e).unwrap().unwrap().id,
+            "Obsidian.Obsidian"
+        );
+    }
+
+    /// And not without it. This is the rung that would otherwise join every
+    /// Python to every other Python, and a wrong join offers an update that
+    /// replaces one application with a different one.
+    #[test]
+    fn a_name_alone_is_not_enough() {
+        let (_d, db) = db();
+        let e = entry(
+            "SomeKey",
+            "Obsidian",
+            "1.13.0",
+            "A Different Company Entirely",
+        );
+        assert!(super::super::match_entry(&db, &e).unwrap().is_none());
+    }
+
+    /// The index folds version families, so a name that reaches the whole family
+    /// reaches all of it at once. Choosing one would offer an update that
+    /// replaces the installed Python with a different Python, so it chooses none.
+    #[test]
+    fn a_name_that_matches_a_whole_version_family_is_not_a_match() {
+        let (_d, db) = db();
+        let e = entry(
+            "NotAProductCode",
+            "Python",
+            "3.14.2",
+            "Python Software Foundation",
+        );
+        assert!(super::super::match_entry(&db, &e).unwrap().is_none());
+    }
+
+    /// What the name rung is actually worth, written down so nobody mistakes it
+    /// for more. Brokey's `normalise` folds to letters and digits; winget's own
+    /// normaliser, which produced the `norm_names2` values, also strips versions,
+    /// architectures and locale tags, so it stored `python` for `Python 3.0`.
+    /// A real registry DisplayName carries all of those, so the two disagree and
+    /// the rung misses. It misses safely, and the exact rung below is what
+    /// actually finds software installed through winget.
+    #[test]
+    fn a_realistic_display_name_misses_the_name_rung_and_the_product_code_saves_it() {
+        let (_d, db) = db();
+        let named = entry(
+            "NotAProductCode",
+            "Python 3.14.2 (64-bit)",
+            "3.14.2",
+            "Python Software Foundation",
+        );
+        assert!(
+            super::super::match_entry(&db, &named).unwrap().is_none(),
+            "the name rung is not expected to reach a versioned display name"
+        );
+
+        let keyed = entry(
+            "{6B1C1B1E-0000-0000-0000-000000000314}",
+            "Python 3.14.2 (64-bit)",
+            "3.14.2",
+            "Python Software Foundation",
+        );
+        assert_eq!(
+            super::super::match_entry(&db, &keyed).unwrap().unwrap().id,
+            "Python.Python.3.14"
+        );
+    }
+
+    /// Something the catalogue has never heard of.
+    #[test]
+    fn an_unmatched_entry_is_none() {
+        let (_d, db) = db();
+        let e = entry(
+            "NothingLikeThis",
+            "Bespoke Internal Tool",
+            "4.2",
+            "Our IT Department",
+        );
+        assert!(super::super::match_entry(&db, &e).unwrap().is_none());
+    }
+
+    /// An older installed version against the catalogue's newest is an update,
+    /// and it names both ends.
+    #[test]
+    fn an_older_installed_version_is_an_update() {
+        let (_d, db) = db();
+        let e = entry(
+            "bd400747-f0c1-5638-a859-982036102edf",
+            "Obsidian",
+            "1.10.0",
+            "Obsidian",
+        );
+        let ups = super::super::updates_from(&db, std::slice::from_ref(&e)).unwrap();
+        assert_eq!(ups.len(), 1);
+        assert_eq!(ups[0].from.as_deref(), Some("1.10.0"));
+        assert_eq!(ups[0].to, "1.13.7");
+    }
+
+    /// The same version is not an update, and neither is a newer installed one.
+    #[test]
+    fn an_up_to_date_entry_is_not_an_update() {
+        let (_d, db) = db();
+        let same = entry(
+            "bd400747-f0c1-5638-a859-982036102edf",
+            "Obsidian",
+            "1.13.7",
+            "Obsidian",
+        );
+        assert!(
+            super::super::updates_from(&db, std::slice::from_ref(&same))
+                .unwrap()
+                .is_empty()
+        );
+        let ahead = entry(
+            "bd400747-f0c1-5638-a859-982036102edf",
+            "Obsidian",
+            "2.0.0",
+            "Obsidian",
+        );
+        assert!(
+            super::super::updates_from(&db, std::slice::from_ref(&ahead))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Installed packages carry the version that is on the machine, not the
+    /// catalogue's, and say they are installed.
+    #[test]
+    fn installed_packages_report_the_installed_version() {
+        let (_d, db) = db();
+        let e = entry("7-zip", "7-Zip 26.00 (x64)", "26.00", "Igor Pavlov");
+        let ps = super::super::installed_from(&db, std::slice::from_ref(&e)).unwrap();
+        assert_eq!(ps.len(), 1);
+        assert!(ps[0].installed);
+        assert_eq!(ps[0].installed_version.as_deref(), Some("26.00"));
+        assert_eq!(ps[0].version.as_deref(), Some("26.03"));
     }
 }
