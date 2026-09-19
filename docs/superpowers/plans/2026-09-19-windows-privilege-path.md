@@ -1234,7 +1234,32 @@ Replace the `geteuid() != 0` check with the Windows equivalent: `GetTokenInforma
 
 Add `windows-sys` to `crates/brokey-helper/Cargo.toml` under `[target."cfg(windows)".dependencies]` with only the features the helper actually calls: `Win32_Foundation`, `Win32_Security`, `Win32_System_Threading`. It creates no pipe and elevates nothing, so it needs none of the rest.
 
-Delete the old Windows `main` that printed "This build of brokey-helper does not run on Windows yet."
+**There is no longer a separate Windows `main` to delete.** Task 7 de-gated `main`, and a binary cannot have two, so the "refuses on Windows" behaviour moved into two `#[cfg]`ed sites inside the shared body: the privilege check and the per-step call site. Read Task 7's report for exactly where they are. You are replacing those refusals, not removing a stub.
+
+- [ ] **Step 4: Decide how a Windows step's program is resolved, because nothing has yet**
+
+Task 7 correctly left this alone, and it is the last unspecified thing in the privilege path. It has to be settled here, because the helper cannot run a step without it, and getting it wrong fails at Task 10 rather than at compile time.
+
+The facts, checked on the development machine:
+
+- `sources/windows/winget/mod.rs`'s `operation_step` sets `program: "winget.exe"`, a **bare name**.
+- `winget_exe()` resolves that through `system::windows::which`, which reads `PATH` **from the calling process's own environment** and finds `%LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe`.
+- That path is a per-user app execution alias — a reparse point — and on this machine it points at `C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.30.140.0_x64__8wekyb3d8bbwe\winget.exe`.
+- **The helper runs elevated, so its `%LOCALAPPDATA%` is the administrator's, not the user's.** A bare-name search inside the helper therefore looks in the wrong profile, and may find nothing or something else.
+
+On Linux this problem is solved by `CHILD_PATH`, a fixed `/usr/bin:/bin:/usr/sbin:/sbin` that the helper searches, so resolution is predictable and cannot be steered. Windows has no equivalent fixed location, and inventing one would be a security decision made in passing.
+
+**The rule, which is stronger than Linux's rather than weaker:** the unelevated side resolves the program to an absolute path while building the plan, and **the helper never searches anything.** Resolution happens where the user's own environment is correct, and the elevated process is handed a concrete path with no ambiguity left in it.
+
+1. Make the plan carry an absolute path for winget steps. Pick the seam yourself: `operation_step` may take the resolved path, or `plan()` may fill it in, whichever fits how that module is already shaped — `available()` already calls `winget_exe()`, so probing the machine there is in keeping. Note `winget/mod.rs`'s test at about line 708 asserts `s.command.program == "winget.exe"` and will need to change with you; change it to assert what is now true rather than deleting it.
+
+2. **Check empirically what you actually get**, rather than reasoning about it. Print what `winget_exe()` returns on this machine, and what `std::fs::canonicalize` makes of it. If canonicalising is needed to get past the per-user alias to the real executable, do it, and strip any `\\?\` prefix that comes back, since that spelling confuses more things than it helps. Put the observed values in your report.
+
+3. In the helper's Windows step-running path, **refuse a program that is not an absolute path**, with a sentence saying so. That is the control that makes the rule true rather than merely intended: it means no elevated child is ever located by a search the user's environment did not determine.
+
+4. The closed list needs no change for this — it already compares `Path::new(&program).file_name()`, so an absolute path to `winget.exe` passes exactly as the bare name did.
+
+5. **Environment.** Linux scrubs the child's environment to a fixed short list. Windows cannot do the same: winget and MSI uninstallers genuinely need a working environment, and an empty one breaks them. Let the child inherit the helper's environment, plus the step's own `env` entries, and **write a comment saying that this is a weaker guarantee than Linux's and why it is accepted** — the controls that carry the weight here are the closed list and absolute-path resolution, not environment scrubbing. Do not quietly leave this undocumented; a future reader comparing the two platforms will otherwise assume it is an oversight.
 
 - [ ] **Step 4: Run and watch them pass**
 
