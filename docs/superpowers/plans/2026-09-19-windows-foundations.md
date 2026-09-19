@@ -2338,13 +2338,25 @@ In `.github/workflows/ci.yml`, add `windows-latest` to the matrix at line 96:
         os: [ubuntu-22.04, ubuntu-22.04-arm, windows-latest]
 ```
 
-and guard the Linux-only step so the Windows runner skips it:
+and guard the only Linux-only step, `Install Linux dependencies`, so the Windows runner skips it:
 
 ```yaml
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
 ```
+
+The comment above the `rust:` job explains why the Linux runners are `ubuntu-22.04` rather than `latest`. It will now sit above a matrix that includes Windows, so it has to account for that too:
+
+```yaml
+  # ubuntu-22.04 rather than latest, matching the release: a binary built
+  # against an old glibc runs on newer distributions and not the other way
+  # round, so that is the machine whose answer matters. Windows has no
+  # equivalent argument, because it keeps old binaries working rather than
+  # the other way round, so windows-latest is the right runner there.
+```
+
+Nothing else in the job is Linux-only: `actions/setup-node`, `npm ci`, `npm run build`, `Swatinem/rust-cache` and `dtolnay/rust-toolchain` all run on Windows, and Tauri uses WebView2 there rather than WebKitGTK, which `windows-latest` already has.
 
 - [ ] **Step 9: Update the honest lists**
 
