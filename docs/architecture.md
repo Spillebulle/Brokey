@@ -18,6 +18,10 @@ built and tested first; Flatpak and Snap wherever they are installed; apt and
 dnf are built to the same interface and are marked as untested until they have
 run on a real Debian and a real Fedora.
 
+**Superseded.** "Any Linux machine" above: `docs/superpowers/specs/2026-09-19-windows-support-design.md`
+extends the same sentence to Windows, from winget, Add/Remove Programs,
+Chocolatey, Scoop, the Microsoft Store and GitHub releases.
+
 ## Decisions
 
 | | |
@@ -31,7 +35,7 @@ run on a real Debian and a real Fedora.
 | Grouping | Results from different sources that are the same application are one row with several **editions**. The join key is the AppStream component id where both sides have one, then a normalised name match with a confidence score. Never a guess presented as certain |
 | Accent hue | **300** (plum). Umber is 60/68, Muster 200, HomeLab 160, Tally 255 |
 | Application id | `io.github.spillebulle.brokey`. Binary and package `brokey`, helper `brokey-helper` |
-| Targets | Linux x86-64 and ARM64. Nothing else |
+| Targets | Linux x86-64 and ARM64. Nothing else. **Superseded**: see `docs/superpowers/specs/2026-09-19-windows-support-design.md`, which adds Windows x86-64 and ARM64 |
 | Licence | GPL-3.0-or-later |
 
 ## The shape
