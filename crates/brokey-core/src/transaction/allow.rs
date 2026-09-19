@@ -19,6 +19,8 @@
 use crate::model::Plan;
 #[cfg(unix)]
 use crate::model::{Command, Step};
+#[cfg(windows)]
+use crate::model::{SourceKind, Step};
 #[cfg(unix)]
 use std::path::Component;
 use std::path::{Path, PathBuf};
@@ -142,11 +144,65 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
     Ok(())
 }
 
-/// Placeholder until the Windows closed list lands in the next task.
+/// What may run as Administrator on Windows.
+///
+/// Two things, and the reasoning differs for each.
+///
+/// `winget.exe` is a fixed program with a fixed set of verbs, so it is
+/// checked the way the Linux list checks a package manager: the program is
+/// named and the verb comes from a short list.
+///
+/// A removal from Add/Remove Programs is not checkable that way. The
+/// command is whatever the installer wrote into the registry years ago, so
+/// no requirement about its shape would be honest. It is admitted because
+/// the step came from the Add/Remove Programs source, which read it out of
+/// the registry rather than inventing it, and because the confirm dialog
+/// shows the user that exact command line before anything runs. Widening
+/// this is a deliberate edit here with a test beside it.
+#[cfg(windows)]
+const WINGET_VERBS: [&str; 3] = ["install", "upgrade", "uninstall"];
+
 #[cfg(windows)]
 pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
-    let _ = (plan, allowed);
-    Err("Brokey cannot run anything as Administrator yet.".to_string())
+    for step in plan.steps.iter().filter(|s| s.needs_root) {
+        check_step(step, allowed)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn check_step(step: &Step, allowed: &Allowed) -> Result<(), String> {
+    // Windows has no equivalent of the package-file directories the Linux
+    // list guards: nothing here is handed a file to install.
+    let _ = allowed;
+    let program = Path::new(&step.command.program)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match step.source {
+        SourceKind::Winget => {
+            if program != "winget.exe" {
+                return Err(not_allowed(&step.command.program));
+            }
+            let verb = step.command.args.first().map(String::as_str).unwrap_or("");
+            if !WINGET_VERBS.contains(&verb) {
+                return Err(not_allowed(verb));
+            }
+            Ok(())
+        }
+        SourceKind::Arp => Ok(()),
+        other => Err(not_allowed(&format!("{other:?}"))),
+    }
+}
+
+/// The one sentence a refusal produces, in the register the Linux list
+/// uses: what was refused, and what the rule is.
+#[cfg(windows)]
+fn not_allowed(what: &str) -> String {
+    format!(
+        "The helper refused a step it does not allow: {what}. Only winget and a \
+         removal Windows itself recorded may run as Administrator."
+    )
 }
 
 /// The sentence for a refused step. One shape everywhere, so the page and the
@@ -576,8 +632,8 @@ fn list(words: &[&str]) -> String {
     }
 }
 
-/// This module is entirely about the Linux closed list; Task 3 adds a
-/// Windows test module beside it.
+/// This module is entirely about the Linux closed list; the Windows test
+/// module sits beside it below.
 #[cfg(unix)]
 #[cfg(test)]
 mod tests {
@@ -1118,5 +1174,133 @@ mod tests {
     #[test]
     fn an_empty_plan_is_fine() {
         assert_eq!(validate(&plan_of(Vec::new())), Ok(()));
+    }
+}
+
+#[cfg(windows)]
+#[cfg(test)]
+mod windows_tests {
+    use super::*;
+    use crate::model::{Command, SourceKind};
+
+    fn step_from(source: SourceKind, program: &str, args: &[&str]) -> Step {
+        Step {
+            source,
+            title: "Test".to_string(),
+            command: Command {
+                program: program.to_string(),
+                args: args.iter().map(|a| a.to_string()).collect(),
+                env: Vec::new(),
+                cwd: None,
+            },
+            needs_root: true,
+            weight: 1,
+        }
+    }
+
+    fn plan_of(steps: Vec<Step>) -> Plan {
+        Plan {
+            id: "test".to_string(),
+            ops: Vec::new(),
+            steps,
+        }
+    }
+
+    /// The three things winget is asked to do, and nothing else.
+    #[test]
+    fn the_winget_verbs_are_allowed() {
+        for verb in ["install", "upgrade", "uninstall"] {
+            let plan = plan_of(vec![step_from(
+                SourceKind::Winget,
+                "winget.exe",
+                &[verb, "--id", "Valve.Steam"],
+            )]);
+            assert_eq!(validate(&plan), Ok(()), "{verb} should be allowed");
+        }
+    }
+
+    /// A verb that is not one of the three is refused even from winget.
+    #[test]
+    fn another_winget_verb_is_refused() {
+        let plan = plan_of(vec![step_from(
+            SourceKind::Winget,
+            "winget.exe",
+            &["export", "--output", "C:/everything.json"],
+        )]);
+        let err = validate(&plan).expect_err("export is not on the list");
+        assert!(err.contains("export"), "the refusal names the verb: {err}");
+        assert!(err.ends_with('.'), "the reason is a sentence: {err}");
+        assert!(!err.contains('\u{2014}'), "no em dashes: {err}");
+    }
+
+    /// The list is about the program, not the source that claims it. A step
+    /// that says it is winget and runs something else is refused.
+    #[test]
+    fn a_step_cannot_claim_to_be_winget_and_run_something_else() {
+        let plan = plan_of(vec![step_from(
+            SourceKind::Winget,
+            "powershell.exe",
+            &["-Command", "Remove-Item C:/Windows -Recurse"],
+        )]);
+        let err = validate(&plan).expect_err("the program decides, not the source");
+        assert!(err.contains("powershell.exe"), "{err}");
+    }
+
+    /// A full path to winget is the same program as a bare name. Both the
+    /// registry and the catalogue produce absolute paths.
+    #[test]
+    fn winget_is_recognised_by_a_full_path_too() {
+        let plan = plan_of(vec![step_from(
+            SourceKind::Winget,
+            r"C:\Program Files\WindowsApps\winget.exe",
+            &["install", "--id", "Valve.Steam"],
+        )]);
+        assert_eq!(validate(&plan), Ok(()));
+    }
+
+    /// An uninstall string out of the registry is whatever the installer
+    /// wrote, so nothing about its shape can be required.
+    #[test]
+    fn an_add_remove_programs_removal_is_allowed() {
+        let plan = plan_of(vec![step_from(
+            SourceKind::Arp,
+            r"C:\Program Files\Thing\unins000.exe",
+            &["/SILENT"],
+        )]);
+        assert_eq!(validate(&plan), Ok(()));
+    }
+
+    /// A source with no Windows business is refused whatever it runs.
+    #[test]
+    fn a_step_from_another_platforms_source_is_refused() {
+        let plan = plan_of(vec![step_from(
+            SourceKind::Pacman,
+            "pacman",
+            &["-S", "steam"],
+        )]);
+        let err = validate(&plan).expect_err("pacman does not run on Windows");
+        assert!(
+            err.contains("Pacman"),
+            "the refusal names the source: {err}"
+        );
+    }
+
+    /// A session step is not the helper's business at all. The Linux list
+    /// makes the same check; this is the Windows half of it.
+    #[test]
+    fn a_session_step_never_reaches_the_helper() {
+        let mut step = step_from(SourceKind::Winget, "winget.exe", &["install"]);
+        step.needs_root = false;
+        assert_eq!(validate(&plan_of(vec![step])), Ok(()));
+    }
+
+    /// One bad step refuses the whole plan, so a plan is never half run.
+    #[test]
+    fn one_bad_step_refuses_the_whole_plan() {
+        let plan = plan_of(vec![
+            step_from(SourceKind::Winget, "winget.exe", &["install", "--id", "A"]),
+            step_from(SourceKind::Winget, "cmd.exe", &["/c", "whoami"]),
+        ]);
+        assert!(validate(&plan).is_err());
     }
 }
