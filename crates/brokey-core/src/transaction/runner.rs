@@ -359,9 +359,7 @@ impl Runner {
         let json = serde_json::to_string(&sub)
             .map_err(|e| format!("The plan could not be encoded: {e}."))?;
         sink.event(Event::AuthRequired { plan: id.clone() });
-        let Some((program, _leading)) = self.wrapper.split_first() else {
-            return Err("No privilege wrapper is configured.".to_string());
-        };
+        let program = elevation_program(&self.wrapper, helper)?;
         let mut elevated = elevate::start(helper, &self.wrapper)
             .map_err(|e| format!("Could not start {program}: {e}."))?;
         // The plan is written on its own thread. pkexec reads nothing until
@@ -561,6 +559,37 @@ fn sub_plan(plan: &Plan, run: &Run) -> Plan {
         id: plan.id.clone(),
         ops: plan.ops.clone(),
         steps: plan.steps[run.first..run.first + run.len].to_vec(),
+    }
+}
+
+/// What is about to be started, for the sentence shown when it cannot be,
+/// and the check that there is anything to start at all.
+///
+/// The two platforms differ in kind, not in detail. Linux starts the helper
+/// through a wrapper, `pkexec`, so a runner whose wrapper is empty cannot
+/// elevate at all and that is a misconfiguration worth its own sentence.
+/// Windows has no wrapper: `elevate::start` calls `ShellExecuteEx` with the
+/// `runas` verb on the helper itself and ignores the wrapper entirely, so
+/// the empty one `Runner::new` builds there is correct, and the thing being
+/// started is the helper.
+///
+/// This was one check for both platforms until a real Windows run met it.
+/// An empty wrapper is normal on Windows, so every plan was refused with
+/// "No privilege wrapper is configured." before it reached the seam that
+/// does not need one.
+fn elevation_program(wrapper: &[String], helper: &Path) -> Result<String, String> {
+    #[cfg(unix)]
+    {
+        let _ = helper;
+        match wrapper.split_first() {
+            Some((program, _)) => Ok(program.clone()),
+            None => Err("No privilege wrapper is configured.".to_string()),
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = wrapper;
+        Ok(helper.display().to_string())
     }
 }
 
@@ -829,6 +858,43 @@ pub fn summary(ops: &[Op]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wrapper `Runner::new` actually builds on this platform, which is
+    /// the state a real run meets. On Windows it is empty, and that used to
+    /// refuse every plan.
+    #[test]
+    fn the_default_wrapper_can_start_something() {
+        let runner = Runner::new();
+        let helper = Path::new("brokey-helper");
+        assert!(
+            elevation_program(&runner.wrapper, helper).is_ok(),
+            "a runner built the ordinary way cannot name what it would start"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_needs_no_wrapper_and_names_the_helper() {
+        let helper = Path::new(r"C:\Program Files\Brokey\brokey-helper.exe");
+        assert_eq!(
+            elevation_program(&[], helper),
+            Ok(helper.display().to_string()),
+            "ShellExecuteEx elevates the helper itself, so an empty wrapper is right"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linux_without_a_wrapper_cannot_elevate() {
+        assert_eq!(
+            elevation_program(&[], Path::new("brokey-helper")),
+            Err("No privilege wrapper is configured.".to_string())
+        );
+        assert_eq!(
+            elevation_program(&["pkexec".to_string()], Path::new("brokey-helper")),
+            Ok("pkexec".to_string())
+        );
+    }
 
     fn step(root: bool, weight: u32) -> Step {
         Step {
