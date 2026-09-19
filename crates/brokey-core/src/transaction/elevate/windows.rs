@@ -1,0 +1,330 @@
+//! The Windows end of the privilege seam.
+//!
+//! `ShellExecuteEx` is the only call that elevates and it cannot redirect
+//! standard streams; `CreateProcess` can redirect them and cannot elevate.
+//! So the unelevated side listens on a named pipe first, hands the name to
+//! the elevated helper on its command line, and the helper connects back.
+//! The pipe's DACL admits this user and the Administrators group and
+//! nobody else, so nothing else on the machine can answer in the helper's
+//! place or listen to what passes.
+
+use std::ffi::OsStr;
+use std::io;
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle, RawHandle};
+use std::ptr;
+
+use windows_sys::Win32::Foundation::{
+    ERROR_PIPE_CONNECTED, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree,
+};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    TokenUser,
+};
+use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+use windows_sys::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+/// A pipe name no other run will choose. The process id alone is not
+/// enough: one session can run two plans.
+pub fn pipe_name() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(r"\\.\pipe\brokey-{}-{n}-{nanos}", std::process::id())
+}
+
+/// `D:` then one allow-all entry for this user and one for the local
+/// Administrators group, which is the `BA` alias. A DACL that names nobody
+/// else denies everybody else, which is the point of writing one.
+pub fn sddl_for_current_user() -> io::Result<String> {
+    let sid = current_user_sid()?;
+    Ok(format!("D:(A;;GA;;;{sid})(A;;GA;;;BA)"))
+}
+
+/// Encodes a Rust string as a null-terminated UTF-16 buffer, the form every
+/// wide Win32 entry point below expects.
+fn wide_null(s: &str) -> Vec<u16> {
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+/// Reads a null-terminated UTF-16 string out of a raw pointer such as
+/// `ConvertSidToStringSidW` hands back.
+fn string_from_wide_ptr(ptr: *const u16) -> String {
+    // SAFETY: `ptr` is non-null and null-terminated, as guaranteed by the
+    // Win32 convention that produced it (checked by the caller before this
+    // is reached); this scans to the terminator and reads no further.
+    let slice = unsafe {
+        let mut len = 0usize;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        std::slice::from_raw_parts(ptr, len)
+    };
+    String::from_utf16_lossy(slice)
+}
+
+/// The current process's user SID, rendered the way `ConvertSidToStringSidW`
+/// does (`S-1-5-21-...`). This is what names "this user" in the pipe's DACL.
+fn current_user_sid() -> io::Result<String> {
+    // SAFETY: GetCurrentProcess takes no arguments and returns a pseudo
+    // handle that is always valid and never needs closing.
+    let process = unsafe { GetCurrentProcess() };
+
+    let mut token: HANDLE = ptr::null_mut();
+    // SAFETY: `process` is the valid pseudo handle above and `token` is a
+    // writable out-parameter; on success it is set to a handle this call
+    // gives us sole ownership of.
+    let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) };
+    if opened == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `token` was just set to a fresh, uniquely owned handle by the
+    // successful call above.
+    let token = unsafe { OwnedHandle::from_raw_handle(token as RawHandle) };
+
+    // The first call asks only for the required buffer size: a null buffer
+    // and zero length always make it fail, and the failure is not an error,
+    // only `len` (which Windows sets regardless) is used.
+    let mut len: u32 = 0;
+    // SAFETY: a null buffer and zero length are the documented way to ask
+    // `GetTokenInformation` for the size it needs, which it writes to `len`
+    // whether or not the call itself reports success.
+    unsafe {
+        GetTokenInformation(
+            token.as_raw_handle() as HANDLE,
+            TokenUser,
+            ptr::null_mut(),
+            0,
+            &mut len,
+        )
+    };
+    if len == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let mut buffer = vec![0u8; len as usize];
+    // SAFETY: `buffer` is exactly `len` bytes, the size the call above
+    // reported it needs, so this fills it with one `TOKEN_USER` without
+    // overrunning it.
+    let filled = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle() as HANDLE,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            len,
+            &mut len,
+        )
+    };
+    if filled == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: `buffer` now holds a `TOKEN_USER` written by the call above,
+    // which is why it was sized to at least `size_of::<TOKEN_USER>()`.
+    let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+
+    let mut sid_string: windows_sys::core::PWSTR = ptr::null_mut();
+    // SAFETY: `sid` points inside `buffer`, which is still alive, and
+    // `sid_string` is a valid out-parameter; on success it is set to memory
+    // this call allocates, which is freed with `LocalFree` below.
+    let converted = unsafe { ConvertSidToStringSidW(sid, &mut sid_string) };
+    if converted == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let result = string_from_wide_ptr(sid_string);
+
+    // SAFETY: `sid_string` was allocated by `ConvertSidToStringSidW` above
+    // and this frees it exactly once, now that its contents are copied.
+    unsafe { LocalFree(sid_string as HLOCAL) };
+
+    Ok(result)
+}
+
+/// One named pipe, listening for the one client this run expects.
+pub struct PipeServer {
+    /// `None` once `accept` has handed the connected handle to a `File`.
+    handle: Option<OwnedHandle>,
+}
+
+/// Builds the pipe's DACL, creates the pipe, and returns a server ready to
+/// accept the one client this run expects.
+pub fn listen(name: &str) -> io::Result<PipeServer> {
+    let sddl = sddl_for_current_user()?;
+    let sddl_wide = wide_null(&sddl);
+    let name_wide = wide_null(name);
+
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: `sddl_wide` is a valid null-terminated wide string and
+    // `descriptor` is a valid out-parameter; on success it is set to memory
+    // this call allocates, which is freed with `LocalFree` below.
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_wide.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            ptr::null_mut(),
+        )
+    };
+    if converted == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor,
+        bInheritHandle: 0,
+    };
+
+    // SAFETY: `name_wide` is a valid null-terminated wide string and
+    // `attributes` is a valid `SECURITY_ATTRIBUTES` whose descriptor
+    // `CreateNamedPipeW` copies into the pipe object before returning.
+    let handle = unsafe {
+        CreateNamedPipeW(
+            name_wide.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            1,
+            4096,
+            4096,
+            0,
+            &attributes,
+        )
+    };
+
+    // The pipe now holds its own copy of the descriptor (or the call
+    // failed and nothing needs it), so this run's copy is freed either way.
+    // SAFETY: `descriptor` was allocated by
+    // `ConvertStringSecurityDescriptorToSecurityDescriptorW` above and this
+    // frees it exactly once.
+    unsafe { LocalFree(descriptor as HLOCAL) };
+
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: `handle` is a valid, freshly created handle from the
+    // successful call above, and nothing else has taken ownership of it.
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) };
+
+    Ok(PipeServer {
+        handle: Some(handle),
+    })
+}
+
+impl PipeServer {
+    /// Waits for the helper to connect, then hands back an ordinary stream.
+    ///
+    /// Treats `ERROR_PIPE_CONNECTED` as success, not failure: a client that
+    /// opened the pipe before this call is made gets that error instead of
+    /// a zero return, and it means exactly the same thing.
+    pub fn accept(&mut self) -> io::Result<std::fs::File> {
+        let Some(handle) = self.handle.as_ref() else {
+            return Err(io::Error::other(
+                "this pipe has already accepted its client",
+            ));
+        };
+
+        // SAFETY: `handle` is the pipe's handle, valid for the duration of
+        // this call because `self.handle` still owns it; a null overlapped
+        // pointer requests the blocking form of `ConnectNamedPipe`.
+        let connected =
+            unsafe { ConnectNamedPipe(handle.as_raw_handle() as HANDLE, ptr::null_mut()) };
+        if connected == 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() != Some(ERROR_PIPE_CONNECTED as i32) {
+                return Err(err);
+            }
+        }
+
+        // The handle moves from here into the `File`: `self.handle` is
+        // `None` from this point, so nothing keeps a copy that could close
+        // it a second time.
+        let owned = self.handle.take().expect("checked Some above");
+        let raw = owned.into_raw_handle();
+        // SAFETY: `raw` came from the `OwnedHandle` this `PipeServer` held,
+        // which has just given up ownership by converting into it; the new
+        // `File` becomes the sole owner and closes it exactly once when
+        // dropped.
+        let file = unsafe { std::fs::File::from_raw_handle(raw) };
+        Ok(file)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two runs never collide. A stale pipe of the same name would make the
+    /// second run fail to listen, and one session can run two plans.
+    #[test]
+    fn every_pipe_has_its_own_name() {
+        let a = pipe_name();
+        let b = pipe_name();
+        assert_ne!(a, b);
+        assert!(a.starts_with(r"\\.\pipe\brokey-"), "{a}");
+    }
+
+    /// The descriptor names this user and the Administrators group and
+    /// nobody else. `BA` is the Administrators alias; the user arrives as a
+    /// SID string, so this checks the shape rather than a fixed value.
+    #[test]
+    fn the_descriptor_admits_this_user_and_administrators() {
+        let sddl = sddl_for_current_user().expect("this user has a SID");
+        assert!(sddl.starts_with("D:"), "{sddl}");
+        assert!(sddl.contains("(A;;GA;;;BA)"), "{sddl}");
+        assert!(sddl.contains("(A;;GA;;;S-1-5-"), "{sddl}");
+        assert!(!sddl.contains(";;;WD)"), "everyone can open it: {sddl}");
+        assert!(!sddl.contains(";;;AN)"), "anonymous can open it: {sddl}");
+    }
+
+    /// The descriptor is not merely a plausible string: Windows parses it
+    /// and creates the pipe, or this fails.
+    #[test]
+    fn windows_accepts_the_descriptor() {
+        let name = pipe_name();
+        let server = listen(&name).expect("the pipe is created");
+        drop(server);
+    }
+
+    /// A client connects and the two sides speak. This is the whole
+    /// contract the helper relies on.
+    #[test]
+    fn a_client_can_connect_and_be_read() {
+        use std::io::{BufRead, BufReader, Write};
+        let name = pipe_name();
+        let mut server = listen(&name).expect("the pipe is created");
+        let client_name = name.clone();
+        // The server is already listening: `listen` returns after
+        // CreateNamedPipeW, and a client may open a pipe that has no
+        // pending ConnectNamedPipe.
+        let client = std::thread::spawn(move || {
+            let mut f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&client_name)
+                .expect("the client opens the pipe");
+            writeln!(f, "from the helper").expect("the client writes");
+            f.flush().expect("the client flushes");
+        });
+        let stream = server.accept().expect("the client connects");
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("a line arrives");
+        assert_eq!(line.trim_end(), "from the helper");
+        client.join().expect("the client thread finished");
+    }
+}

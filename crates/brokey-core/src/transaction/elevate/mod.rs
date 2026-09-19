@@ -20,6 +20,12 @@ mod unix;
 #[cfg(unix)]
 use unix::Inner;
 
+/// The named pipe half of the Windows privilege seam: its own DACL, its own
+/// tests. `ShellExecuteEx` and the rest of the Windows `start` are a later
+/// plan; nothing here is called from this module yet.
+#[cfg(windows)]
+mod windows;
+
 /// The Windows side of privilege has not landed yet: there is nothing to
 /// wait on, only the sentence `start` already returned as an `Err`. This
 /// placeholder keeps `Elevated` one type on both platforms; a later plan
