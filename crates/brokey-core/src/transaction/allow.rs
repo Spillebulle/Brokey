@@ -16,8 +16,12 @@
 //! the list is a deliberate edit here with a test beside it, never a special
 //! case in a source.
 
-use crate::model::{Command, Plan, Step};
-use std::path::{Component, Path, PathBuf};
+use crate::model::Plan;
+#[cfg(unix)]
+use crate::model::{Command, Step};
+#[cfg(unix)]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 
 /// The directories a package file (`pacman -U`, `dpkg -i`, `rpm -U`, a `.deb`
 /// given to `apt-get install`) may come from.
@@ -64,12 +68,14 @@ impl Allowed {
 /// a source learns about it in a test rather than in a confusing log. The
 /// value is checked too, by [`env_value_ok`]: debconf evaluates
 /// `DEBIAN_FRONTEND` as Perl code as root, so only a frontend name passes.
+#[cfg(unix)]
 pub const ALLOWED_ENV: [&str; 3] = ["DEBIAN_FRONTEND", "LC_ALL", "LANG"];
 
 /// Whether `value` is a shape the variable `key` may carry to a root child.
 /// `DEBIAN_FRONTEND` is one lowercase word (`noninteractive`, `text`,
 /// `dialog`); `LC_ALL` and `LANG` are a locale name (`C.UTF-8`,
 /// `en_GB.UTF-8`, `de_DE@euro`). Nothing else is a variable the list names.
+#[cfg(unix)]
 pub fn env_value_ok(key: &str, value: &str) -> bool {
     let shape: fn(char) -> bool = match key {
         "DEBIAN_FRONTEND" => |c| c.is_ascii_lowercase(),
@@ -83,6 +89,7 @@ pub fn env_value_ok(key: &str, value: &str) -> bool {
 /// refused, whatever its arguments. `systemctl` and `ln` are here for one
 /// command each, the two that setting snapd up needs; see `systemctl` and
 /// `ln` below.
+#[cfg(unix)]
 pub const ALLOWED_PROGRAMS: [&str; 10] = [
     "pacman",
     "apt-get",
@@ -99,6 +106,7 @@ pub const ALLOWED_PROGRAMS: [&str; 10] = [
 /// The one remote the helper will add, by name and by the address of its
 /// `.flatpakrepo` file: Flathub, from either of its hosts. Setting Flatpak
 /// up adds it; nothing else is ever added as root.
+#[cfg(unix)]
 pub const FLATHUB_REMOTES: [(&str, &str); 2] = [
     ("flathub", "https://dl.flathub.org/repo/flathub.flatpakrepo"),
     ("flathub", "https://flathub.org/repo/flathub.flatpakrepo"),
@@ -106,13 +114,16 @@ pub const FLATHUB_REMOTES: [(&str, &str); 2] = [
 
 /// The one unit the helper will enable: snapd's socket, which starts snapd
 /// on the first request.
+#[cfg(unix)]
 pub const SNAPD_SOCKET_UNIT: &str = "snapd.socket";
 
 /// Where snapd mounts snaps on a distribution that does not use `/snap`
 /// (Arch, Fedora), and the link classic snaps need. Classic confinement is
 /// built with `/snap` as the mount point, so without the link a classic
 /// snap refuses to install; `snap` itself says to create it.
+#[cfg(unix)]
 pub const SNAP_MOUNT_DIR: &str = "/var/lib/snapd/snap";
+#[cfg(unix)]
 pub const SNAP_LINK: &str = "/snap";
 
 /// Check a plan against the closed list with the system package caches only.
@@ -123,6 +134,7 @@ pub fn validate(plan: &Plan) -> Result<(), String> {
 }
 
 /// [`validate`] with a caller-chosen list of package directories.
+#[cfg(unix)]
 pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
     for step in &plan.steps {
         check_step(step, allowed).map_err(|reason| refusal(&step.command, &reason))?;
@@ -130,8 +142,16 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
     Ok(())
 }
 
+/// Placeholder until the Windows closed list lands in the next task.
+#[cfg(windows)]
+pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
+    let _ = (plan, allowed);
+    Err("Brokey cannot run anything as Administrator yet.".to_string())
+}
+
 /// The sentence for a refused step. One shape everywhere, so the page and the
 /// tests can recognise it.
+#[cfg(unix)]
 pub fn refusal(command: &Command, reason: &str) -> String {
     format!(
         "The helper refused a step it does not allow: {}. {reason}",
@@ -139,6 +159,7 @@ pub fn refusal(command: &Command, reason: &str) -> String {
     )
 }
 
+#[cfg(unix)]
 fn describe(command: &Command) -> String {
     let mut text = command.program.clone();
     for arg in &command.args {
@@ -150,6 +171,7 @@ fn describe(command: &Command) -> String {
 
 /// Why one step may not run, or `Ok(())`. The reason is a sentence without
 /// the step in it; [`refusal`] adds that.
+#[cfg(unix)]
 pub fn check_step(step: &Step, allowed: &Allowed) -> Result<(), String> {
     if !step.needs_root {
         return Err("The helper only runs steps marked as needing root.".to_string());
@@ -180,6 +202,7 @@ pub fn check_step(step: &Step, allowed: &Allowed) -> Result<(), String> {
     check_command(&step.command, allowed)
 }
 
+#[cfg(unix)]
 fn check_command(command: &Command, allowed: &Allowed) -> Result<(), String> {
     let args: Vec<&str> = command.args.iter().map(String::as_str).collect();
     if args.iter().any(|a| a.contains(['\0', '\n'])) {
@@ -211,6 +234,7 @@ fn check_command(command: &Command, allowed: &Allowed) -> Result<(), String> {
 /// against them is the partial upgrade Arch does not support, so a pacman
 /// install or update is `-Syu` with names, and the store refreshes its own
 /// copy of the databases without root.
+#[cfg(unix)]
 fn pacman(args: &[&str], allowed: &Allowed) -> Result<(), String> {
     const VERBS: [&str; 4] = ["-S", "-Syu", "-Rs", "-U"];
     // `--asdeps` is here for the AUR path, which installs a build's
@@ -245,6 +269,7 @@ fn pacman(args: &[&str], allowed: &Allowed) -> Result<(), String> {
     positionals.iter().try_for_each(|n| name(n, NAME_MARKS))
 }
 
+#[cfg(unix)]
 fn apt_get(args: &[&str], allowed: &Allowed) -> Result<(), String> {
     const VERBS: [&str; 4] = ["install", "remove", "update", "upgrade"];
     const OPTIONS: [&str; 3] = ["-y", "--only-upgrade", "--with-new-pkgs"];
@@ -277,6 +302,7 @@ fn apt_get(args: &[&str], allowed: &Allowed) -> Result<(), String> {
 /// `dnf install` takes an `.rpm` file as well as a name, the way `apt-get
 /// install` takes a `.deb`; that is how the self-updater installs a
 /// downloaded release on Fedora.
+#[cfg(unix)]
 fn dnf(args: &[&str], allowed: &Allowed) -> Result<(), String> {
     const VERBS: [&str; 4] = ["install", "remove", "upgrade", "makecache"];
     const OPTIONS: [&str; 1] = ["-y"];
@@ -303,8 +329,10 @@ fn dnf(args: &[&str], allowed: &Allowed) -> Result<(), String> {
 /// `snap wait system seed.loaded`, exactly: a freshly started snapd seeds
 /// itself before it accepts an install ("too early for operation, device
 /// not yet seeded"), so setting snapd up waits for that in the same plan.
+#[cfg(unix)]
 pub const SNAP_WAIT_SEEDED: [&str; 3] = ["wait", "system", "seed.loaded"];
 
+#[cfg(unix)]
 fn snap(args: &[&str]) -> Result<(), String> {
     const VERBS: [&str; 3] = ["install", "remove", "refresh"];
     const OPTIONS: [&str; 1] = ["--classic"];
@@ -325,6 +353,7 @@ fn snap(args: &[&str]) -> Result<(), String> {
 /// `flatpak --system` is allowed even though a system installation normally
 /// authorises itself through polkit: on a machine without an agent it needs
 /// root, and the helper is the one root path the store has.
+#[cfg(unix)]
 fn flatpak(args: &[&str]) -> Result<(), String> {
     const VERBS: [&str; 3] = ["install", "uninstall", "update"];
     const OPTIONS: [&str; 3] = ["-y", "--noninteractive", "--system"];
@@ -349,8 +378,10 @@ fn flatpak(args: &[&str]) -> Result<(), String> {
 
 /// The sentence for a flatpak positional that names a file rather than a
 /// remote or a ref.
+#[cfg(unix)]
 pub const FLATPAK_NOT_A_FILE: &str = "A Flatpak positional must be a remote name or a ref, not a file path. The helper installs from remotes only.";
 
+#[cfg(unix)]
 fn flatpak_positional_is_a_path(value: &str) -> bool {
     value.starts_with(['/', '.'])
         || value
@@ -359,6 +390,7 @@ fn flatpak_positional_is_a_path(value: &str) -> bool {
 }
 
 /// The sentence for a `flatpak remote-add` that is not the one form allowed.
+#[cfg(unix)]
 pub const FLATPAK_REMOTE_ADD_ONLY_FLATHUB: &str = "The helper adds one Flatpak remote only: Flathub, as flatpak remote-add --if-not-exists --system flathub with Flathub's own .flatpakrepo address.";
 
 /// `flatpak remote-add --if-not-exists --system flathub <url>` with `url`
@@ -367,6 +399,7 @@ pub const FLATPAK_REMOTE_ADD_ONLY_FLATHUB: &str = "The helper adds one Flatpak r
 /// would fail on a machine that has it), not with any further option. A
 /// `.flatpakrepo` file can point anywhere and carry a GPG key, so the
 /// address is matched whole rather than by host.
+#[cfg(unix)]
 fn flatpak_remote_add(args: &[&str]) -> Result<(), String> {
     let form_ok = matches!(
         args,
@@ -382,6 +415,7 @@ fn flatpak_remote_add(args: &[&str]) -> Result<(), String> {
 
 /// `systemctl enable --now snapd.socket`, exactly: setting snapd up is the
 /// only reason the helper touches a unit.
+#[cfg(unix)]
 fn systemctl(args: &[&str]) -> Result<(), String> {
     if args == ["enable", "--now", SNAPD_SOCKET_UNIT] {
         Ok(())
@@ -394,6 +428,7 @@ fn systemctl(args: &[&str]) -> Result<(), String> {
 
 /// `ln -sfn /var/lib/snapd/snap /snap`, exactly: the link classic snaps
 /// need on a distribution that mounts snaps elsewhere.
+#[cfg(unix)]
 fn ln(args: &[&str]) -> Result<(), String> {
     if args == ["-sfn", SNAP_MOUNT_DIR, SNAP_LINK] {
         Ok(())
@@ -404,6 +439,7 @@ fn ln(args: &[&str]) -> Result<(), String> {
     }
 }
 
+#[cfg(unix)]
 fn chwd(args: &[&str]) -> Result<(), String> {
     match args {
         [verb, profile] if *verb == "-i" || *verb == "-r" => name(profile, NAME_MARKS),
@@ -411,6 +447,7 @@ fn chwd(args: &[&str]) -> Result<(), String> {
     }
 }
 
+#[cfg(unix)]
 fn one_file(
     program: &str,
     flag: &str,
@@ -430,6 +467,7 @@ fn one_file(
 /// either side of it, and everything else is positional. That is how getopt
 /// reads them, so a source may write `apt-get -y install foo` or
 /// `apt-get install -y foo` and both mean the same to the helper.
+#[cfg(unix)]
 fn verb_options_positionals<'a>(
     program: &str,
     args: &[&'a str],
@@ -450,10 +488,12 @@ fn verb_options_positionals<'a>(
     Ok((verb, opts, rest.to_vec()))
 }
 
+#[cfg(unix)]
 fn split<'a>(args: &[&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
     args.iter().partition(|a| a.starts_with('-'))
 }
 
+#[cfg(unix)]
 fn no_positionals(program: &str, verb: &str, positionals: &[&str]) -> Result<(), String> {
     if positionals.is_empty() {
         Ok(())
@@ -463,14 +503,19 @@ fn no_positionals(program: &str, verb: &str, positionals: &[&str]) -> Result<(),
 }
 
 /// Punctuation a pacman, snap, chwd name may contain beside letters and digits.
+#[cfg(unix)]
 const NAME_MARKS: &str = "@._+-";
 /// apt also takes `pkg:amd64`, `pkg=1.2-3` and `~` in a version.
+#[cfg(unix)]
 const APT_NAME_MARKS: &str = "@._+-:=~";
 /// dnf takes `name:stream` for modules.
+#[cfg(unix)]
 const DNF_NAME_MARKS: &str = "@._+-:";
 /// A ref (`app/org.gimp.GIMP/x86_64/stable`), an id or a remote name.
+#[cfg(unix)]
 const FLATPAK_REF_MARKS: &str = "./_-";
 
+#[cfg(unix)]
 fn name(value: &str, marks: &str) -> Result<(), String> {
     let shape_ok = !value.is_empty()
         && !value.starts_with('-')
@@ -495,6 +540,7 @@ fn name(value: &str, marks: &str) -> Result<(), String> {
 /// directories, whose file name carries the extension. Existence is not
 /// checked here: the tool reports a missing file itself, and a check that
 /// touched the disk would make this impure and untestable.
+#[cfg(unix)]
 fn package_file(value: &str, extension: &str, allowed: &Allowed) -> Result<(), String> {
     let path = Path::new(value);
     let normal = path.is_absolute()
@@ -521,6 +567,7 @@ fn package_file(value: &str, extension: &str, allowed: &Allowed) -> Result<(), S
     }
 }
 
+#[cfg(unix)]
 fn list(words: &[&str]) -> String {
     match words {
         [] => String::new(),
@@ -529,6 +576,9 @@ fn list(words: &[&str]) -> String {
     }
 }
 
+/// This module is entirely about the Linux closed list; Task 3 adds a
+/// Windows test module beside it.
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;

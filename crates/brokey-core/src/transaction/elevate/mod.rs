@@ -15,8 +15,26 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc::Receiver;
 
+#[cfg(unix)]
 mod unix;
+#[cfg(unix)]
 use unix::Inner;
+
+/// The Windows side of privilege has not landed yet: there is nothing to
+/// wait on, only the sentence `start` already returned as an `Err`. This
+/// placeholder keeps `Elevated` one type on both platforms; a later plan
+/// replaces it with the named-pipe helper this module's doc describes.
+#[cfg(not(unix))]
+struct Inner;
+
+#[cfg(not(unix))]
+impl Inner {
+    fn wait(&mut self) -> std::io::Result<Option<i32>> {
+        Err(std::io::Error::other(
+            "Brokey cannot obtain Administrator on this system.",
+        ))
+    }
+}
 
 /// One elevated helper run, however the platform started it.
 pub struct Elevated {
@@ -46,5 +64,15 @@ impl Elevated {
 /// arguments that obtain it, `pkexec` on Linux; it is ignored on a platform
 /// that has its own way.
 pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
-    unix::start(helper, wrapper)
+    #[cfg(unix)]
+    {
+        unix::start(helper, wrapper)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (helper, wrapper);
+        Err(std::io::Error::other(
+            "Brokey cannot obtain Administrator on this system.",
+        ))
+    }
 }
