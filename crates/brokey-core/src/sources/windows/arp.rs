@@ -359,9 +359,6 @@ pub fn removal(e: &RawEntry) -> Option<Removal> {
     Some(Removal::Interactive(interactive))
 }
 
-/// The step that removes the entry. `needs_root` means Administrator here:
-/// software the whole machine has needs it, software only this user has
-/// does not, which is what keeps the common case free of a prompt.
 /// The full path to `msiexec.exe`, which is what an MSI removal runs and
 /// the one program in a removal command that the registry does not name in
 /// full.
@@ -404,12 +401,26 @@ pub fn msiexec_program() -> String {
     "msiexec.exe".to_string()
 }
 
-pub fn removal_step(e: &RawEntry) -> Option<Step> {
+/// The step that removes the entry. `needs_root` means Administrator here:
+/// software the whole machine has needs it, software only this user has
+/// does not, which is what keeps the common case free of a prompt.
+///
+/// `msiexec` is the full path to `msiexec.exe`, which an MSI removal runs
+/// and which the registry never names in full. It is a parameter, exactly
+/// as `winget::operation_step`'s `program` is, so that this stays a pure
+/// function of its fixture: asking the kernel for the system directory in
+/// here would make the module's fixture tests depend on the machine that
+/// runs them, which is what the module comment at the top promises they do
+/// not. [`msiexec_program`] is what both call sites pass, and they must
+/// pass the same value: the runner and the helper each build the closed
+/// list from this function, and a disagreement between them would refuse
+/// every MSI removal after the prompt rather than before it.
+pub fn removal_step(e: &RawEntry, msiexec: &str) -> Option<Step> {
     let name = e.display_name.clone().unwrap_or_else(|| e.key_name.clone());
     let command = match removal(e)? {
         Removal::Quiet(c) | Removal::Interactive(c) => c,
         Removal::Msi { product_code } => Command {
-            program: msiexec_program(),
+            program: msiexec.to_string(),
             args: vec![
                 "/x".to_string(),
                 product_code,
@@ -532,7 +543,9 @@ impl Source for Arp {
                 ),
             )
         })?;
-        Ok(removal_step(entry).into_iter().collect())
+        Ok(removal_step(entry, &msiexec_program())
+            .into_iter()
+            .collect())
     }
 }
 
@@ -978,28 +991,60 @@ mod tests {
     #[test]
     fn only_a_machine_wide_entry_needs_elevation() {
         let entries = fixture();
-        let machine = removal_step(named(&entries, "Obsidian")).expect("a step");
-        let user = removal_step(named(&entries, "A per-user application")).expect("a step");
+        let machine = removal_step(named(&entries, "Obsidian"), MSIEXEC).expect("a step");
+        let user =
+            removal_step(named(&entries, "A per-user application"), MSIEXEC).expect("a step");
         assert!(machine.needs_root);
         assert!(!user.needs_root);
         assert_eq!(machine.source, crate::model::SourceKind::Arp);
         assert_eq!(machine.title, "Removing Obsidian");
     }
 
+    /// The path the caller resolves and hands in, so the fixture tests stay
+    /// a pure function of the fixture on both platforms.
+    const MSIEXEC: &str = r"C:\Windows\System32\msiexec.exe";
+
+    /// `msiexec_program` itself, which the fixture tests deliberately do not
+    /// exercise: they are handed a path rather than asking for one. This is
+    /// the only test that would catch a length or slicing mistake in the
+    /// `unsafe` block, or the hard-coded fallback being taken on a machine
+    /// where `GetSystemDirectoryW` answers perfectly well.
+    #[cfg(windows)]
+    #[test]
+    fn msiexec_is_a_real_program_in_the_system_directory() {
+        let program = msiexec_program();
+        let path = std::path::Path::new(&program);
+        assert!(path.is_absolute(), "{program}");
+        assert_eq!(
+            path.file_name().map(|n| n.to_string_lossy().to_lowercase()),
+            Some("msiexec.exe".to_string()),
+            "{program}"
+        );
+        assert!(
+            path.is_file(),
+            "{program} is not a file, so the system directory was read wrongly"
+        );
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let parent = path
+            .parent()
+            .expect("a full path has a parent")
+            .to_string_lossy()
+            .to_lowercase();
+        assert!(
+            parent.starts_with(&root.to_lowercase()),
+            "{program} is not under {root}"
+        );
+    }
+
     #[test]
     fn an_msi_step_runs_msiexec_quietly() {
         let entries = fixture();
-        let step = removal_step(named(&entries, "A per-user application")).expect("a step");
+        let step =
+            removal_step(named(&entries, "A per-user application"), MSIEXEC).expect("a step");
+        assert_eq!(step.command.program, MSIEXEC);
         assert_eq!(
             windows_file_stem(&step.command.program).to_lowercase(),
             "msiexec"
-        );
-        // The helper searches for nothing, so this must be a full path.
-        #[cfg(windows)]
-        assert!(
-            std::path::Path::new(&step.command.program).is_absolute(),
-            "{}",
-            step.command.program
         );
         assert_eq!(
             step.command.args,

@@ -88,10 +88,14 @@ impl Allowed {
     /// ever asked.
     #[cfg(windows)]
     pub fn with_registered_removals() -> Allowed {
+        // The same path `Arp::plan` gives `removal_step`, because the two
+        // lists are compared against each other. Resolved once here rather
+        // than per entry: it is a syscall, and the answer does not change.
+        let msiexec = crate::sources::windows::arp::msiexec_program();
         let removals = crate::sources::windows::arp::read()
             .iter()
             .filter(|e| e.hive.needs_elevation())
-            .filter_map(crate::sources::windows::arp::removal_step)
+            .filter_map(|e| crate::sources::windows::arp::removal_step(e, &msiexec))
             .map(|step| step.command)
             .collect();
         Allowed {
