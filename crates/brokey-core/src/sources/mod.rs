@@ -8,7 +8,10 @@
 
 #[cfg(unix)]
 pub mod linux;
-#[cfg(windows)]
+// Not gated: everything under it that calls the Windows API carries its own
+// `#[cfg(windows)]`, so the pure halves stay testable on both platforms, the
+// way `system::windows` does it. `linux` keeps its gate because its modules
+// call unix-only APIs throughout.
 pub mod windows;
 
 use crate::Source;
