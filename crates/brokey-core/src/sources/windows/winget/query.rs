@@ -275,4 +275,44 @@ mod tests {
         assert_eq!(normalise("Notepad++"), "notepad");
         assert_eq!(normalise("  7-Zip  "), "7zip");
     }
+
+    /// The publisher reaches the Package. `group.rs` joins a version family on
+    /// normalised name plus normalised publisher, so without this the fifteen
+    /// Pythons in the real catalogue stay fifteen rows on the page forever.
+    #[test]
+    fn the_package_carries_the_publisher_the_grouper_needs() {
+        let (_d, db) = db();
+        let row = by_id(&db, "Python.Python.3.14").unwrap().unwrap();
+        let p = super::super::to_package(&row);
+        assert_eq!(p.developer.as_deref(), Some("pythonsoftwarefoundation"));
+        assert_eq!(p.source, crate::model::SourceKind::Winget);
+        assert_eq!(p.id, "Python.Python.3.14");
+        assert_eq!(p.version.as_deref(), Some("3.14.2"));
+    }
+
+    /// The index has no description, homepage, licence or size, and the source
+    /// says so by leaving them empty rather than inventing them. The metadata
+    /// ladder that fetches manifests is a later plan.
+    #[test]
+    fn fields_the_index_does_not_have_are_empty() {
+        let (_d, db) = db();
+        let p = super::super::to_package(&by_id(&db, "7zip.7zip").unwrap().unwrap());
+        assert!(p.description.is_none());
+        assert!(p.homepage.is_none());
+        assert!(p.licence.is_none());
+        assert!(p.download_size.is_none());
+        assert!(p.screenshots.is_empty());
+    }
+
+    /// The moniker is what a person types, so it earns a row on the detail page.
+    #[test]
+    fn the_moniker_is_shown_as_a_fact() {
+        let (_d, db) = db();
+        let p = super::super::to_package(&by_id(&db, "Valve.Steam").unwrap().unwrap());
+        assert!(
+            p.facts.iter().any(|(k, v)| k == "Moniker" && v == "steam"),
+            "{:?}",
+            p.facts
+        );
+    }
 }

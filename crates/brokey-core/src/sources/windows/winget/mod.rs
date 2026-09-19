@@ -14,6 +14,52 @@ use crate::{Result, Setup, Source};
 use std::path::Path;
 use std::sync::Arc;
 
+/// A catalogue row as the page's `Package`.
+///
+/// The index is a search index: it has an id, a name, a moniker, a version
+/// and a publisher, and nothing else. Every other field stays `None` rather
+/// than being guessed at, which is what `Package` already expects of a source
+/// that does not know them. Descriptions, homepages and icons arrive with the
+/// metadata ladder in a later plan.
+pub fn to_package(row: &query::Row) -> crate::model::Package {
+    let mut facts = Vec::new();
+    facts.push(("Package id".to_string(), row.id.clone()));
+    if let Some(m) = &row.moniker
+        && !m.trim().is_empty()
+    {
+        facts.push(("Moniker".to_string(), m.clone()));
+    }
+    crate::model::Package {
+        source: SourceKind::Winget,
+        id: row.id.clone(),
+        name: row.name.clone(),
+        kind: crate::model::PackageKind::App,
+        summary: None,
+        description: None,
+        version: Some(row.latest_version.clone()),
+        installed_version: None,
+        installed: false,
+        repo: Some("winget".to_string()),
+        licence: None,
+        homepage: None,
+        // The grouper's second rung is normalised name plus normalised
+        // publisher. The index has already normalised this one.
+        developer: row.publisher.clone(),
+        updated: None,
+        download_size: None,
+        installed_size: None,
+        popularity: None,
+        popularity_label: None,
+        icon: None,
+        screenshots: Vec::new(),
+        categories: Vec::new(),
+        appstream_id: None,
+        out_of_date: false,
+        sandboxed: false,
+        facts,
+    }
+}
+
 /// Where the App Installer bundle and its hash come from. The release is
 /// looked up at the moment it is needed rather than pinned, because pinning
 /// a version means shipping a Brokey that installs an old winget forever.
@@ -198,8 +244,10 @@ impl Source for Winget {
         })
     }
 
-    fn search(&self, _query: &crate::Query) -> Result<Vec<crate::model::Package>> {
-        todo!("Task 5")
+    fn search(&self, query: &crate::Query) -> Result<Vec<crate::model::Package>> {
+        let db = self.catalogue()?;
+        let rows = query::search(&db, &query.text, query.limit)?;
+        Ok(rows.iter().map(to_package).collect())
     }
 
     fn installed(&self) -> Result<Vec<crate::model::Package>> {
@@ -210,8 +258,15 @@ impl Source for Winget {
         todo!("Task 6")
     }
 
-    fn details(&self, _id: &str) -> Result<crate::model::Package> {
-        todo!("Task 5")
+    fn details(&self, id: &str) -> Result<crate::model::Package> {
+        let db = self.catalogue()?;
+        let row = query::by_id(&db, id)?.ok_or_else(|| {
+            crate::Error::from_source(
+                SourceKind::Winget,
+                format!("{id} is not in the winget catalogue."),
+            )
+        })?;
+        Ok(to_package(&row))
     }
 
     fn plan(&self, _op: &crate::model::Op) -> Result<Vec<Step>> {
