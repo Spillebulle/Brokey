@@ -289,10 +289,12 @@ pub fn to_package(e: &RawEntry) -> Package {
 
 /// How an entry comes off the machine, best route first.
 ///
-/// The two registry values have to be read together to get the real
-/// picture. On the reference machine 253 of 317 entries have no
-/// `QuietUninstallString` and 204 are MSI ProductCodes, but only 23 are
-/// both: 245 can be removed silently and 72 cannot.
+/// The two silent routes have to be counted together. On the reference
+/// machine 64 of 317 entries carry a `QuietUninstallString` and 204 are
+/// named by an MSI ProductCode, and 23 are both, so between them the two
+/// cover 64 + 204 - 23 = 245 and leave 72 that need a window the user
+/// clicks through. The 23 are the entries with a quiet string *and* a
+/// ProductCode, not the 253 without a quiet string that have one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Removal {
     /// The publisher gave a silent switch. Nothing opens.
@@ -700,6 +702,26 @@ mod tests {
             panic!("an MSI ProductCode key is removable by msiexec");
         };
         assert_eq!(product_code, "{6f320b93-ee3c-4826-85e0-000000000002}");
+    }
+
+    /// The flag alone is not enough either. An entry can say the Windows
+    /// Installer owns it and still carry a key name msiexec cannot be given,
+    /// and then the only honest route left is the publisher's uninstaller.
+    #[test]
+    fn the_windows_installer_flag_alone_is_not_an_msi() {
+        let entries = fixture();
+        let odd = RawEntry {
+            quiet_uninstall_string: None,
+            windows_installer: Some(1),
+            ..named(&entries, "Obsidian").clone()
+        };
+        let Some(Removal::Interactive(command)) = removal(&odd) else {
+            panic!("a key name that is not a ProductCode cannot go to msiexec");
+        };
+        assert_eq!(
+            command.program,
+            "C:\\Program Files\\Obsidian\\Uninstall Obsidian.exe"
+        );
     }
 
     /// What is left opens the publisher's own uninstaller, and the

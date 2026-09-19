@@ -324,12 +324,18 @@ routes that applies: `QuietUninstallString` where there is one;
 `msiexec /x {ProductCode} /qn` where the key is named by an MSI ProductCode;
 and otherwise `UninstallString`, which opens the publisher's own uninstaller.
 
-The two registry values have to be read together to get the real number, and
-they overlap much less than either suggests alone. 253 of the reference
-machine's 317 entries have no `QuietUninstallString` and 204 are MSI
-ProductCode GUIDs, but only 23 entries are both, so **245 can be removed
-silently and 72 cannot**. Roughly a quarter of the machine needs a window the
-user clicks through, not most of it.
+The two silent routes have to be counted together, and they overlap much less
+than either suggests alone. 64 of the reference machine's 317 entries carry a
+`QuietUninstallString` and 204 are named by an MSI ProductCode GUID; 23 are
+both, so between them the two routes cover 64 + 204 - 23 = **245, leaving 72
+that cannot be removed silently**. Roughly a quarter of the machine needs a
+window the user clicks through, not most of it.
+
+The arithmetic is spelt out because the `QuietUninstallString` count invites
+the wrong subtraction. 253 entries lack a quiet string, and it is tempting to
+read the 23 as the overlap with that figure rather than with its complement,
+which would give 87 silent instead of 245. The 23 are the entries that have a
+quiet string *and* a ProductCode.
 
 That is better news than the `QuietUninstallString` count alone implies, and
 it is why the route is a ladder rather than a single value. 72 entries is
@@ -505,8 +511,9 @@ than described.
 | `SystemComponent = 1`, hidden by Settings itself | 160 |
 | With no `InstallLocation` | 221 |
 | With no `QuietUninstallString` | 253 |
+| With a `QuietUninstallString` | 64 |
 | Keys named by an MSI ProductCode GUID | 204 |
-| Both of the above at once | 23 |
+| With both a quiet string and a ProductCode | 23 |
 | Removable silently (a quiet string or an MSI ProductCode) | 245 |
 | Removable only by a window the user clicks through | 72 |
 | `ProductName` in `CurrentVersion`, on a Windows 11 machine | `Windows 10 Pro` |
