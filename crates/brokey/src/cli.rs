@@ -1194,8 +1194,9 @@ Note: Flatpak is not installed. It is installed and Flathub is added.
         // answers with nothing; they still complete.
         assert_eq!(run(&args(&["sources"])), 0);
         // pacman is always a source on Linux, whether or not it is
-        // installed; on Windows there is no source at all until Task 8,
-        // so planning against one is refused instead.
+        // installed. Windows has its own sources (Add/Remove Programs,
+        // winget), but pacman itself is Linux-only by design and never one
+        // of them, so planning against it is refused instead.
         #[cfg(unix)]
         assert_eq!(run(&args(&["plan", "install", "pacman:steam"])), 0);
         #[cfg(windows)]

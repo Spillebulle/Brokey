@@ -570,8 +570,9 @@ mod tests {
         notices_in(store, ops, &seen)
     }
 
-    /// Until Task 8 there is no Windows source, so there is nothing for a
-    /// session to have missed.
+    /// Windows sources (`arp`, `winget`) have no desktop-session notion the
+    /// way Flatpak and Snap do, so there is nothing for a session to have
+    /// missed.
     #[cfg(windows)]
     fn notices(store: &Store, ops: &[Op]) -> Vec<String> {
         notices_in(store, ops, &[])
