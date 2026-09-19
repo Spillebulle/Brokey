@@ -22,6 +22,11 @@ pub const WINGET_CLI_LATEST: &str =
 
 pub const NOT_INSTALLED: &str = "winget is not installed, so nothing can be installed or removed through it. \
      Brokey still searches winget's catalogue, which it reads itself.";
+/// Not wired up yet. `Source::setup` returns `Option<Setup>`, and `None`
+/// carries no reason, so `transaction/plan.rs` cannot tell "already
+/// installed" apart from "Microsoft could not be reached" and shows a
+/// generic sentence for both. Reaching this constant needs the trait to
+/// carry a reason through a failed setup, which is outside this task.
 pub const NO_BOOTSTRAP: &str = "winget is not installed, and the App Installer release could not be reached, \
      so Brokey cannot set it up just now. Brokey still searches winget's catalogue.";
 pub const SETUP_LABEL: &str = "Install winget";
@@ -89,10 +94,11 @@ pub fn bootstrap_steps(b: &Bootstrap, into: &Path) -> Vec<Step> {
                 "-NonInteractive".to_string(),
                 "-Command".to_string(),
                 format!(
-                    "if ((Get-FileHash -Algorithm SHA256 -LiteralPath '{file}').Hash -ne '{}') \
+                    "if ((Get-FileHash -Algorithm SHA256 -LiteralPath '{}').Hash -ne '{}') \
                      {{ Write-Error 'The App Installer package did not match the hash Microsoft \
                      publishes for it, so it was not installed.'; exit 1 }}",
-                    b.sha256
+                    ps_quote(&file),
+                    ps_quote(&b.sha256)
                 ),
             ],
             1,
@@ -104,11 +110,26 @@ pub fn bootstrap_steps(b: &Bootstrap, into: &Path) -> Vec<Step> {
                 "-NoProfile".to_string(),
                 "-NonInteractive".to_string(),
                 "-Command".to_string(),
-                format!("Add-AppxPackage -LiteralPath '{file}'"),
+                format!("Add-AppxPackage -LiteralPath '{}'", ps_quote(&file)),
             ],
             4,
         ),
     ]
+}
+
+/// A PowerShell single-quoted literal takes an apostrophe as two of them,
+/// and treats everything else inside it literally. That is why the commands
+/// below quote with apostrophes and escape nothing else.
+fn ps_quote(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// A SHA-256 as Microsoft publishes it: 64 hexadecimal characters and
+/// nothing else. Worth checking because the text comes off the network, and
+/// a value that is not a hash can never match, which would fail setup with
+/// nothing useful to say about why.
+pub fn is_sha256(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Where `winget.exe` is, if it is anywhere.
@@ -262,6 +283,13 @@ impl Winget {
             .get_text(&hash_asset.browser_download_url)?
             .trim()
             .to_string();
+        if !is_sha256(&sha256) {
+            return Err(crate::Error::new(
+                "The hash published with the App Installer package is not a SHA-256, \
+                 so Brokey will not install it."
+                    .to_string(),
+            ));
+        }
         Ok(Bootstrap {
             url: bundle.browser_download_url.clone(),
             sha256,
@@ -328,5 +356,49 @@ mod tests {
         for s in bootstrap_steps(&bootstrap(), std::path::Path::new("C:/tmp")) {
             assert_eq!(s.source, SourceKind::Winget);
         }
+    }
+
+    /// An apostrophe in the hash must not be able to close the PowerShell
+    /// literal. If it can, the rest of the value becomes PowerShell and the
+    /// comparison stops being a comparison, so the step exits zero on a
+    /// mismatch and the install runs against a bundle nobody checked.
+    #[test]
+    fn a_quote_in_the_hash_cannot_close_the_powershell_literal() {
+        let mut b = bootstrap();
+        b.sha256 = "aa' -and $false -and 'bb".to_string();
+        let joined = bootstrap_steps(&b, std::path::Path::new("C:/tmp"))[1]
+            .command
+            .args
+            .join(" ");
+        assert!(joined.contains("aa'' -and $false -and ''bb"), "{joined}");
+        assert!(!joined.contains("aa' -and"), "{joined}");
+    }
+
+    /// Windows account names contain apostrophes, so download paths do too.
+    /// Both commands that name the file have to survive it.
+    #[test]
+    fn a_quote_in_the_path_cannot_close_the_powershell_literal() {
+        let steps = bootstrap_steps(&bootstrap(), std::path::Path::new("C:/Users/O'Brien"));
+        for i in [1, 2] {
+            let joined = steps[i].command.args.join(" ");
+            assert!(joined.contains("O''Brien"), "step {i}: {joined}");
+            // Every apostrophe in the command is either one of the four that
+            // open and close the two literals, or a doubled one from the data.
+            assert_eq!(joined.matches('\'').count() % 2, 0, "step {i}: {joined}");
+        }
+    }
+
+    /// What Microsoft publishes, and the shapes that mean something went wrong
+    /// between their release page and here.
+    #[test]
+    fn only_a_real_sha256_is_accepted() {
+        assert!(is_sha256(&"ab".repeat(32)));
+        assert!(is_sha256("ABCDEF0123456789".repeat(4).as_str()));
+        assert!(!is_sha256(&"ab".repeat(31)));
+        assert!(!is_sha256(&format!("{}c", "ab".repeat(32))));
+        assert!(!is_sha256(&format!("{}g", "ab".repeat(31) + "a")));
+        assert!(!is_sha256(""));
+        assert!(!is_sha256("<!DOCTYPE html><html>404</html>"));
+        assert!(!is_sha256("aa' -and $false -and 'bb"));
     }
 }

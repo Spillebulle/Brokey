@@ -37,10 +37,6 @@ regex = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 # Only to unwrap that one member. No encryption, no zip64 writing.
 zip = { version = "6", default-features = false, features = ["deflate"] }
-# Verifying the App Installer bundle against the SHA-256 Microsoft publishes
-# beside it. The spec's one Windows invariant: nothing downloaded is run
-# before it is verified.
-sha2 = "0.10"
 
 # Debug builds keep our own crates cheap to recompile while dependencies are
 # built optimised: parsing a 36 MB package database in an unoptimised
