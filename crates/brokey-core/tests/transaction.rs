@@ -251,8 +251,16 @@ fn starts(events: &[Event]) -> Vec<usize> {
 fn the_elevate_seam_carries_a_plan_and_brings_back_lines() {
     // `cat` stands in for the helper: whatever is written to it comes
     // straight back on its output, which is exactly the shape the seam has
-    // to carry. `env` stands in for pkexec, as elsewhere in this file.
-    let mut e = elevate::start(Path::new("/bin/cat"), &["env".to_string()])
+    // to carry.
+    //
+    // It has to be `sh -c cat` rather than `cat` itself. The seam appends
+    // the helper path and `run` to the wrapper, and plain `cat` would read
+    // those as filenames and fail; after `sh -c cat` they land in `$0` and
+    // `$1`, where nothing looks at them, and `cat` reads its standard input
+    // as intended. The helper path is unused for the same reason, so it is
+    // named to say so.
+    let wrapper = ["sh".to_string(), "-c".to_string(), "cat".to_string()];
+    let mut e = elevate::start(Path::new("unused-by-this-wrapper"), &wrapper)
         .expect("the seam starts a process");
     {
         use std::io::Write;
