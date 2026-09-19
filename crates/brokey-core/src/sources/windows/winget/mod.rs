@@ -160,11 +160,26 @@ pub fn bootstrap_steps(b: &Bootstrap, into: &Path) -> Vec<Step> {
                 "-NoProfile".to_string(),
                 "-NonInteractive".to_string(),
                 "-Command".to_string(),
-                format!("Add-AppxPackage -LiteralPath '{}'", ps_quote(&file)),
+                // `Add-AppxPackage` has no `-LiteralPath` parameter, only
+                // `-Path` (alias `PSPath`), unlike `Get-FileHash` above. Its
+                // `-Path` is a plain string with no wildcard support, so
+                // `ps_quote` is enough and no bracket escaping is needed.
+                format!("Add-AppxPackage -Path '{}'", ps_quote(&file)),
             ],
             4,
         ),
     ]
+}
+
+/// The name of the `.txt` file Microsoft publishes beside a bundle, holding
+/// its SHA-256. This is the relationship Microsoft actually maintains: the
+/// hash file is the bundle's own name with `.msixbundle` replaced by `.txt`.
+/// The release also carries a second `.txt` whose name contains
+/// `DesktopAppInstaller`, the dependency archive's hash, which is why a
+/// predicate on the name alone cannot tell the two apart. Pure, so it is
+/// tested without a fixture and runs on Linux too.
+pub fn hash_asset_name(bundle_name: &str) -> String {
+    bundle_name.replace(".msixbundle", ".txt")
 }
 
 /// A PowerShell single-quoted literal takes an apostrophe as two of them,
@@ -383,11 +398,7 @@ impl Source for Winget {
                 }),
             };
         }
-        let detail = self
-            .catalogue()
-            .ok()
-            .and_then(|db| query::count(&db).ok())
-            .map(|n| format!("{n} packages"));
+        let detail = self.cached_detail();
         SourceStatus {
             kind,
             available: true,
@@ -488,6 +499,19 @@ impl Source for Winget {
 }
 
 impl Winget {
+    /// The catalogue's package count, read from whatever is already on disk.
+    /// Never fetches: `status()` runs before every search, installed list,
+    /// updates run and plan, and again whenever the page redraws its source
+    /// list, so a stale or missing cache must not cost a multi-megabyte
+    /// download, or, offline, the client's timeout. Answers `None` rather
+    /// than downloading when there is no cached catalogue yet.
+    fn cached_detail(&self) -> Option<String> {
+        let path = index::cached_path(&self.client.download_dir());
+        let db = index::open(&path).ok()?;
+        let n = query::count(&db).ok()?;
+        Some(format!("{n} packages"))
+    }
+
     /// The catalogue, downloaded if the cached copy is missing or stale.
     fn catalogue(&self) -> Result<rusqlite::Connection> {
         let path = index::cached_path(&self.client.download_dir());
@@ -535,10 +559,11 @@ impl Winget {
                         .to_string(),
                 )
             })?;
+        let hash_name = hash_asset_name(&bundle.name);
         let hash_asset = release
             .assets
             .iter()
-            .find(|a| a.name.ends_with(".txt") && a.name.contains("DesktopAppInstaller"))
+            .find(|a| a.name == hash_name)
             .ok_or_else(|| {
                 crate::Error::new(
                     "The App Installer release publishes no hash for its package, so Brokey \
@@ -693,6 +718,63 @@ mod tests {
         assert!(s.command.args.contains(&"--exact".to_string()));
         assert!(s.command.args.contains(&"Valve.Steam".to_string()));
         assert_eq!(s.title, "Installing Valve.Steam");
+    }
+
+    /// The real release carries two files ending `.txt` whose names contain
+    /// `DesktopAppInstaller`: the bundle's hash and the dependency archive's.
+    /// They are different hashes, and an earlier version of this took whichever
+    /// came first, which was the dependency one, so every setup failed
+    /// verification against a bundle that was in fact correct.
+    #[test]
+    fn the_hash_that_is_chosen_belongs_to_the_bundle() {
+        let names = [
+            "DesktopAppInstallerPolicies.zip",
+            "DesktopAppInstaller_Dependencies.json",
+            "DesktopAppInstaller_Dependencies.txt",
+            "DesktopAppInstaller_Dependencies.zip",
+            "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle",
+            "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.txt",
+        ];
+        assert_eq!(
+            hash_asset_name("Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"),
+            "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.txt"
+        );
+        assert!(names.contains(
+            &hash_asset_name("Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle").as_str()
+        ));
+    }
+
+    /// `Add-AppxPackage` has no `-LiteralPath` parameter, only `-Path`; asking
+    /// for the wrong one fails at PowerShell's own parameter binding, before
+    /// any error Brokey wrote. `Get-FileHash -LiteralPath` in the verify step
+    /// is a different cmdlet, and does have that parameter, which is where
+    /// the mistake came from.
+    #[test]
+    fn the_install_step_uses_the_parameter_add_appxpackage_actually_has() {
+        let steps = bootstrap_steps(&bootstrap(), std::path::Path::new("C:/tmp"));
+        let joined = steps[2].command.args.join(" ");
+        assert!(joined.contains("-Path"), "{joined}");
+        assert!(!joined.contains("-LiteralPath"), "{joined}");
+    }
+
+    /// Guards the fix for `status()` fetching the catalogue itself: it is
+    /// called before every search, installed list, updates run and plan, and
+    /// again whenever the page redraws its source list, so a stale or absent
+    /// cache must never cost a multi-megabyte download (or, offline, the
+    /// client's timeout). Against a client pointed at an empty cache
+    /// directory, with no catalogue on disk, the detail must be `None` and
+    /// the call must return at once rather than after a network round trip.
+    #[test]
+    fn status_never_fetches_the_catalogue() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = Winget::new(Arc::new(crate::http::Client::new(dir.path().to_path_buf())));
+        let start = std::time::Instant::now();
+        assert_eq!(w.cached_detail(), None);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "took {:?}, which means it tried the network",
+            start.elapsed()
+        );
     }
 
     /// Uninstall takes no package agreement. Nothing is being agreed to, and

@@ -116,7 +116,7 @@ impl Installation {
 /// Whether an environment variable key matches the requested name.
 ///
 /// On Windows, environment variable names are case-insensitive to the
-/// operating system, but `std::env::vars()` returns them as spelled by the
+/// operating system, but `std::env::vars()` returns them as spelt by the
 /// parent process. A Git Bash shell passes `PATH`, whilst a GitHub Actions
 /// runner may pass `Path`. Unix treats environment variable names as
 /// case-sensitive and distinct, so an exact comparison must be used there.
