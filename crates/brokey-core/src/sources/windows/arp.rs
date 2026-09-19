@@ -6,9 +6,15 @@
 //! The registry knows what is on the machine and has no notion of a newer
 //! version, so it never searches and never reports an update.
 //!
-//! Everything here except [`read`] is a pure function of [`RawEntry`], so
-//! it is tested against a fixture rather than against whatever happens to
-//! be installed on the machine running the tests.
+//! Everything here is a pure function of [`RawEntry`], and is tested against
+//! a fixture rather than against whatever happens to be installed on the
+//! machine running the tests, with two exceptions: [`read`], which is what
+//! turns the registry into a `RawEntry` in the first place, and
+//! [`msiexec_program`], which asks the machine for its own system directory
+//! rather than for anything installed on it. `msiexec_program` still has a
+//! machine-dependent test beside its fixture-driven callers, in this same
+//! module, because it is the only test that would catch a mistake in the
+//! syscall behind it.
 
 use crate::model::{Command, Op, Package, PackageKind, Picture, SourceKind, Step};
 use crate::{Error, Query, Result, Source, SourceStatus, Update};
