@@ -2025,7 +2025,6 @@ what keeps the common case free of a prompt."
 - Modify: `crates/brokey-core/src/sources/mod.rs`
 - Modify: `.github/workflows/ci.yml:96`
 - Modify: `README.md`
-- Modify: `CHANGELOG.md`
 
 **Interfaces:**
 - Consumes: everything from Tasks 5 to 7.
@@ -2352,10 +2351,10 @@ and guard the Linux-only step so the Windows runner skips it:
 In `README.md`, under "What is not there yet", add:
 
 ```markdown
-- Windows support is being built. This release lists the applications a Windows machine has and can remove them; it cannot yet install anything there. winget, Chocolatey, Scoop and the Microsoft Store come next.
+- Windows support is being built and is not in a release yet. On Windows, Brokey lists what Add/Remove Programs knows about and works out how each entry would be removed. It cannot install anything there, and removal is not wired up either: the helper is a stub on Windows, so the plan is built and nothing runs it. winget, Chocolatey, Scoop and the Microsoft Store come next.
 ```
 
-In `CHANGELOG.md`, add the entry for the current version, as `crates/brokey/tests/release.rs` requires.
+Leave `CHANGELOG.md` alone. The current version is 0.1.4, `v0.1.4` is tagged, and that section is already written, so `crates/brokey/tests/release.rs` passes untouched. Editing it would rewrite notes that have been published, which the changelog's own header forbids. Writing a new section instead would mean bumping the version in `Cargo.toml`, `tauri.conf.json` and `package.json`, which `release.rs` checks together, and cutting a release is not this plan's to do. The release that ships Windows writes its own notes.
 
 - [ ] **Step 10: Run every check on both platforms**
 
