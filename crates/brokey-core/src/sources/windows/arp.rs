@@ -487,7 +487,7 @@ impl Arp {
     /// icon extraction writes into a temporary directory instead of the
     /// user's real cache.
     #[cfg(test)]
-    pub(crate) fn with_cache(entries: Vec<RawEntry>, cache: PathBuf) -> Arp {
+    fn with_cache(entries: Vec<RawEntry>, cache: PathBuf) -> Arp {
         Arp { entries, cache }
     }
 
@@ -923,6 +923,26 @@ mod tests {
             cache.path().display()
         );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+        // The index has to reach `cached` through `arp::icon`, not just
+        // through `reference` and `cached` separately: a second entry naming
+        // the same file with a different index must produce a different
+        // cached file. This is what catches `arp::icon` dropping the index
+        // and always asking for the first icon, which is the exact defect
+        // this task exists to fix.
+        let mut second = entry.clone();
+        second.display_icon = Some(format!("{},1", icon_path.display()));
+        let second_package = to_package(&second, cache.path());
+        let Some(Picture::File(second_path)) = second_package.icon else {
+            panic!(
+                "expected a Picture::File icon, got {:?}",
+                second_package.icon
+            );
+        };
+        assert_ne!(
+            path, second_path,
+            "the same file at two different indices must cache to two different files"
+        );
     }
 
     /// The id names the hive as well as the key, because the same key name
@@ -1145,13 +1165,20 @@ mod tests {
         );
     }
 
-    fn source_from_fixture() -> Arp {
-        // `into_path` persists the directory rather than deleting it when
-        // the guard drops: the `Arp` returned here outlives this function,
-        // and every fixture `DisplayIcon` names a file that does not exist
-        // on the machine running the tests anyway, so nothing is ever
-        // written into it.
-        Arp::with_cache(fixture(), tempdir().keep())
+    /// Some of the fixture's `DisplayIcon` paths are real files on the
+    /// machine the fixture was recorded from (Obsidian's and the Arduino
+    /// driver's, at least), so `installed()` and `details()` below may really
+    /// extract an icon here and write it into the returned cache directory,
+    /// and not in CI, where none of those paths exist. No test in this group
+    /// asserts on `Package::icon`, so no result depends on which machine runs
+    /// it; only the side effect (a written file) and the runtime differ. The
+    /// caller keeps the returned guard alive for as long as `Arp` is used, so
+    /// the directory is removed when the test is done with it rather than
+    /// leaked.
+    fn source_from_fixture() -> (Arp, tempfile::TempDir) {
+        let cache = tempdir();
+        let arp = Arp::with_cache(fixture(), cache.path().to_path_buf());
+        (arp, cache)
     }
 
     /// The registry has no notion of a newer version, so this source never
@@ -1159,14 +1186,14 @@ mod tests {
     /// would be inventing something.
     #[test]
     fn it_neither_searches_nor_updates() {
-        let arp = source_from_fixture();
+        let (arp, _cache) = source_from_fixture();
         assert!(arp.search(&Query::new("obsidian")).unwrap().is_empty());
         assert!(arp.updates().unwrap().is_empty());
     }
 
     #[test]
     fn installed_is_the_filtered_entries_as_packages() {
-        let arp = source_from_fixture();
+        let (arp, _cache) = source_from_fixture();
         let installed = arp.installed().unwrap();
         assert_eq!(installed.len(), 5);
         assert!(installed.iter().all(|p| p.installed));
@@ -1179,7 +1206,7 @@ mod tests {
 
     #[test]
     fn details_answers_for_an_id_it_has_and_says_so_for_one_it_does_not() {
-        let arp = source_from_fixture();
+        let (arp, _cache) = source_from_fixture();
         assert_eq!(arp.details("HKLM\\Obsidian").unwrap().name, "Obsidian");
         let e = arp.details("HKLM\\Nothing").unwrap_err();
         assert!(e.message.contains("HKLM\\Nothing"), "{}", e.message);
@@ -1189,7 +1216,7 @@ mod tests {
     /// has nothing to do, which is an empty list rather than an error.
     #[test]
     fn it_plans_a_removal_and_nothing_else() {
-        let arp = source_from_fixture();
+        let (arp, _cache) = source_from_fixture();
         let reference = crate::model::PackageRef {
             source: SourceKind::Arp,
             id: "HKLM\\Obsidian".to_string(),
@@ -1212,7 +1239,7 @@ mod tests {
     /// remove would report that it worked.
     #[test]
     fn planning_a_removal_for_an_id_it_does_not_have_says_so() {
-        let arp = source_from_fixture();
+        let (arp, _cache) = source_from_fixture();
         let e = arp
             .plan(&Op::Remove {
                 package: crate::model::PackageRef {
@@ -1243,7 +1270,7 @@ mod tests {
     fn every_removal_plan_step_that_needs_root_passes_the_closed_list() {
         use crate::transaction::allow::{self, Allowed};
 
-        let arp = source_from_fixture();
+        let (arp, _cache) = source_from_fixture();
         let msiexec = msiexec_program();
         let removals: Vec<Command> = arp
             .entries
@@ -1280,7 +1307,7 @@ mod tests {
     /// how many applications it found, for the status bar.
     #[test]
     fn it_is_always_available_and_says_how_much_it_found() {
-        let arp = source_from_fixture();
+        let (arp, _cache) = source_from_fixture();
         let status = arp.status();
         assert!(status.available);
         assert_eq!(status.reason, None);

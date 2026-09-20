@@ -38,16 +38,23 @@ const ICO_MAGIC: [u8; 4] = [0x00, 0x00, 0x01, 0x00];
 /// trims to an integer: a comma inside a directory name, such as
 /// `Acme, Inc`, is not an index and is left in the path. One matching pair of
 /// surrounding double quotes is stripped before trimming, because the index,
-/// when there is one, sits outside the quotes.
+/// when there is one, sits outside the quotes. A negative index names a
+/// resource id rather than a position; one too large for a `u16` cannot be an
+/// id, so it falls back to the first icon rather than to an id that could
+/// never match.
 pub fn reference(display_icon: &str) -> Option<Reference> {
     let raw = display_icon.trim();
     let (path, wanted) = match raw.rsplit_once(',') {
         Some((path, index)) => match index.trim().parse::<i64>() {
             Ok(n) if n < 0 => {
-                // A resource id cannot be larger than a u16, so a negative
-                // index too large for one is treated as the first icon
-                // rather than as an id that can never match.
-                let wanted = u16::try_from(-n).map(Wanted::Id).unwrap_or(Wanted::Nth(0));
+                // `unsigned_abs` rather than negating `n`: `n` can be
+                // `i64::MIN`, and `-n` on that value overflows and panics
+                // with overflow checks on, which is every debug build. A
+                // `DisplayIcon` is machine data and this is the one place a
+                // hostile value must not reach a panic.
+                let wanted = u16::try_from(n.unsigned_abs())
+                    .map(Wanted::Id)
+                    .unwrap_or(Wanted::Nth(0));
                 (path, wanted)
             }
             Ok(n) => (path, Wanted::Nth(n as usize)),
@@ -71,10 +78,13 @@ pub fn reference(display_icon: &str) -> Option<Reference> {
 }
 
 /// A stable file name for a `(path, wanted)` pair, so the same reference
-/// always names the same cache entry and two different ones never collide by
-/// chance. This names a cache entry and guards nothing, so
-/// `DefaultHasher` is enough; nothing about the hash needs to be stable
-/// across a Rust upgrade, only within one run of the cache.
+/// always names the same cache entry and two different ones are
+/// overwhelmingly unlikely to collide (a 64-bit hash can collide; nothing
+/// here guards against it, because a cache entry is a performance detail, not
+/// a security boundary). This names a cache entry and guards nothing, so
+/// `DefaultHasher` is enough; what it does need is to be stable across runs
+/// of the same binary, because the cache is on disk and is read by the next
+/// launch, and `DefaultHasher::new()` gives exactly that.
 fn cache_name(reference: &Reference) -> String {
     let mut hasher = DefaultHasher::new();
     reference
@@ -103,8 +113,20 @@ fn cache_name(reference: &Reference) -> String {
 /// returned without touching the source at all. Otherwise the source is
 /// read: four leading bytes of `00 00 01 00` mean it is already an `.ico` and
 /// it is copied through untouched; anything else goes to [`pe::icon`]. The
-/// result is written to a temporary name in the same directory and renamed
-/// into place, so a reader never sees a half-written file.
+/// result is written to a temporary name unique to this call, in the same
+/// directory as `dest`, and renamed into place, so a single caller never
+/// serves a file it has only partly written. Two callers can still race to
+/// extract the same icon at once: each writes its own temporary, but only one
+/// rename can land on `dest` first. The loser's rename then fails because its
+/// source has moved away under it, and that is treated as success, since the
+/// winner's file is already at `dest`, rather than as a missing icon.
+///
+/// A cache entry never expires. Once written it is served for as long as it
+/// exists, even after the application it came from is updated in place or
+/// removed entirely; nothing here checks a modification time or prunes an
+/// entry. The brief asked for extraction, not invalidation, and the
+/// `cached` test that extracts once and reads the cache the second time
+/// relies on exactly this.
 pub fn cached(cache: &Path, reference: &Reference) -> Option<PathBuf> {
     let dir = cache.join("icons");
     let dest = dir.join(cache_name(reference));
@@ -120,10 +142,34 @@ pub fn cached(cache: &Path, reference: &Reference) -> Option<PathBuf> {
     };
 
     std::fs::create_dir_all(&dir).ok()?;
-    let tmp = dir.join(format!("{}.tmp", cache_name(reference)));
+    // Unique per call, not just per reference: two threads extracting the
+    // same icon at once must not share a temporary file, or one's write can
+    // truncate the other's before either renames. The process id alone is
+    // not enough, because two threads of the same process share it.
+    let tmp = dir.join(format!(
+        "{}.{}.{}.tmp",
+        cache_name(reference),
+        std::process::id(),
+        unique_counter()
+    ));
     std::fs::write(&tmp, &ico).ok()?;
-    std::fs::rename(&tmp, &dest).ok()?;
+    if std::fs::rename(&tmp, &dest).is_err() {
+        // Another caller's rename could have won the race in between: that
+        // is success, not failure, so check for its result before giving up.
+        let _ = std::fs::remove_file(&tmp);
+        if !dest.is_file() {
+            return None;
+        }
+    }
     Some(dest)
+}
+
+/// A number unique to each call within this process, for [`cached`]'s
+/// temporary file name.
+fn unique_counter() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    N.fetch_add(1, Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -361,18 +407,12 @@ mod tests {
             .build()
     }
 
-    /// A unique directory under the system temporary directory for one test,
-    /// so tests run in parallel without treading on each other's files.
-    fn tempdir() -> PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static N: AtomicU32 = AtomicU32::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "brokey-icon-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A temporary directory for one test, removed when the returned guard
+    /// drops. `http.rs` already uses `tempfile::tempdir()`, and `tempfile` is
+    /// already a dev-dependency of this crate, so there is no reason to roll
+    /// a private one here.
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("a temporary directory")
     }
 
     #[test]
@@ -422,6 +462,15 @@ mod tests {
             ),
             // Surrounding space is trimmed.
             ("  C:\\a\\b.exe , 3 ", "C:\\a\\b.exe", Wanted::Nth(3)),
+            // A negative index too large for a u16 cannot be a resource id,
+            // so it falls back to the first icon. i64::MIN is the case that
+            // matters: negating it overflows, so this is also the
+            // regression test for the panic that fix guards against.
+            (
+                "C:\\a\\b.exe,-9223372036854775808",
+                "C:\\a\\b.exe",
+                Wanted::Nth(0),
+            ),
         ];
         for (raw, path, wanted) in cases {
             let r = reference(raw).unwrap_or_else(|| panic!("{raw} gave nothing"));
@@ -441,12 +490,12 @@ mod tests {
     #[test]
     fn an_ico_on_disk_is_copied_into_the_cache_rather_than_parsed() {
         let dir = tempdir();
-        let source = dir.join("app.ico");
+        let source = dir.path().join("app.ico");
         let mut bytes = ICO_MAGIC.to_vec();
         bytes.extend_from_slice(b"not really an icon directory, just bytes to copy");
         std::fs::write(&source, &bytes).unwrap();
 
-        let cache = dir.join("cache");
+        let cache = dir.path().join("cache");
         let r = Reference {
             path: source.clone(),
             wanted: Wanted::Nth(0),
@@ -464,10 +513,10 @@ mod tests {
     #[test]
     fn a_binary_is_extracted_once_and_read_from_the_cache_after() {
         let dir = tempdir();
-        let source = dir.join("app.exe");
+        let source = dir.path().join("app.exe");
         std::fs::write(&source, pe_with_one_icon()).unwrap();
 
-        let cache = dir.join("cache");
+        let cache = dir.path().join("cache");
         let r = Reference {
             path: source.clone(),
             wanted: Wanted::Nth(0),
@@ -483,9 +532,9 @@ mod tests {
     #[test]
     fn a_file_that_is_not_there_gives_no_picture() {
         let dir = tempdir();
-        let cache = dir.join("cache");
+        let cache = dir.path().join("cache");
         let r = Reference {
-            path: dir.join("nothing-here.exe"),
+            path: dir.path().join("nothing-here.exe"),
             wanted: Wanted::Nth(0),
         };
         assert_eq!(cached(&cache, &r), None);
@@ -494,10 +543,10 @@ mod tests {
     #[test]
     fn a_file_with_no_icon_in_it_gives_no_picture() {
         let dir = tempdir();
-        let source = dir.join("random.bin");
+        let source = dir.path().join("random.bin");
         std::fs::write(&source, [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]).unwrap();
 
-        let cache = dir.join("cache");
+        let cache = dir.path().join("cache");
         let r = Reference {
             path: source,
             wanted: Wanted::Nth(0),
@@ -508,10 +557,10 @@ mod tests {
     #[test]
     fn the_cache_name_is_the_path_and_the_index_together() {
         let dir = tempdir();
-        let source = dir.join("app.exe");
+        let source = dir.path().join("app.exe");
         std::fs::write(&source, pe_with_two_icons()).unwrap();
 
-        let cache = dir.join("cache");
+        let cache = dir.path().join("cache");
         let first = cached(
             &cache,
             &Reference {
