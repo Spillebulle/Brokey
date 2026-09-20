@@ -16,10 +16,11 @@
 //! module, because it is the only test that would catch a mistake in the
 //! syscall behind it.
 
+use super::icon;
 use crate::model::{Command, Op, Package, PackageKind, Picture, SourceKind, Step};
 use crate::{Error, Query, Result, Source, SourceStatus, Update};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Which of the three uninstall keys an entry came from. It is part of the
 /// package id, because the same key name can appear in more than one.
@@ -223,25 +224,27 @@ pub fn install_dir(e: &RawEntry) -> Option<PathBuf> {
     })
 }
 
-/// The application's own icon. `DisplayIcon` is a path, optionally followed
-/// by a comma and a resource index; the index is dropped because the page
-/// asks the shell for the picture rather than for one numbered resource.
+/// The application's own icon, extracted into the cache and served from
+/// there.
+///
+/// `DisplayIcon` is a path, optionally followed by a comma and a resource
+/// index. Nothing here asks the shell for the picture: nothing in this
+/// codebase does, and believing otherwise is why the index used to be
+/// dropped. The index names which icon group the file carries, and 52 of the
+/// reference machine's 112 `DisplayIcon` values carry one, so discarding it
+/// meant drawing the wrong icon, or none, on nearly half the machine.
+/// [`icon::reference`] splits the value into a file and which icon inside it;
+/// [`icon::cached`] does the extracting, writing an `.ico` under `cache` that
+/// the asset protocol is allowed to serve, which the original path in
+/// Program Files is not.
 ///
 /// This value is never used as something to launch: it frequently points at
 /// an uninstaller or at a file with no code in it at all.
-pub fn icon(e: &RawEntry) -> Option<Picture> {
-    let raw = e.display_icon.as_deref()?.trim();
-    let raw = raw.strip_prefix('"').unwrap_or(raw);
-    let path = match raw.rsplit_once(',') {
-        // Only a trailing integer is an index. A bare comma in a path is not.
-        Some((path, index)) if index.trim().parse::<i32>().is_ok() => path,
-        _ => raw,
-    };
-    let path = path.trim().trim_end_matches('"');
-    if path.is_empty() {
-        return None;
-    }
-    Some(Picture::File(PathBuf::from(path)))
+pub fn icon(e: &RawEntry, cache: &Path) -> Option<Picture> {
+    let raw = e.display_icon.as_deref()?;
+    let reference = icon::reference(raw)?;
+    let path = icon::cached(cache, &reference)?;
+    Some(Picture::File(path))
 }
 
 /// The id this source uses, naming the hive as well as the key, because the
@@ -269,7 +272,7 @@ fn is_driver(e: &RawEntry) -> bool {
 /// and knows nothing about a newer one, so the installed version is also the
 /// available version; saying anything else would draw an update that is not
 /// there.
-pub fn to_package(e: &RawEntry) -> Package {
+pub fn to_package(e: &RawEntry, cache: &Path) -> Package {
     let name = e.display_name.clone().unwrap_or_default();
     let mut p = Package::new(SourceKind::Arp, package_id(e), name);
     p.kind = if is_driver(e) {
@@ -285,7 +288,7 @@ pub fn to_package(e: &RawEntry) -> Package {
     p.version = e.display_version.clone();
     p.developer = e.publisher.clone();
     p.homepage = e.url_info_about.clone();
-    p.icon = icon(e);
+    p.icon = icon(e, cache);
     // EstimatedSize is kilobytes; Package counts bytes.
     p.installed_size = e.estimated_size.map(|kb| kb * 1024);
     if let Some(dir) = install_dir(e) {
@@ -461,6 +464,10 @@ fn count(n: usize, noun: &str) -> String {
 /// source is built, as the pacman source reads its database once.
 pub struct Arp {
     pub(crate) entries: Vec<RawEntry>,
+    /// Where extracted icons are written. `crate::system::Dirs::new().cache`
+    /// on a real machine; a temporary directory in every test, so a test run
+    /// never writes into the user's actual cache.
+    pub(crate) cache: PathBuf,
 }
 
 impl Arp {
@@ -469,7 +476,19 @@ impl Arp {
     /// compile and run on Linux as well.
     #[cfg(windows)]
     pub fn new() -> Arp {
-        Arp { entries: read() }
+        Arp {
+            entries: read(),
+            cache: crate::system::Dirs::new().cache,
+        }
+    }
+
+    /// Built from entries already in hand, with an explicit cache directory
+    /// rather than `crate::system::Dirs::new().cache`. Tests use this so
+    /// icon extraction writes into a temporary directory instead of the
+    /// user's real cache.
+    #[cfg(test)]
+    pub(crate) fn with_cache(entries: Vec<RawEntry>, cache: PathBuf) -> Arp {
+        Arp { entries, cache }
     }
 
     fn applications(&self) -> impl Iterator<Item = &RawEntry> {
@@ -513,7 +532,10 @@ impl Source for Arp {
     }
 
     fn installed(&self) -> Result<Vec<crate::Package>> {
-        Ok(self.applications().map(to_package).collect())
+        Ok(self
+            .applications()
+            .map(|e| to_package(e, &self.cache))
+            .collect())
     }
 
     /// An uninstall key records one version, the installed one, and knows
@@ -523,12 +545,16 @@ impl Source for Arp {
     }
 
     fn details(&self, id: &str) -> Result<crate::Package> {
-        self.find(id).map(to_package).ok_or_else(|| {
-            Error::from_source(
-                SourceKind::Arp,
-                format!("{id} is not in the uninstall registry. It may have been removed already."),
-            )
-        })
+        self.find(id)
+            .map(|e| to_package(e, &self.cache))
+            .ok_or_else(|| {
+                Error::from_source(
+                    SourceKind::Arp,
+                    format!(
+                        "{id} is not in the uninstall registry. It may have been removed already."
+                    ),
+                )
+            })
     }
 
     /// Removal is the only operation this source has. Any other kind is
@@ -624,6 +650,13 @@ mod tests {
             .iter()
             .find(|e| e.display_name.as_deref() == Some(name))
             .unwrap_or_else(|| panic!("{name} is not in the fixture"))
+    }
+
+    /// A cache directory for a test to extract icons into, so a test run
+    /// never touches the user's real cache. Dropping the returned `TempDir`
+    /// removes it; callers keep it alive for as long as the path is used.
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("a temporary directory")
     }
 
     /// An ordinary application with a name and an uninstaller is kept.
@@ -828,24 +861,68 @@ mod tests {
         );
     }
 
-    /// DisplayIcon carries a resource index after a comma. The file is what
-    /// matters; the index is dropped.
+    /// A `DisplayIcon` naming a file that is not there gives nothing back:
+    /// nothing about the value can be extracted without reading a real file.
+    /// The path is inside a directory that is created but never written to,
+    /// rather than one of the fixture's own paths, because the fixture's
+    /// paths are Program Files paths from the reference machine and this
+    /// suite also runs on that same machine, where some of them are real.
+    /// `a_display_icon_becomes_a_cached_picture_file`, below, is where a
+    /// file the test itself wrote goes all the way to a `Picture::File`
+    /// under the cache.
     #[test]
-    fn an_icon_index_is_stripped() {
+    fn a_display_icon_naming_a_file_that_is_not_there_gives_no_icon() {
         let entries = fixture();
-        let icon = icon(named(&entries, "Obsidian")).expect("there is an icon");
-        assert_eq!(
-            icon,
-            crate::model::Picture::File(std::path::PathBuf::from(
-                "C:\\Program Files\\Obsidian\\Obsidian.exe"
-            ))
+        let cache = tempdir();
+        let missing = tempdir();
+        let mut entry = named(&entries, "Obsidian").clone();
+        entry.display_icon = Some(
+            missing
+                .path()
+                .join("nothing-here.exe")
+                .display()
+                .to_string(),
         );
+        assert_eq!(icon(&entry, cache.path()), None);
     }
 
     #[test]
     fn an_entry_with_no_icon_has_none() {
         let entries = fixture();
-        assert_eq!(icon(named(&entries, "A per-user application")), None);
+        let cache = tempdir();
+        assert_eq!(
+            icon(named(&entries, "A per-user application"), cache.path()),
+            None
+        );
+    }
+
+    /// The whole way, end to end: a `DisplayIcon` naming a real file the
+    /// test wrote produces a `Package` whose icon is a `Picture::File` under
+    /// the cache directory, not the original path.
+    #[test]
+    fn a_display_icon_becomes_a_cached_picture_file() {
+        let cache = tempdir();
+        let source_dir = tempdir();
+        let icon_path = source_dir.path().join("app.ico");
+        let mut bytes = vec![0x00, 0x00, 0x01, 0x00];
+        bytes.extend_from_slice(b"pretend icon directory bytes");
+        std::fs::write(&icon_path, &bytes).unwrap();
+
+        let entries = fixture();
+        let mut entry = named(&entries, "Obsidian").clone();
+        entry.display_icon = Some(icon_path.display().to_string());
+
+        let package = to_package(&entry, cache.path());
+        let Some(Picture::File(path)) = package.icon else {
+            panic!("expected a Picture::File icon, got {:?}", package.icon);
+        };
+        assert!(
+            path.starts_with(cache.path()),
+            "{} should be under {}",
+            path.display(),
+            cache.path().display()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 
     /// The id names the hive as well as the key, because the same key name
@@ -867,7 +944,8 @@ mod tests {
     #[test]
     fn a_package_carries_what_the_page_draws() {
         let entries = fixture();
-        let p = to_package(named(&entries, "7-Zip 26.00 (x64)"));
+        let cache = tempdir();
+        let p = to_package(named(&entries, "7-Zip 26.00 (x64)"), cache.path());
         assert_eq!(p.source, crate::model::SourceKind::Arp);
         assert_eq!(p.name, "7-Zip 26.00 (x64)");
         assert_eq!(p.installed_version.as_deref(), Some("26.00"));
@@ -893,7 +971,11 @@ mod tests {
                     .is_some_and(|n| n.contains("Arduino"))
             })
             .expect("the fixture has one");
-        assert_eq!(to_package(driver).kind, crate::model::PackageKind::Driver);
+        let cache = tempdir();
+        assert_eq!(
+            to_package(driver, cache.path()).kind,
+            crate::model::PackageKind::Driver
+        );
     }
 
     /// The quiet string is preferred wherever there is one: nothing opens
@@ -1064,7 +1146,12 @@ mod tests {
     }
 
     fn source_from_fixture() -> Arp {
-        Arp { entries: fixture() }
+        // `into_path` persists the directory rather than deleting it when
+        // the guard drops: the `Arp` returned here outlives this function,
+        // and every fixture `DisplayIcon` names a file that does not exist
+        // on the machine running the tests anyway, so nothing is ever
+        // written into it.
+        Arp::with_cache(fixture(), tempdir().keep())
     }
 
     /// The registry has no notion of a newer version, so this source never
