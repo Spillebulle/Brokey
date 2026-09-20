@@ -1,10 +1,12 @@
 //! A package carried on the end of the executable that installs it.
 //!
 //! `brokey-setup.exe` is Brokey's own binary with an MSI concatenated onto it
-//! and a sixteen-byte footer saying how long the MSI is. Run with `--install`
-//! it reads its own file, lifts the package back out and installs it through
-//! a window of Brokey's own, so somebody installing Brokey for the first time
-//! sees Brokey's interface rather than Windows Installer's.
+//! and a sixteen-byte footer saying how long the MSI is. A copy that carries
+//! a package installs: it reads its own file, lifts the package back out and
+//! installs it through a window of Brokey's own, so somebody installing
+//! Brokey for the first time sees Brokey's interface rather than Windows
+//! Installer's. The payload is what decides that and an argument is not, for
+//! the reason [`carried_by`] gives.
 //!
 //! ```text
 //! +-------------------+

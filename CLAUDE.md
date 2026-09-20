@@ -117,8 +117,15 @@ crates/brokey-helper/src/main.rs
 crates/brokey/src/
   main.rs           text mode dispatch, then the window
   lib.rs            Tauri builder, plugins, state
+  cli.rs            the text mode itself: argument parsing and its output
   commands.rs       every #[tauri::command], thin
+  state.rs          the store and the settings the commands share
   settings.rs       key = value preferences
+  setup/            the Windows setup executable, and the one sanctioned
+                    exception to the first invariant: mod.rs (lifting the MSI
+                    out, staging it, elevating msiexec), payload.rs (the
+                    package carried on the end of the binary and its footer),
+                    window.rs (the hand-written Win32 and GDI window it draws)
 crates/brokey/icons/icon.ico
                     required by tauri-build for a Windows target, whatever
                     tauri.conf.json's bundle.icon lists
@@ -152,7 +159,14 @@ These were decided before the first line and are not re-litigated in a fix:
   compares the staged file byte for byte immediately before the prompt, so a
   file that changed after it was written is refused and nothing is elevated.
   The window it draws is never elevated itself, and neither is the Brokey the
-  install leaves behind.
+  install leaves behind, with the one qualification
+  `packaging/windows/brokey.wxs` records: an install started from a console
+  that is already elevated leaves the msiexec client elevated too, so the
+  MSI's Start Brokey tickbox starts Brokey elevated whatever
+  `Impersonate="yes"` says, and nothing in a `.wxs` can prevent it. Anyone
+  installing that way should untick the box, and anyone testing this
+  invariant should know that an install from an administrator console proves
+  nothing about it.
 - **A source never runs anything.** `Source::plan` returns steps; the Runner
   runs them. This is what makes every source testable with fixtures.
 - **Opening an installed application is the one process started outside the

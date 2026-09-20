@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "One store for every way a Linux machine gets software"
+description = "One store for every way a machine gets software"
 default-run = "brokey"
 
 [lib]

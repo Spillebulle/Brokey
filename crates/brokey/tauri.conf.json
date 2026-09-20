@@ -51,7 +51,7 @@
       "icons/icon.png"
     ],
     "category": "Utility",
-    "shortDescription": "One store for every way a Linux machine gets software",
+    "shortDescription": "One store for every way a machine gets software",
     "linux": {
       "appimage": { "bundleMediaFramework": false }
     }

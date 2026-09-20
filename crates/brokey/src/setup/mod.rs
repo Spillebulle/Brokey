@@ -1,9 +1,13 @@
 //! The setup executable: Brokey's own binary with an MSI on the end of it.
 //!
-//! Run normally this is just Brokey. Run with `--install` it lifts the MSI
-//! back out of its own file and installs it through a window of Brokey's own,
-//! so somebody installing Brokey for the first time sees Brokey rather than
-//! Windows Installer.
+//! A copy with no package on the end of it is an ordinary Brokey and runs as
+//! one. A copy that carries a package installs, and it installs whether it
+//! was double-clicked with no command line at all or started with
+//! `--install`: what decides is the payload, not the argument, because a
+//! double-clicked file gets no argument. See [`payload::carried_by`]. It
+//! lifts the MSI back out of its own file and installs it through a window of
+//! Brokey's own, so somebody installing Brokey for the first time sees Brokey
+//! rather than Windows Installer.
 
 pub mod payload;
 

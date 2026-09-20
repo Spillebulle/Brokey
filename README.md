@@ -10,13 +10,13 @@
 </p>
 
 <p align="center">
-  Searches pacman, the AUR, Flatpak, Snap, apt, dnf and GitHub releases · installs through one flow ·
+  Searches pacman, the AUR, Flatpak, Snap, apt, dnf, winget and GitHub releases · installs through one flow ·
   updates everything from one page · drivers and firmware · keeps itself current
 </p>
 
 ![The Brokey window: a search for "steam" with the pacman, AUR and Flatpak editions grouped as one row, the sidebar and the status bar](docs/images/window.png)
 
-> **Early days.** Searching, installing, removing and updating work on Arch and its derivatives, with Flatpak and Snap wherever they are installed. apt and dnf are written but have not yet run on a real Debian or Fedora. [What is not there yet](#what-is-not-there-yet) is honest about the rest.
+> **Early days.** Searching, installing, removing and updating work on Arch and its derivatives, with Flatpak and Snap wherever they are installed, and on Windows through winget and Add or remove programs. apt and dnf are written but have not yet run on a real Debian or Fedora. [What is not there yet](#what-is-not-there-yet) is honest about the rest.
 
 ## Install
 
@@ -38,15 +38,23 @@ along with everything else. The Arch package is in no repository, so Brokey
 updates it itself: it downloads the next release's package and installs it with
 pacman when you say so. An AUR package is coming.
 
-You need WebKitGTK 4.1 and polkit, which every desktop distribution ships and the
-packages pull in. Installing asks for your password through the same prompt your
-desktop uses for everything else, and the confirm step says beforehand how many
-times it will ask.
+On Linux you need WebKitGTK 4.1 and polkit, which every desktop distribution
+ships and the packages pull in. Installing asks for your password through the
+same prompt your desktop uses for everything else, and the confirm step says
+beforehand how many times it will ask.
 
-The setup executable is Brokey with an MSI carried inside it: double-click it
-and it installs Brokey and opens it, the way any Windows installer does. The
-`.msi` it carries is published beside it, for anyone deploying Brokey across a
-fleet with the tools that expect one.
+The setup executable is Brokey with an MSI carried inside it: double-click it,
+allow the change when Windows asks, and it installs Brokey for everyone on the
+machine and puts it in the Start menu. It does not start Brokey for you; the
+window says when the install is done and you open Brokey from the Start menu.
+The `.msi` it carries is published beside it, for anyone deploying Brokey
+across a fleet with the tools that expect one.
+
+On Windows you also need the Microsoft Edge WebView2 runtime, because Brokey's
+window is a WebView. Windows 11 has it already. Windows 10 may not, and this
+installer neither installs it nor checks for it, so on a Windows 10 machine
+without it Brokey installs and then opens a window that never paints. Install
+the WebView2 Evergreen runtime from Microsoft first if you are not sure.
 
 Brokey checks for its own new versions when it starts and shows a notice with
 the release notes. You can turn that off in **Settings**.
