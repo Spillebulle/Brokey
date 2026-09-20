@@ -184,11 +184,11 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 
 /// What may run as Administrator on Windows.
 ///
-/// Two things, and the question asked of each is the same one: provenance.
-/// A winget command is admitted only if its arguments are ones a source in
-/// this crate would have built for the program it names; a removal from
-/// Add/Remove Programs is admitted only if its whole command is one the
-/// registry itself records.
+/// Three things, and the question asked of each is the same one:
+/// provenance. A winget or Chocolatey command is admitted only if its
+/// arguments are ones a source in this crate would have built for the
+/// program it names; a removal from Add/Remove Programs is admitted only
+/// if its whole command is one the registry itself records.
 ///
 /// `winget.exe` is a fixed program with a fixed set of commands, and
 /// [`operation_step`](crate::sources::windows::winget::operation_step) and
@@ -225,6 +225,25 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 /// gap this check introduces or could close by naming a "real" path more
 /// precisely; there is no path to winget that is not, in the end, somewhere
 /// the user who is about to be granted Administrator can write.
+///
+/// `choco.exe` is admitted by the same rule, through a function of the
+/// same shape.
+/// [`operation_step`](crate::sources::windows::choco::operation_step) is
+/// the only thing that builds a Chocolatey command, and it too is a pure
+/// function of the program path and the package id, so the arm rebuilds
+/// the command the source would have made and compares the whole
+/// `Command`. The difference worth naming is where the id sits: a
+/// Chocolatey command is the verb, the id and `-y`, with
+/// `--remove-dependencies` after it for a removal, so the id is the second
+/// argument and not winget's fourth. The dash check is the same one and is
+/// there for the same reason: an id of `-y` would otherwise rebuild into
+/// the very command it was taken from.
+///
+/// Every Chocolatey step carries `needs_root`, because the default install
+/// root is under `C:\ProgramData`, so this arm is the only way an install,
+/// an update or a removal through Chocolatey runs at all. Chocolatey has
+/// no update-everything step in this crate, so unlike winget there is no
+/// second shape to admit.
 ///
 /// A removal from Add/Remove Programs cannot be rebuilt that way. The
 /// command is whatever the installer wrote into the registry years ago, so
@@ -274,6 +293,7 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 pub fn check_step(step: &Step, allowed: &Allowed) -> Result<(), String> {
     match step.source {
         SourceKind::Winget => check_winget(&step.command),
+        SourceKind::Choco => check_choco(&step.command),
         SourceKind::Arp => {
             if allowed.removals.contains(&step.command) {
                 Ok(())
@@ -335,6 +355,51 @@ fn check_winget(command: &Command) -> Result<(), String> {
     }
 }
 
+/// Whether `command` is one the Chocolatey source would have built,
+/// rebuilt from the command's own program and package id and compared
+/// whole.
+#[cfg(windows)]
+fn check_choco(command: &Command) -> Result<(), String> {
+    use crate::sources::windows::choco::{OpKind, operation_step};
+
+    let path = Path::new(&command.program);
+    if !on_a_local_disk(path) {
+        return Err(not_allowed(&command.program));
+    }
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if file_name != "choco.exe" {
+        return Err(not_allowed(&command.program));
+    }
+    let verb = command.args.first().map(String::as_str).unwrap_or("");
+    let kind = match verb {
+        "install" => OpKind::Install,
+        "upgrade" => OpKind::Update,
+        "uninstall" => OpKind::Remove,
+        // `describe(command)` rather than `verb` alone, because a command
+        // with no arguments has an empty verb and the sentence would then
+        // name nothing.
+        _ => return Err(not_a_choco_command(&describe(command))),
+    };
+    // Where `operation_step` puts the id: second, not fourth as winget's
+    // is. A Chocolatey command is the verb, the id and `-y`, with
+    // `--remove-dependencies` after it for a removal. An id is a package id
+    // and never an option: without this, an argument beginning with a dash
+    // would be rebuilt into the very command it was taken from and the
+    // comparison below would agree with itself.
+    let id = command.args.get(1).map(String::as_str).unwrap_or("");
+    if id.is_empty() || id.starts_with('-') {
+        return Err(not_a_choco_command(&describe(command)));
+    }
+    if *command == operation_step(kind, id, &command.program).command {
+        Ok(())
+    } else {
+        Err(not_a_choco_command(&describe(command)))
+    }
+}
+
 /// Whether `path` is absolute under a drive letter, `X:\...` or the
 /// `\\?\X:\...` form, rather than merely absolute.
 ///
@@ -368,12 +433,25 @@ fn not_a_winget_command(what: &str) -> String {
     )
 }
 
+/// The sentence a Chocolatey step Brokey did not build produces. It names
+/// the whole command rather than the program, for the reason the winget
+/// one does: the difference is usually in the arguments and a reader needs
+/// to see which ones.
+#[cfg(windows)]
+fn not_a_choco_command(what: &str) -> String {
+    format!(
+        "The helper refused a Chocolatey step Brokey did not build: {what}. Only the exact \
+         install, upgrade and uninstall commands the Chocolatey source produces may run as \
+         Administrator."
+    )
+}
+
 /// The one sentence a refusal produces, in the register the Linux list
 /// uses: what was refused, and what the rule is.
 #[cfg(windows)]
 fn not_allowed(what: &str) -> String {
     format!(
-        "The helper refused a step it does not allow: {what}. Only winget and a \
+        "The helper refused a step it does not allow: {what}. Only winget, Chocolatey and a \
          removal Windows itself recorded may run as Administrator."
     )
 }
@@ -1358,6 +1436,7 @@ mod tests {
 mod windows_tests {
     use super::*;
     use crate::model::{Command, SourceKind};
+    use crate::sources::windows::choco;
     use crate::sources::windows::winget::{OpKind, operation_step, update_all_step};
 
     fn step_from(source: SourceKind, program: &str, args: &[&str]) -> Step {
@@ -1543,6 +1622,180 @@ mod windows_tests {
         assert!(
             validate(&plan_of(vec![empty])).is_err(),
             "an id is never empty"
+        );
+    }
+
+    /// The path a Chocolatey step really carries: `choco.exe` in the `bin`
+    /// directory under `%ChocolateyInstall%`, which is where
+    /// `choco_program` finds it on a machine that has Chocolatey.
+    const CHOCO: &str = r"C:\ProgramData\chocolatey\bin\choco.exe";
+
+    /// One Chocolatey step for this machine's `choco.exe`, built the way
+    /// the source builds it.
+    fn choco_step(kind: choco::OpKind, id: &str) -> Step {
+        choco::operation_step(kind, id, CHOCO)
+    }
+
+    /// The three things Chocolatey is asked to do, exactly as the source
+    /// builds them. Every Chocolatey step needs Administrator, because the
+    /// default install root is under `C:\ProgramData`, so until this arm
+    /// existed all three were refused before the user was ever asked.
+    #[test]
+    fn a_choco_install_the_source_would_build_is_allowed() {
+        for kind in [
+            choco::OpKind::Install,
+            choco::OpKind::Update,
+            choco::OpKind::Remove,
+        ] {
+            let plan = plan_of(vec![choco_step(kind, "7zip")]);
+            assert_eq!(validate(&plan), Ok(()), "{kind:?} should be allowed");
+        }
+    }
+
+    /// `--install-arguments` hands a command line straight to the package's
+    /// own installer, which is arbitrary elevated execution through a
+    /// genuine `choco.exe`. The source never builds it, and comparing the
+    /// whole command rather than the verb alone is what refuses it.
+    #[test]
+    fn a_choco_command_with_an_extra_argument_is_refused() {
+        let mut step = choco_step(choco::OpKind::Install, "7zip");
+        step.command
+            .args
+            .push(r"--install-arguments=/D=C:\Windows".to_string());
+        let err = validate(&plan_of(vec![step])).expect_err("the source builds no such argument");
+        assert!(
+            err.contains("--install-arguments"),
+            "the refusal names it: {err}"
+        );
+        assert!(err.ends_with('.'), "the reason is a sentence: {err}");
+        assert!(!err.contains('\u{2014}'), "no em dashes: {err}");
+    }
+
+    /// A command one argument short is not the command the source builds
+    /// either, whichever of the three it started as.
+    #[test]
+    fn a_choco_command_missing_an_argument_is_refused() {
+        for kind in [
+            choco::OpKind::Install,
+            choco::OpKind::Update,
+            choco::OpKind::Remove,
+        ] {
+            let mut step = choco_step(kind, "7zip");
+            step.command.args.retain(|arg| arg != "-y");
+            let err = validate(&plan_of(vec![step]))
+                .expect_err("-y is one of the arguments the source builds");
+            assert!(err.contains("7zip"), "{err}");
+            assert!(err.ends_with('.'), "the reason is a sentence: {err}");
+        }
+    }
+
+    /// An id beginning with a dash is an option to `choco.exe`, and
+    /// rebuilding the command around it would agree with itself: an id of
+    /// `-y` rebuilds into the very command it was taken from. The id is
+    /// checked before the rebuild for exactly that reason, and an empty one
+    /// with it.
+    #[test]
+    fn an_id_that_is_really_an_option_is_refused() {
+        for id in ["--force", "-y", ""] {
+            let step = choco_step(choco::OpKind::Install, id);
+            let err = validate(&plan_of(vec![step]))
+                .expect_err("an id is never an option and never empty");
+            assert!(err.ends_with('.'), "the reason is a sentence: {err}");
+        }
+        let forced = choco_step(choco::OpKind::Install, "--force");
+        let err = validate(&plan_of(vec![forced])).expect_err("an id is never an option");
+        assert!(err.contains("--force"), "the refusal names it: {err}");
+    }
+
+    /// The program's file name is compared whole, so neither a name that
+    /// begins with `choco.exe` nor one that ends with it is it.
+    /// `choco.exe.exe` is the first and `notchoco.exe` the second, and each
+    /// catches a different way of writing the check too loosely.
+    #[test]
+    fn a_program_that_is_not_choco_exe_is_refused() {
+        for program in [
+            r"C:\Windows\System32\cmd.exe",
+            r"C:\ProgramData\chocolatey\bin\choco.exe.exe",
+            r"C:\Users\me\Downloads\notchoco.exe",
+        ] {
+            let step = choco::operation_step(choco::OpKind::Install, "7zip", program);
+            let err = validate(&plan_of(vec![step])).expect_err("only choco.exe runs here");
+            assert!(
+                err.contains(program),
+                "the refusal names the program: {err}"
+            );
+            assert!(err.ends_with('.'), "the reason is a sentence: {err}");
+        }
+    }
+
+    /// `choco.exe` on a network share is not this machine's Chocolatey. A
+    /// UNC path is absolute too, so absolute is not the question; a drive
+    /// letter is, and `on_a_local_disk` is what asks it.
+    #[test]
+    fn a_choco_exe_on_a_network_path_is_refused() {
+        let step = choco::operation_step(
+            choco::OpKind::Install,
+            "7zip",
+            r"\somewhere\share\choco.exe",
+        );
+        let err =
+            validate(&plan_of(vec![step])).expect_err("a share is not a disk of this machine");
+        assert!(err.contains("choco.exe"), "{err}");
+    }
+
+    /// A Chocolatey step carries no environment, because `operation_step`
+    /// builds none. Comparing the whole command is what says so, rather
+    /// than a Windows list of permitted variables that does not exist.
+    /// `ChocolateyInstall` is the one that would matter: it moves the
+    /// install root, and this is the elevated process.
+    #[test]
+    fn a_choco_command_carrying_an_environment_is_refused() {
+        let mut step = choco_step(choco::OpKind::Install, "7zip");
+        step.command.env.push((
+            "ChocolateyInstall".to_string(),
+            r"C:\Users\me\somewhere-else".to_string(),
+        ));
+        assert!(
+            validate(&plan_of(vec![step])).is_err(),
+            "the source sets no environment, so an equal comparison refuses one"
+        );
+    }
+
+    /// A verb the source does not build is refused even from a real
+    /// `choco.exe`. `push` uploads a package with an API key and `list`
+    /// changes nothing at all, and both get the same answer, because the
+    /// question is provenance rather than danger. A command with no
+    /// arguments has no verb to name, so the refusal falls back to naming
+    /// the whole command.
+    #[test]
+    fn a_verb_choco_does_not_have_is_refused() {
+        for args in [vec!["list"], vec!["push", "evil.nupkg"], vec![]] {
+            let step = step_from(SourceKind::Choco, CHOCO, &args);
+            let err = validate(&plan_of(vec![step]))
+                .expect_err("only install, upgrade and uninstall are built");
+            assert!(err.contains(CHOCO), "the refusal names the command: {err}");
+            assert!(!err.contains(": . "), "the name must not be empty: {err}");
+            assert!(err.ends_with('.'), "the reason is a sentence: {err}");
+        }
+    }
+
+    /// The label chooses which question is asked and nothing more. A
+    /// Chocolatey command that says it is winget is refused by the winget
+    /// arm, and a winget command that says it is Chocolatey by this one.
+    #[test]
+    fn a_choco_command_cannot_borrow_another_sources_label() {
+        let mut as_winget = choco_step(choco::OpKind::Install, "7zip");
+        as_winget.source = SourceKind::Winget;
+        assert!(
+            validate(&plan_of(vec![as_winget])).is_err(),
+            "choco.exe is not winget.exe, whatever the step says"
+        );
+
+        let mut as_choco = operation_step(OpKind::Install, "Valve.Steam", WINGET);
+        as_choco.source = SourceKind::Choco;
+        assert!(
+            validate(&plan_of(vec![as_choco])).is_err(),
+            "winget.exe is not choco.exe, whatever the step says"
         );
     }
 
