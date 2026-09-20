@@ -206,10 +206,13 @@ fn alias_target(path: &Path) -> Option<PathBuf> {
         return None;
     }
     let target = PathBuf::from(appexeclink_target(&reparse_data(path)?)?);
-    // The same question `transaction::allow` asks of a program: absolute
-    // under a drive letter, so a UNC target is not admitted by this road
-    // either. Then the target has to be a file that is really there,
-    // because a path this never saw is a path this must not hand on.
+    // Narrower than the question `transaction::allow` puts to the program
+    // it is about to elevate, which also asks the volume what it is: this
+    // only refuses a target that names no drive letter at all, a UNC path
+    // among them. A target on a mapped network drive comes back from here
+    // and is refused there. Then the target has to be a file that is really
+    // there, because a path this never saw is a path this must not hand
+    // on.
     if !under_a_drive_letter(&target) || !target.is_file() {
         return None;
     }

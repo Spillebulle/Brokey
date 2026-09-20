@@ -50,10 +50,12 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA,
     FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
     FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA,
-    OPEN_EXISTING, WRITE_DAC, WRITE_OWNER,
+    GetDriveTypeW, OPEN_EXISTING, WRITE_DAC, WRITE_OWNER,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+#[cfg(windows)]
+use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
 
 /// The facts the closed list cannot derive for itself, handed to it by the
 /// caller: the directories a package file (`pacman -U`, `dpkg -i`, `rpm -U`,
@@ -421,6 +423,14 @@ pub fn check_step(step: &Step, allowed: &Allowed) -> Result<(), String> {
         }
         other => return Err(not_allowed(&format!("{other:?}"))),
     }
+    // Asked again here, of every program the list admits and not only of
+    // the two the arms above read. A removal the registry records reaches
+    // the gate the same way, and the gate's own instruments are answered by
+    // the volume holding the program, so a volume that is not this
+    // machine's answers nothing worth having. [`on_a_local_disk`] says why.
+    if !on_a_local_disk(Path::new(&step.command.program)) {
+        return Err(not_allowed(&step.command.program));
+    }
     program_this_process_cannot_replace(&step.command.program)
 }
 
@@ -520,26 +530,64 @@ fn check_choco(command: &Command) -> Result<(), String> {
 }
 
 /// Whether `path` is absolute under a drive letter, `X:\...` or the
-/// `\\?\X:\...` form, rather than merely absolute.
+/// `\\?\X:\...` form, whose volume is a local fixed disk.
 ///
-/// This is not "is the program on a disk of this machine": `Prefix::Disk`
-/// also matches a mapped network drive and a `subst` drive, neither of
-/// which is local. What this refuses is narrower and is the part that
-/// matters here: a UNC path such as `\\somewhere\share\winget.exe` is
-/// absolute too, and `Command::new` would start it over the network, so
-/// `Path::is_absolute` alone is not enough to ask. Every real resolution of
-/// winget answers `true` to this: the App Execution Alias lives under a
-/// drive letter in the user's own profile, and so does the executable it is
-/// resolved to, under `C:\Program Files\WindowsApps`.
+/// Both halves are load-bearing. A UNC path such as
+/// `\\somewhere\share\winget.exe` is absolute too, and `Command::new`
+/// would start it over the network, so `Path::is_absolute` alone is not
+/// enough to ask. And a drive letter is not a disk of this machine either:
+/// `Prefix::Disk` matches a mapped network drive and a `subst` drive as
+/// happily as it matches `C:`, so the volume is asked what it is with
+/// `GetDriveTypeW` and only `DRIVE_FIXED` is admitted.
+///
+/// Why the volume has to be local, which is the part this used to admit as
+/// though it were a decision. Everything the gate measures about a program
+/// is answered by the filesystem holding it. Over SMB that is a server, and
+/// a server the attacker owns answers `ERROR_ACCESS_DENIED` to every
+/// question the walk puts while serving whatever bytes it likes for the
+/// file itself, so the gate would be asking the attacker whether the
+/// attacker may write, and being told no. A removable or remote volume is
+/// therefore refused before any of that is asked, by the one rule that a
+/// program which is to run as Administrator sits on a local fixed disk.
+/// `DRIVE_REMOTE` is what a mapped drive and a UNC path both answer, so the
+/// same rule covers the spelling as well as the mapping.
+///
+/// Every real resolution of winget answers `true` to this: the App
+/// Execution Alias lives under a drive letter in the user's own profile,
+/// and so does the executable it is resolved to, under
+/// `C:\Program Files\WindowsApps`.
 #[cfg(windows)]
 fn on_a_local_disk(path: &Path) -> bool {
     use std::path::{Component, Prefix};
-    path.is_absolute()
-        && matches!(
-            path.components().next(),
-            Some(Component::Prefix(prefix))
-                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
-        )
+    if !path.is_absolute() {
+        return false;
+    }
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return false;
+    };
+    let (Prefix::Disk(letter) | Prefix::VerbatimDisk(letter)) = prefix.kind() else {
+        return false;
+    };
+    a_fixed_volume(letter)
+}
+
+/// Whether the volume a drive letter names is a local fixed disk.
+///
+/// `GetDriveTypeW` wants a root directory with a trailing backslash, so the
+/// letter is spelt back out as `X:\` rather than the path being handed on:
+/// the verbatim form carries its own prefix and the rest of the path is not
+/// the volume. A letter nothing is mounted on answers `DRIVE_NO_ROOT_DIR`,
+/// a mapped network drive and a UNC path answer `DRIVE_REMOTE`, and a
+/// `subst` drive answers whatever its backing volume is, which is the right
+/// answer: its elements are measured on that volume by every other question
+/// the gate puts.
+#[cfg(windows)]
+fn a_fixed_volume(letter: u8) -> bool {
+    let root: [u16; 4] = [u16::from(letter), u16::from(b':'), u16::from(b'\\'), 0];
+    // SAFETY: `root` is a null-terminated wide string of four units that
+    // outlives the call, and the call reads it and takes nothing else.
+    let kind = unsafe { GetDriveTypeW(root.as_ptr()) };
+    kind == DRIVE_FIXED
 }
 
 /// The rights that would let this process put its own bytes at the
@@ -2413,6 +2461,66 @@ mod windows_tests {
     /// the source builds it.
     fn choco_step(kind: choco::OpKind, id: &str) -> Step {
         choco::operation_step(kind, id, CHOCO)
+    }
+
+    /// The predicate itself, put to the volumes this machine really has.
+    ///
+    /// A path under a drive letter that is not a fixed disk cannot be
+    /// manufactured in a unit test: it needs a mapped network drive or
+    /// removable media, and a test may make neither. So the machine's own
+    /// drive letters are enumerated, each is asked what kind of volume it
+    /// is, and the predicate is required to agree for every one of them. A
+    /// machine with only fixed volumes says which half it could not test
+    /// rather than pretending it did.
+    #[test]
+    fn only_a_local_fixed_volume_is_a_local_disk() {
+        use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+
+        // SAFETY: `GetLogicalDrives` takes no arguments and returns a
+        // bitmask of the drive letters this machine has.
+        let mask = unsafe { GetLogicalDrives() };
+        let mut fixed = 0;
+        let mut not_fixed = 0;
+        for index in 0..26u32 {
+            if mask & (1u32 << index) == 0 {
+                continue;
+            }
+            let letter = b'A' + index as u8;
+            let root: [u16; 4] = [u16::from(letter), u16::from(b':'), u16::from(b'\\'), 0];
+            // SAFETY: `root` is a null-terminated wide string of four units
+            // that outlives the call, and the call takes nothing else. This
+            // is the test's own instrument, so that the predicate is not
+            // checked against itself.
+            let kind = unsafe { GetDriveTypeW(root.as_ptr()) };
+            let program = format!(r"{}:\a\program.exe", letter as char);
+            assert_eq!(
+                on_a_local_disk(Path::new(&program)),
+                kind == DRIVE_FIXED,
+                "{program} is on a volume GetDriveTypeW calls {kind}"
+            );
+            let verbatim = format!(r"\\?\{}:\a\program.exe", letter as char);
+            assert_eq!(
+                on_a_local_disk(Path::new(&verbatim)),
+                kind == DRIVE_FIXED,
+                "the verbatim spelling names the same volume: {verbatim}"
+            );
+            if kind == DRIVE_FIXED {
+                fixed += 1;
+            } else {
+                not_fixed += 1;
+            }
+        }
+        assert!(fixed > 0, "every Windows has a fixed volume to install on");
+        if not_fixed == 0 {
+            eprintln!(
+                "skipped: every drive letter on this machine is a fixed disk, so a letter that \
+                 must be refused was not tested."
+            );
+        }
+        assert!(
+            !on_a_local_disk(Path::new(r"\\somewhere\share\program.exe")),
+            "a UNC path names no drive letter at all"
+        );
     }
 
     /// A `choco.exe` where no unprivileged process can put one, which on
