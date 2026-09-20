@@ -302,9 +302,12 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 /// `Command`. The difference worth naming is where the id sits: a
 /// Chocolatey command is the verb, the id and `-y`, with
 /// `--remove-dependencies` after it for a removal, so the id is the second
-/// argument and not winget's fourth. The dash check is the same one and is
-/// there for the same reason: an id of `-y` would otherwise rebuild into
-/// the very command it was taken from.
+/// argument and not winget's fourth. The check that the id is not an
+/// option is there for the same reason as winget's: an id of `-y` would
+/// otherwise rebuild into the very command it was taken from. It refuses
+/// one character more than winget's does, because Chocolatey accepts `/y`
+/// as well as `-y` and `--yes`, so an option can be written with a leading
+/// slash there and a dash alone would only be half the rule.
 ///
 /// Every Chocolatey step carries `needs_root`, because the default install
 /// root is under `C:\ProgramData`, so this arm is the only way an install,
@@ -521,8 +524,16 @@ fn check_choco(command: &Command) -> Result<(), String> {
     // and never an option: without this, an argument beginning with a dash
     // would be rebuilt into the very command it was taken from and the
     // comparison below would agree with itself.
+    //
+    // A dash is not the only way Chocolatey writes an option. Its own
+    // documentation gives `-y`, `--yes` and `/y` as the same switch, and
+    // its argument parser accepts the slash form of every one of them, so
+    // `/force` smuggled in where a package id belongs is an option too and
+    // is refused by the same rule for the same reason. Only the first
+    // character is looked at, which is all either spelling needs: a package
+    // id never begins with one.
     let id = command.args.get(1).map(String::as_str).unwrap_or("");
-    if id.is_empty() || id.starts_with('-') {
+    if id.is_empty() || id.starts_with(['-', '/']) {
         return Err(not_a_choco_command(&describe(command)));
     }
     if *command == operation_step(kind, id, &command.program).command {
@@ -2714,9 +2725,17 @@ mod windows_tests {
     /// `-y` rebuilds into the very command it was taken from. The id is
     /// checked before the rebuild for exactly that reason, and an empty one
     /// with it.
+    ///
+    /// A slash is the other spelling. Chocolatey's own documentation gives
+    /// `-y`, `--yes` and `/y` as one switch and its parser takes the slash
+    /// form of every option, so `/y` and `/force` are options written the
+    /// other way and are refused by the same rule. The dash cases and the
+    /// slash cases are driven through together here, because a guard that
+    /// caught only one of them would pass this test with the other half
+    /// removed.
     #[test]
     fn an_id_that_is_really_an_option_is_refused() {
-        for id in ["--force", "-y", ""] {
+        for id in ["--force", "-y", "/force", "/y", "/?", ""] {
             let step = choco_step(choco::OpKind::Install, id);
             let expected = not_a_choco_command(&describe(&step.command));
             let err = validate(&plan_of(vec![step]))
@@ -2724,9 +2743,11 @@ mod windows_tests {
             assert_eq!(err, expected, "the sentence this test means, for {id:?}");
             assert!(err.ends_with('.'), "the reason is a sentence: {err}");
         }
-        let forced = choco_step(choco::OpKind::Install, "--force");
-        let err = validate(&plan_of(vec![forced])).expect_err("an id is never an option");
-        assert!(err.contains("--force"), "the refusal names it: {err}");
+        for id in ["--force", "/force"] {
+            let forced = choco_step(choco::OpKind::Install, id);
+            let err = validate(&plan_of(vec![forced])).expect_err("an id is never an option");
+            assert!(err.contains(id), "the refusal names it: {err}");
+        }
     }
 
     /// The program's file name is compared whole, so neither a name that
