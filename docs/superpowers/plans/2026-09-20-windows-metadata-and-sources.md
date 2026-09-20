@@ -53,6 +53,14 @@ rewrite the file, and never remove a line a previous task added.
   and paste what came back.
 - Do not `git commit --amend`, `rebase` or `reset`, do not touch commits you
   did not create, and do not push.
+- **A task's named tests are a floor, not the set.** Task 3's review put it
+  exactly: its tests were "strong exactly where the brief named a trap by name
+  and absent everywhere else", and four of six mutations survived the whole
+  suite. A brief cannot name every trap, so naming some and stopping there
+  produces a suite shaped like the brief rather than like the code. Before
+  reporting a task done, take the parts of your own work that nothing above
+  names, break each one, and check something fails. Anything that survives
+  wants a test, and the survivors are reported whether or not you write it.
 
 ---
 
@@ -654,7 +662,15 @@ All pure, so they run on Linux:
   homepage, and `installed == true`, against `choco-vlc-nightly.nuspec`.
 - `a_byte_order_mark_does_not_stop_the_reader` — the same file, asserting the
   id is `vlc-nightly` and not something with three stray bytes on the front.
-  This is the test most likely to fail first, so write it early.
+
+  **Corrected after the task ran, because the claim here was wrong.** This
+  plan said the byte order mark was the trap most likely to bite. It is not,
+  for this reader: quick-xml calls `remove_utf8_bom()` unconditionally on its
+  first read, so the bytes never reach the element names. The trap is real for
+  a reader that decodes to a `String` first, which is why the fixture keeps
+  its three bytes, and the test is worth having for that reason rather than
+  the one given. Left here as written because the record of a plan being
+  wrong is worth more than a plan that looks right.
 - `a_nuspec_without_a_title_falls_back_to_its_id`.
 - `an_icon_url_becomes_a_url_picture` — `Picture::Url`, never `Picture::File`,
   from `choco-vlc-nightly.nuspec`; and `choco-core-extension.nuspec` has none,
