@@ -42,10 +42,15 @@ import banner  # noqa: E402  the house banner arithmetic, copied from Design-Pri
 import lucide  # noqa: E402  the vendored path data, per §11
 
 # Which Lucide mark sits in the tile, and how much of the tile's side it
-# spans. 0.58 leaves the glyph clear of the 22 % corner radius at every size
-# in the ladder; larger and the parcel's corners crowd the tile's own.
+# spans. Drawn as a sheet at 16, 32, 48, 128 and 256 and looked at, per §11.
+# 0.58 left the parcel looking small inside the square and 0.78 puts its
+# corners into the tile's own 22 % radius, so 0.70 is the middle that stays
+# clear of the corner. The choice is made at 32 px and above: at 16 px the
+# top face's seams merge at every share in the ladder, this one included, and
+# the mark reads as a shape rather than as a parcel. Nothing in the app draws
+# it at 16 px; that entry exists for the Windows title bar and taskbar.
 GLYPH = "package"
-GLYPH_SHARE = 0.58
+GLYPH_SHARE = 0.70
 
 ROOT = Path(__file__).resolve().parent.parent
 TOKENS = ROOT / "frontend/src/tokens.css"
@@ -56,6 +61,23 @@ def accent_hue() -> float:
     if not m:
         sys.exit("tokens.css has no --accent-h")
     return float(m.group(1))
+
+
+def accent() -> tuple[int, int, int]:
+    """The accent as the page computes it, read from `tokens.css`.
+
+    Brokey sets `--accent-fixed`, the style guide's one exception for a brand
+    colour that has to match exactly, so the accent is a hex in the file
+    rather than a point on the derived ramp. An app back on the ramp has no
+    `--accent-fixed` and the dark formula is used instead, which is what this
+    falls back to, so the same file works either way.
+    """
+    text = TOKENS.read_text(encoding="utf-8")
+    m = re.search(r"--accent-fixed:\s*#([0-9A-Fa-f]{6})", text)
+    if m:
+        h = m.group(1)
+        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return oklch_to_srgb(0.674, 0.101, accent_hue())
 
 
 def oklch_to_srgb(L: float, C: float, h: float) -> tuple[int, int, int]:
@@ -232,9 +254,8 @@ def readable(path: Path, size: tuple[int, int], light: tuple[int, int, int, int]
 
 
 def main() -> int:
-    hue = accent_hue()
-    colour = oklch_to_srgb(0.674, 0.101, hue)
-    print(f"accent hue {hue:g} -> #{colour[0]:02X}{colour[1]:02X}{colour[2]:02X}")
+    colour = accent()
+    print(f"accent #{colour[0]:02X}{colour[1]:02X}{colour[2]:02X}")
 
     icons = ROOT / "assets/icons"
     icons.mkdir(parents=True, exist_ok=True)

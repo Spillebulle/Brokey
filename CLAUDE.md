@@ -32,8 +32,12 @@ The house reference for conventions is `../Muster` and `../Umber` (Rust
 workspaces with the same release shape, the same updater rules, the same
 packaging scriptlets). When a question here has an answer there, take it.
 
-UI follows `../Design-Principles/STYLE-GUIDE.md` and uses `tokens.css`; accent
-hue is `300`. Desktop application, so **never** `class="web"` on the root.
+UI follows `../Design-Principles/STYLE-GUIDE.md` and uses `tokens.css`. The
+accent is `#D42B48`, set as `--accent-fixed` with `--accent-h` at `18`: Brokey
+is the one app that takes the style guide's §2.3 exception for a brand colour
+that must match exactly, so the accent is not derived from the hue and
+`--accent-ink` is white rather than the house near-black. Desktop application,
+so **never** `class="web"` on the root.
 Never a raw hex in a component.
 
 ## Decisions

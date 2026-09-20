@@ -58,11 +58,14 @@ const OUTCOME_READY: u32 = WM_APP + 1;
 
 /// The palette, as the browser would compute it.
 ///
-/// These are the dark theme of `frontend/src/tokens.css` with `--accent-h` at
-/// 300, which is `frontend/src/tokens.css:34`, converted from OKLCH to sRGB
-/// by the arithmetic in `tools/make-art.py`. That file prints the accent it
-/// computed on every run (`accent hue 300 -> #A088CC`), which is how a change
-/// to the hue is noticed here: the printed hex stops matching [`ACCENT`].
+/// These are the dark theme of `frontend/src/tokens.css`. The neutrals are its
+/// OKLCH values converted to sRGB by the arithmetic in `tools/make-art.py`.
+/// The accent is not derived at all: Brokey sets `--accent-fixed: #D42B48`,
+/// the one exception the style guide allows for a brand colour that must
+/// match exactly, so the hex here is that hex rather than the output of a
+/// formula. `tools/make-art.py` prints the accent it used on every run
+/// (`accent #D42B48`), which is how a change is noticed here: the printed hex
+/// stops matching [`ACCENT`].
 ///
 /// **They are literals rather than read at runtime, and that is not
 /// laziness.** This window paints before Brokey is installed. There is no
@@ -87,12 +90,16 @@ mod ink {
     pub const TEXT_STRONG: COLORREF = rgb(0xE6, 0xE7, 0xE9);
     /// `--text`, the sentence.
     pub const TEXT: COLORREF = rgb(0xC9, 0xCB, 0xCE);
-    /// `--accent`, the primary button's fill.
-    pub const ACCENT: COLORREF = rgb(0xA0, 0x88, 0xCC);
-    /// `--accent-dim`, the same button while it is held down.
-    pub const ACCENT_DIM: COLORREF = rgb(0x5A, 0x4D, 0x71);
-    /// `--accent-ink`, which is `--window`: text on an accent fill.
-    pub const ACCENT_INK: COLORREF = WINDOW;
+    /// `--accent`, the primary button's fill. `--accent-fixed` in
+    /// `tokens.css`, taken as it is written rather than derived from a hue.
+    pub const ACCENT: COLORREF = rgb(0xD4, 0x2B, 0x48);
+    /// `--accent-dim`, the same button while it is held down. This one is
+    /// still derived, from `--accent-h` at 18: `oklch(0.447 0.061 18)`.
+    pub const ACCENT_DIM: COLORREF = rgb(0x73, 0x46, 0x48);
+    /// `--accent-ink`, text on an accent fill. White rather than the house
+    /// near-black, because the near-black reads 3.78:1 on this red and white
+    /// reads 4.95:1. That is `--accent-ink-fixed` in `tokens.css`.
+    pub const ACCENT_INK: COLORREF = rgb(0xFF, 0xFF, 0xFF);
 }
 
 /// A `COLORREF` is `0x00BBGGRR`, which is the reverse of the order a hex
@@ -1301,19 +1308,21 @@ mod tests {
     /// and not the other is a failing test rather than an installer that is
     /// quietly a different purple from the application it installs.
     ///
-    /// `tools/make-art.py` prints `accent hue 300 -> #A088CC` on every run,
-    /// which is where this value comes from.
+    /// `tools/make-art.py` prints `accent #D42B48` on every run, which is
+    /// where this value comes from.
     #[test]
     fn the_palette_is_the_one_the_page_uses() {
-        assert_eq!(ink::ACCENT, rgb(0xA0, 0x88, 0xCC), "--accent at hue 300");
+        assert_eq!(ink::ACCENT, rgb(0xD4, 0x2B, 0x48), "--accent-fixed");
         assert_eq!(ink::WINDOW, rgb(0x11, 0x12, 0x14), "--window");
         // A COLORREF is `0x00BBGGRR`, so the blue of the accent ends up in
         // the top byte of the three. Written out because getting this the
         // wrong way round paints a window nobody would recognise.
-        assert_eq!(ink::ACCENT, 0x00CC88A0);
-        // Text on an accent fill is the window's own ground, which is what
-        // `--accent-ink` is defined as in tokens.css.
-        assert_eq!(ink::ACCENT_INK, ink::WINDOW);
+        assert_eq!(ink::ACCENT, 0x00482BD4);
+        // Text on an accent fill is white here, not the window's own ground:
+        // `--accent-ink-fixed` overrides the house near-black because that
+        // near-black reads 3.78:1 on this red and white reads 4.95:1.
+        assert_eq!(ink::ACCENT_INK, rgb(0xFF, 0xFF, 0xFF));
+        assert_ne!(ink::ACCENT_INK, ink::WINDOW);
     }
 
     /// Progress is honest: there is no fraction anywhere in this file to
