@@ -194,9 +194,9 @@ fn nuspec_xml_error(e: &quick_xml::Error) -> Error {
 /// against `quick_xml` 0.42.0's own reader and its `bom_from_reader` /
 /// `bom_from_str` tests). The explicit strip earns its keep for a reader
 /// that decodes the bytes to a `String` first and looks for `<?xml` as a
-/// literal prefix — that one really does choke on the three stray bytes —
-/// which is not what this function does, but might be what a future
-/// version of it does.
+/// literal prefix, which really does choke on the three stray bytes. That
+/// is not what this function does, but it might be what a future version
+/// of it does.
 pub fn parse_nuspec(bytes: &[u8]) -> Result<Nuspec> {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     let mut reader = Reader::from_reader(bytes);
@@ -644,10 +644,10 @@ fn read_installed(lib_dir: &std::path::Path) -> Vec<Nuspec> {
 /// How many installed packages there are, from the directory listing alone:
 /// whether a `.nuspec` is present, never its contents. `status()` runs
 /// before every search, installed list, updates run and plan, and again
-/// whenever the page redraws its source list — `winget::cached_detail`'s
-/// doc comment states the same rule for the same reason — so this has to
-/// stay a `read_dir`, not a parse of every package, once there are two
-/// hundred of them rather than five.
+/// whenever the page redraws its source list, and `winget::cached_detail`'s
+/// doc comment states the same rule for the same reason. So this has to
+/// stay a `read_dir` rather than a parse of every package, once there are
+/// two hundred of them rather than five.
 fn count_installed(lib_dir: &std::path::Path) -> usize {
     nuspec_paths(lib_dir).len()
 }
