@@ -585,8 +585,24 @@ Administrator, because the default install root is under `C:\ProgramData`.
 **Status.** Available when `choco.exe` is on the `PATH` or
 `%ChocolateyInstall%\bin\choco.exe` exists. When it is not, the source stays
 searchable the way winget does, because the feed is HTTP and needs no tool.
-For `setup()`, follow the row for Chocolatey in the spec's table under
-"Setting a manager up from inside Brokey" rather than inventing a command.
+
+**`setup()` returns `None` in this plan, and that is deliberate.** The spec's
+table says Chocolatey's bootstrap extracts `chocolatey.nupkg` into
+`C:\ProgramData\chocolatey` and runs its bundled install script, elevated, and
+the spec then adds an invariant that binds it: **nothing downloaded is run
+before it is verified**, which for Chocolatey means checking that the
+extracted `choco.exe` is Authenticode-signed by Chocolatey Software, Inc.
+That is a `WinVerifyTrust` call and a new elevated path through the helper's
+closed list, which is a larger and more security-sensitive piece of work than
+every other task in this plan put together. It gets its own plan and its own
+review.
+
+So: `status()` says Chocolatey is not installed and `setup()` answers `None`,
+which the page already knows how to draw, and the source is searchable
+meanwhile. Write that reason into `setup()`'s doc comment so the next reader
+finds it there rather than assuming it was forgotten. A test asserts
+`setup().is_none()`, so restoring it is a deliberate act rather than an
+accident.
 
 - [ ] **Step 1: Put the fixtures in place**
 
@@ -696,6 +712,15 @@ parse there means "not in this bucket", not "the source is broken".
 test says so by name.** The spec's line is that Scoop never elevates, ever;
 that is the whole point of Scoop, and a step of this source asking for
 Administrator would be a defect rather than a setting.
+
+**`setup()` returns `None` in this plan,** for the same reason Task 3's does.
+The spec pins Scoop's installer to a named commit of `ScoopInstaller/Install`
+rather than the redirecting `get.scoop.sh`, under the invariant that nothing
+downloaded is run before it is verified. Scoop's bootstrap does not elevate,
+so it is the smaller half of that work, but it is still fetching a script and
+running it, and it belongs with Chocolatey's in the plan that builds the
+verification rather than ahead of it. Say so in `setup()`'s doc comment and
+assert `setup().is_none()` in a test.
 
 - [ ] **Step 1: Put the fixtures in place, then write the failing tests**
 
