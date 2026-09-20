@@ -35,7 +35,7 @@ real backend for the first time rather than against `mock.ts`.
 | Shape | One workspace, one library. `sources/windows/` beside `sources/linux/`, selected by `#[cfg]`. No second repository, no fork |
 | Targets | Linux x86-64 and ARM64, **and Windows x86-64 and ARM64**. Supersedes the "Targets" row of `docs/architecture.md` |
 | Sources | winget, Add/Remove Programs, Chocolatey, Scoop, Microsoft Store and MSIX, GitHub releases, Windows optional features |
-| Privilege | The window never elevates. `brokey-helper.exe` is elevated per plan through `ShellExecuteEx` with `runas`, and the Plan and its Events travel over a named pipe because that call cannot redirect standard streams |
+| Privilege | The window never elevates. `brokey-helper.exe` is elevated per plan through `ShellExecuteEx` with `runas`, and the Plan and its Events travel over two named pipes, one per direction, because that call cannot redirect standard streams |
 | Scope preference | Per-user wherever a source offers it, so the common install raises no prompt at all. Elevation only when the package forces it, and the confirm dialog says which package did |
 | Package databases | Read directly, in pure Rust, as on Linux: winget's pre-indexed SQLite index, Chocolatey's `.nuspec` files, Scoop's bucket JSON, the uninstall registry. No shelling out to a tool to ask it what it knows |
 | Metadata | No AppStream on Windows. A ladder ending in a Flathub AppStream lookup matched by name, carrying `confidence < 1` and labelled in the interface |
@@ -244,12 +244,21 @@ Event per line. What changes is only how it is started and how it is spoken to.
 
 Elevation on Windows is `ShellExecuteEx` with the `runas` verb. That call
 **cannot redirect standard streams**, and `CreateProcess`, which can, cannot
-elevate. So before elevating, the unelevated side creates a named pipe whose
-DACL admits the current user and the Administrators group and nobody else,
-passes the pipe's name as a command-line argument, and waits for the helper to
-connect. The Plan goes down it and Events come back up it. From
-`runner.rs`'s point of view the contract is unchanged: it holds a writer and a
-line reader, and `CANCEL_LINE` still stops the helper between steps.
+elevate. So before elevating, the unelevated side creates two named pipes
+whose DACL admits the current user and the Administrators group and nobody
+else, passes the base name they are both derived from as a command-line
+argument, and waits for the helper to connect to both. The Plan goes down one
+and Events come back up the other. From `runner.rs`'s point of view the
+contract is unchanged: it holds a writer and a line reader, and `CANCEL_LINE`
+still stops the helper between steps.
+
+One pipe per direction rather than one duplex pipe, because a Windows handle
+created without `FILE_FLAG_OVERLAPPED` is synchronous and the I/O manager
+serialises every operation on such a file object, `try_clone` included: the
+runner reads Events from the moment the helper starts, so on one pipe the
+write of the Plan would queue behind a read that cannot finish until the Plan
+has arrived, and both sides would wait for ever. This is what Linux already
+has in `pkexec`'s stdin and stdout.
 
 The running-state copy is still Linux-worded and has to change with this
 section. `FlowDialog.tsx` already says Administrator on Windows, because a
