@@ -2,11 +2,15 @@
 //! the same core with a table printer, which is how the sources are exercised
 //! on a machine without a display.
 
-/// The flags that are a text-mode command in their own right. Without
-/// these, anything beginning with a dash opens the window, so `brokey
-/// --help` opened a window rather than printing the help that `cli::run`
-/// has always had an arm for.
-const TEXT_FLAGS: [&str; 4] = ["--help", "-h", "--version", "-V"];
+/// The flags that `cli::run` answers rather than the window. Without these,
+/// anything beginning with a dash opens the window, so `brokey --help`
+/// opened a window rather than printing the help that `cli::run` has always
+/// had an arm for.
+///
+/// `--install` is the odd one: it draws a window of its own on Windows
+/// rather than printing a table. What it shares with the other four is the
+/// only thing this list is about, which is that it must not reach Tauri.
+const TEXT_FLAGS: [&str; 5] = ["--help", "-h", "--version", "-V", "--install"];
 
 /// Whether these arguments are a text-mode command rather than the window.
 ///
@@ -54,6 +58,13 @@ mod tests {
         for flag in ["--help", "-h", "--version", "-V"] {
             assert!(is_text_mode(&args(&[flag])), "{flag}");
         }
+    }
+
+    /// `--install` is the setup executable's own flag and must never open the
+    /// window: the window is what it is there to install.
+    #[test]
+    fn the_install_flag_is_not_the_window() {
+        assert!(is_text_mode(&args(&["--install"])));
     }
 
     #[test]

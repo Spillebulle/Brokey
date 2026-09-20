@@ -31,3 +31,15 @@ tauri-plugin-opener = "2.5"
 tauri-plugin-single-instance = "2.4"
 tauri-plugin-window-state = "2.4"
 tauri-plugin-log = "2.9"
+
+# The setup executable's one administrator prompt, and the window it draws
+# around it. The version is the workspace's, as `brokey-core`'s entry is: a
+# second version spelled out here would put two copies of windows-sys in the
+# lock file and two sets of the same types in the binary.
+[target."cfg(windows)".dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
