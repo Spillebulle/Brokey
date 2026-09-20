@@ -572,6 +572,25 @@ fn joined(entries: &[SearchEntry], installed: &[Nuspec], limit: usize) -> Vec<Pa
 
 pub const SEARCH_BASE: &str = "https://community.chocolatey.org/api/v2/Search()";
 
+/// Where the network half of this source gets its text. [`Client`] is the
+/// only implementation outside this file's own tests, which use one of
+/// their own so that a test of the search path never reaches the feed and
+/// can count the requests a search makes. The same shape as `scoop::Http`,
+/// and deliberately a second trait rather than one shared with it: the line
+/// that implements it for `Client` is exactly where the two differ. Scoop's
+/// bucket listing is Brokey's snapshot of somebody else's catalogue and is
+/// cached for a day; a Chocolatey search is a live query against a feed and
+/// is not cached at all.
+trait Http: Send + Sync {
+    fn text(&self, url: &str) -> Result<String>;
+}
+
+impl Http for Client {
+    fn text(&self, url: &str) -> Result<String> {
+        self.get_text(url)
+    }
+}
+
 /// The exact query the plan pins: dropping `targetFramework` or
 /// `includePrerelease` answers 400 with "Error in query syntax", not a
 /// useful message, so both stay even though this source never asks for a
@@ -580,6 +599,35 @@ pub fn search_url(query: &str, limit: usize) -> String {
     format!(
         "{SEARCH_BASE}?$filter=IsLatestVersion&$top={limit}&searchTerm='{}'&targetFramework=''&includePrerelease=false",
         percent_encode(query)
+    )
+}
+
+/// The query [`Choco::details`] asks: the one package whose id is `id`,
+/// rather than a ranked search whose first few answers are then looked
+/// through. `tolower(Id) eq '<id>'` in the `$filter` is what makes it a
+/// lookup, and the whole `$filter` is one OData expression, so the spaces
+/// around `and` and `eq` are percent-encoded while the rest of the query
+/// string is written the way [`search_url`] writes it.
+///
+/// Three things about this were measured against the live feed rather than
+/// assumed, because none of them is what an OData endpoint has to do.
+/// `Id eq '7ZIP'` answers nothing for the package whose id is `7zip`: the
+/// comparison is case sensitive, which does not match
+/// `eq_ignore_ascii_case` on this side, so `tolower(Id)` is what the filter
+/// has to say and `id` is lowered to meet it. `searchTerm` still has to
+/// carry the id: with `searchTerm=''` beside this filter the feed answers
+/// a well-formed feed with no entries in it, for a package that is really
+/// there. And an id no package has answers an empty feed rather than an
+/// error, which is what lets the caller tell "not in the feed" from "the
+/// feed would not answer".
+///
+/// `$top` is 1 because the filter admits one package. The caller still
+/// checks the id it gets back, so a feed that ignored the filter would be
+/// caught rather than believed.
+pub fn details_url(id: &str) -> String {
+    format!(
+        "{SEARCH_BASE}?$filter=IsLatestVersion%20and%20tolower(Id)%20eq%20'{id}'&$top=1&searchTerm='{id}'&targetFramework=''&includePrerelease=false",
+        id = percent_encode(&id.to_lowercase())
     )
 }
 
@@ -687,7 +735,7 @@ fn count_installed(lib_dir: &std::path::Path) -> usize {
 /// The Chocolatey source: local packages read from `lib`, search against
 /// the community feed through the shared HTTP client.
 pub struct Choco {
-    client: Arc<Client>,
+    http: Arc<dyn Http>,
     /// `%ChocolateyInstall%\lib` on a real machine, from `Choco::new`; a
     /// temporary directory in every test, from `Choco::with_lib_dir`, so
     /// that no test reads the user's real installation.
@@ -704,19 +752,15 @@ pub struct Choco {
 impl Choco {
     pub fn new(client: Arc<Client>) -> Choco {
         Choco {
-            client,
+            http: client,
             lib_dir: install_root().join("lib"),
             exe: choco_exe(),
         }
     }
 
     #[cfg(test)]
-    fn with_lib_dir(client: Arc<Client>, lib_dir: PathBuf, exe: Option<PathBuf>) -> Choco {
-        Choco {
-            client,
-            lib_dir,
-            exe,
-        }
+    fn with_lib_dir(http: Arc<dyn Http>, lib_dir: PathBuf, exe: Option<PathBuf>) -> Choco {
+        Choco { http, lib_dir, exe }
     }
 }
 
@@ -755,7 +799,7 @@ impl Source for Choco {
         if text.is_empty() {
             return Ok(Vec::new());
         }
-        let body = self.client.get_text(&search_url(text, query.limit))?;
+        let body = self.http.text(&search_url(text, query.limit))?;
         let entries = parse_search(body.as_bytes())?;
         let installed = read_installed(&self.lib_dir);
         Ok(joined(&entries, &installed, query.limit))
@@ -776,6 +820,20 @@ impl Source for Choco {
         Ok(Vec::new())
     }
 
+    /// The installed `.nuspec` first, then the feed. The feed half looks
+    /// the exact id up rather than running a ranked search and picking
+    /// through its first few answers, which is what `Scoop::details` does
+    /// and for the same reason: a search is cut down to a handful of
+    /// results before anything compares ids, so a package that is really
+    /// in the feed reads as missing whenever the ranking does not put it
+    /// in that handful. Chocolatey's naming convention makes near misses
+    /// the ordinary case, `vlc`, `vlc.install`, `vlc.portable`,
+    /// `vlc-nightly`, and the user has usually just clicked the row.
+    ///
+    /// The lookup [`details_url`] builds answers the one package or none,
+    /// so nothing is truncated before the comparison. The comparison stays
+    /// anyway: what comes back is a feed the machine on the other end
+    /// wrote, and checking the id is cheaper than trusting it.
     fn details(&self, id: &str) -> Result<Package> {
         if let Some(n) = read_installed(&self.lib_dir)
             .iter()
@@ -783,7 +841,7 @@ impl Source for Choco {
         {
             return Ok(to_package_from_nuspec(n));
         }
-        let body = self.client.get_text(&search_url(id, 5))?;
+        let body = self.http.text(&details_url(id))?;
         let entries = parse_search(body.as_bytes())?;
         entries
             .iter()
@@ -871,6 +929,86 @@ mod tests {
     /// need not exist on the machine running the test.
     fn a_choco_exe() -> Option<PathBuf> {
         Some(PathBuf::from(r"C:\ProgramData\chocolatey\bin\choco.exe"))
+    }
+
+    /// A stand-in for the community feed, the same test client `scoop.rs`
+    /// uses against GitHub: every URL answers out of a table, anything not
+    /// in it fails the way an unreachable host does, and every request is
+    /// recorded so a test can count and order them. Nothing here opens a
+    /// socket, so these tests run offline and on a machine without
+    /// Chocolatey.
+    struct FakeHttp {
+        replies: std::collections::HashMap<String, String>,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FakeHttp {
+        fn answering(replies: Vec<(String, String)>) -> FakeHttp {
+            FakeHttp {
+                replies: replies.into_iter().collect(),
+                asked: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().expect("the request log").clone()
+        }
+    }
+
+    impl Http for FakeHttp {
+        fn text(&self, url: &str) -> Result<String> {
+            self.asked
+                .lock()
+                .expect("the request log")
+                .push(url.to_string());
+            self.replies.get(url).cloned().ok_or_else(|| {
+                Error::from_source(SourceKind::Choco, format!("nothing answers {url} here."))
+            })
+        }
+    }
+
+    /// An `Http` that refuses every request, for the tests whose answer has
+    /// to come off disk: one that reached for the feed fails here rather
+    /// than quietly waiting on a socket or reading the real
+    /// community.chocolatey.org.
+    struct NoNetwork;
+
+    impl Http for NoNetwork {
+        fn text(&self, url: &str) -> Result<String> {
+            Err(Error::from_source(
+                SourceKind::Choco,
+                format!("this test must not ask the network for {url}."),
+            ))
+        }
+    }
+
+    fn no_network() -> Arc<dyn Http> {
+        Arc::new(NoNetwork)
+    }
+
+    /// One feed reply carrying exactly the entries named, in that order, in
+    /// the shape `parse_search` reads: an Atom `<feed>` whose `<title>` is
+    /// the id and whose `<d:Title>` is the display name.
+    fn feed_of(entries: &[(&str, &str, &str)]) -> String {
+        let mut out = String::from(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices" xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata">"#,
+        );
+        for (id, name, version) in entries {
+            out.push_str(&format!(
+                r#"
+  <entry>
+    <id>https://community.chocolatey.org/api/v2/Packages(Id='{id}')</id>
+    <title type="text">{id}</title>
+    <m:properties>
+      <d:Title>{name}</d:Title>
+      <d:Version>{version}</d:Version>
+    </m:properties>
+  </entry>"#
+            ));
+        }
+        out.push_str("\n</feed>");
+        out
     }
 
     #[test]
@@ -1072,7 +1210,7 @@ mod tests {
 
     #[test]
     fn setup_is_deliberately_none() {
-        let choco = Choco::with_lib_dir(Client::shared(), std::env::temp_dir(), None);
+        let choco = Choco::with_lib_dir(no_network(), std::env::temp_dir(), None);
         assert!(choco.setup().is_none());
     }
 
@@ -1087,7 +1225,7 @@ mod tests {
         )
         .unwrap();
 
-        let choco = Choco::with_lib_dir(Client::shared(), lib.path().to_path_buf(), None);
+        let choco = Choco::with_lib_dir(no_network(), lib.path().to_path_buf(), None);
         let installed = choco.installed().unwrap();
         assert_eq!(installed.len(), 1);
         assert_eq!(installed[0].id, "vlc-nightly");
@@ -1100,7 +1238,7 @@ mod tests {
     fn a_missing_lib_directory_is_simply_empty() {
         let lib = tempfile::tempdir().expect("a temporary directory");
         let missing = lib.path().join("does-not-exist");
-        let choco = Choco::with_lib_dir(Client::shared(), missing, None);
+        let choco = Choco::with_lib_dir(no_network(), missing, None);
         assert_eq!(choco.installed().unwrap(), Vec::new());
     }
 
@@ -1130,7 +1268,7 @@ mod tests {
             1,
             "the directory with no .nuspec must not be counted"
         );
-        let choco = Choco::with_lib_dir(Client::shared(), lib.path().to_path_buf(), None);
+        let choco = Choco::with_lib_dir(no_network(), lib.path().to_path_buf(), None);
         let installed = choco.installed().unwrap();
         assert_eq!(installed.len(), 1);
         assert_eq!(installed[0].id, "vlc-nightly");
@@ -1241,7 +1379,7 @@ mod tests {
 
     #[test]
     fn plan_only_answers_for_its_own_packages_and_always_needs_root() {
-        let choco = Choco::with_lib_dir(Client::shared(), std::env::temp_dir(), a_choco_exe());
+        let choco = Choco::with_lib_dir(no_network(), std::env::temp_dir(), a_choco_exe());
         let mine = PackageRef {
             source: SourceKind::Choco,
             id: "7zip".to_string(),
@@ -1304,7 +1442,7 @@ mod tests {
     /// problem is that Chocolatey is not installed.
     #[test]
     fn plan_refuses_when_chocolatey_is_not_installed() {
-        let choco = Choco::with_lib_dir(Client::shared(), std::env::temp_dir(), None);
+        let choco = Choco::with_lib_dir(no_network(), std::env::temp_dir(), None);
         let mine = PackageRef {
             source: SourceKind::Choco,
             id: "7zip".to_string(),
@@ -1347,9 +1485,259 @@ mod tests {
         assert!(other.is_empty(), "{other:?}");
     }
 
+    /// The constraint is that a source is never silently skipped. Without
+    /// Chocolatey the status still says it is unavailable, still says why,
+    /// and still says the community feed can be searched anyway. The same
+    /// shape as `scoop::status_without_scoop_is_unavailable_searchable_and_says_why`.
+    #[test]
+    fn status_without_chocolatey_is_unavailable_searchable_and_says_why() {
+        let lib = tempfile::tempdir().expect("a temporary directory");
+        let choco = Choco::with_lib_dir(no_network(), lib.path().to_path_buf(), None);
+
+        let status = choco.status();
+        assert_eq!(status.kind, SourceKind::Choco);
+        assert!(!status.available, "no choco.exe was found");
+        assert!(
+            status.searchable,
+            "the community feed answers over HTTP without Chocolatey"
+        );
+        assert_eq!(status.reason.as_deref(), Some(NOT_INSTALLED));
+        assert_eq!(status.detail, None);
+        assert!(status.setup.is_none());
+    }
+
+    /// With Chocolatey, the status counts what is under `lib`. The count is
+    /// the directory listing rather than a parse, which
+    /// `count_installed_does_not_require_a_nuspec_to_parse` is what pins;
+    /// this pins that `status` is the thing that reports it.
+    #[test]
+    fn status_with_chocolatey_counts_the_installed_packages() {
+        let lib = tempfile::tempdir().expect("a temporary directory");
+        for (dir, fixture) in [
+            ("vlc-nightly", "choco-vlc-nightly.nuspec"),
+            ("chocolatey-core.extension", "choco-core-extension.nuspec"),
+        ] {
+            let package = lib.path().join(dir);
+            std::fs::create_dir_all(&package).unwrap();
+            std::fs::write(
+                package.join(format!("{dir}.nuspec")),
+                fixture_bytes(fixture),
+            )
+            .unwrap();
+        }
+        let choco = Choco::with_lib_dir(no_network(), lib.path().to_path_buf(), a_choco_exe());
+
+        let status = choco.status();
+        assert!(status.available);
+        assert_eq!(status.reason, None);
+        assert_eq!(status.detail.as_deref(), Some("2 packages"));
+        assert!(status.searchable);
+    }
+
+    /// One package reads as "1 package" and not "1 packages".
+    #[test]
+    fn status_counts_one_package_in_the_singular() {
+        let lib = tempfile::tempdir().expect("a temporary directory");
+        let package = lib.path().join("vlc-nightly");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("vlc-nightly.nuspec"),
+            fixture_bytes("choco-vlc-nightly.nuspec"),
+        )
+        .unwrap();
+        let choco = Choco::with_lib_dir(no_network(), lib.path().to_path_buf(), a_choco_exe());
+
+        assert_eq!(choco.status().detail.as_deref(), Some("1 package"));
+    }
+
+    /// The network half of `search`, end to end and offline: the one URL
+    /// the source asks for, the reply parsed, and the answer joined against
+    /// what is under `lib`. `FakeHttp` records what was asked, so this
+    /// pins that a search is one request and that it is the request
+    /// `search_url` builds, rather than the shape of the URL alone.
+    #[test]
+    fn search_asks_the_feed_once_and_joins_what_is_installed() {
+        let lib = tempfile::tempdir().expect("a temporary directory");
+        let package = lib.path().join("vlc-nightly");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("vlc-nightly.nuspec"),
+            fixture_bytes("choco-vlc-nightly.nuspec"),
+        )
+        .unwrap();
+
+        let query = Query::new("vlc");
+        let url = search_url("vlc", query.limit);
+        let http = Arc::new(FakeHttp::answering(vec![(
+            url.clone(),
+            feed_of(&[
+                ("vlc", "VLC media player", "3.0.21"),
+                ("vlc-nightly", "VLC Nightly", "4.0.0.20250701"),
+            ]),
+        )]));
+        let choco = Choco::with_lib_dir(http.clone(), lib.path().to_path_buf(), None);
+
+        let found = choco.search(&query).expect("the feed answered");
+        assert_eq!(http.asked(), vec![url], "a search is one request");
+        assert_eq!(found.len(), 2, "{found:?}");
+
+        let nightly = found
+            .iter()
+            .find(|p| p.id == "vlc-nightly")
+            .expect("it is in the reply");
+        assert!(nightly.installed, "it is under lib as well as in the feed");
+        assert_eq!(
+            nightly.installed_version.as_deref(),
+            Some("4.0.0.20250625"),
+            "the version on disk, not the feed's"
+        );
+        assert_eq!(nightly.version.as_deref(), Some("4.0.0.20250701"));
+
+        let player = found.iter().find(|p| p.id == "vlc").unwrap();
+        assert!(!player.installed);
+        assert_eq!(player.installed_version, None);
+    }
+
+    /// An empty query answers nothing rather than the whole feed, and asks
+    /// the feed nothing: the fake would fail every request here, so an
+    /// answer of `Ok` is itself the assertion that no request was made.
+    #[test]
+    fn an_empty_query_searches_for_nothing() {
+        let lib = tempfile::tempdir().expect("a temporary directory");
+        let choco = Choco::with_lib_dir(no_network(), lib.path().to_path_buf(), None);
+        assert_eq!(choco.search(&Query::new("")).unwrap(), Vec::new());
+        assert_eq!(choco.search(&Query::new("   ")).unwrap(), Vec::new());
+    }
+
+    /// A feed that answers with something that is not a search feed is an
+    /// error out of `search`, not an empty result list, so the page says
+    /// the source failed rather than that Chocolatey has nothing.
+    #[test]
+    fn a_search_reply_that_is_not_a_feed_is_an_error_from_search() {
+        let query = Query::new("vlc");
+        let url = search_url("vlc", query.limit);
+        let http = Arc::new(FakeHttp::answering(vec![(
+            url,
+            "<html><body>502 Bad Gateway</body></html>".to_string(),
+        )]));
+        let lib = tempfile::tempdir().expect("a temporary directory");
+        let choco = Choco::with_lib_dir(http, lib.path().to_path_buf(), None);
+
+        let err = choco.search(&query).expect_err("that is not a feed");
+        assert_eq!(err.source_kind, Some(SourceKind::Choco));
+    }
+
+    /// `details` looks the exact id up instead of taking a ranked search's
+    /// first few answers and hunting through them. The version this
+    /// replaces asked `search_url(id, 5)` and then looked for the id among
+    /// those five, so a package that is really in the feed read as missing
+    /// whenever the ranking did not put it in the first five, which
+    /// Chocolatey's naming convention makes ordinary: `vlc`, `vlc.install`,
+    /// `vlc.portable`, `vlc-nightly`.
+    ///
+    /// The fake answers only the exact-id URL, and answers the old
+    /// five-result search URL with a crowd of decoys that does not contain
+    /// the id. So a `details` that went back to searching would either fail
+    /// outright or find nothing, and this test would say so either way.
+    #[test]
+    fn details_looks_the_exact_id_up_rather_than_searching() {
+        let decoys = feed_of(&[
+            ("0zip", "Decoy", "1.0"),
+            ("17zip", "Decoy", "1.0"),
+            ("27zip", "Decoy", "1.0"),
+            ("37zip", "Decoy", "1.0"),
+            ("47zip", "Decoy", "1.0"),
+        ]);
+        let http = Arc::new(FakeHttp::answering(vec![
+            (details_url("7zip"), feed_of(&[("7zip", "7-Zip", "26.3.0")])),
+            (search_url("7zip", 5), decoys),
+        ]));
+        let lib = tempfile::tempdir().expect("a temporary directory");
+        let choco = Choco::with_lib_dir(http.clone(), lib.path().to_path_buf(), None);
+
+        let p = choco.details("7zip").expect("7zip is in the feed");
+        assert_eq!(p.id, "7zip");
+        assert_eq!(p.name, "7-Zip");
+        assert_eq!(p.version.as_deref(), Some("26.3.0"));
+        assert!(!p.installed);
+        assert_eq!(
+            http.asked(),
+            vec![details_url("7zip")],
+            "one request, and it is the lookup"
+        );
+    }
+
+    /// The installed `.nuspec` is the answer when there is one, and the
+    /// feed is not asked at all: the client here fails every request, so
+    /// reaching it would fail this test rather than pass it quietly.
+    #[test]
+    fn details_answers_the_installed_nuspec_without_asking_the_feed() {
+        let lib = tempfile::tempdir().expect("a temporary directory");
+        let package = lib.path().join("vlc-nightly");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("vlc-nightly.nuspec"),
+            fixture_bytes("choco-vlc-nightly.nuspec"),
+        )
+        .unwrap();
+        let choco = Choco::with_lib_dir(no_network(), lib.path().to_path_buf(), None);
+
+        let p = choco.details("VLC-NIGHTLY").expect("matched without case");
+        assert!(p.installed);
+        assert_eq!(p.installed_version.as_deref(), Some("4.0.0.20250625"));
+    }
+
+    /// An id the feed has no package for answers an empty feed rather than
+    /// an error, measured against the live endpoint, so the sentence has to
+    /// come from here. It names the id and says both places that were
+    /// looked in.
+    #[test]
+    fn details_says_where_it_looked_when_it_finds_nothing() {
+        let http = Arc::new(FakeHttp::answering(vec![(
+            details_url("no-such-package"),
+            feed_of(&[]),
+        )]));
+        let lib = tempfile::tempdir().expect("a temporary directory");
+        let choco = Choco::with_lib_dir(http, lib.path().to_path_buf(), None);
+
+        let err = choco
+            .details("no-such-package")
+            .expect_err("no package has that id");
+        assert!(err.message.contains("no-such-package"), "{err}");
+        assert!(err.message.contains("not installed"), "{err}");
+        assert!(err.message.ends_with('.'), "a sentence: {err}");
+        assert_eq!(err.source_kind, Some(SourceKind::Choco));
+    }
+
+    /// The lookup's URL, pinned whole, because every part of it was
+    /// measured against the live feed and any of them dropped changes the
+    /// answer: `tolower(Id)` rather than `Id`, because the feed's `eq` is
+    /// case sensitive and this side's comparison is not; a `searchTerm`
+    /// carrying the id, because an empty one answers no entries for a
+    /// package that is really there; and `targetFramework` and
+    /// `includePrerelease`, which `search_url` already pins for the same
+    /// reason.
+    #[test]
+    fn the_details_url_is_a_lookup_and_not_a_search() {
+        assert_eq!(
+            details_url("7zip"),
+            "https://community.chocolatey.org/api/v2/Search()?$filter=IsLatestVersion%20and%20tolower(Id)%20eq%20'7zip'&$top=1&searchTerm='7zip'&targetFramework=''&includePrerelease=false"
+        );
+        assert_eq!(
+            details_url("GoogleChrome"),
+            details_url("googlechrome"),
+            "the id is lowered to meet tolower(Id)"
+        );
+        assert!(
+            details_url("bob's").contains("'bob%27%27s'"),
+            "an apostrophe is doubled then encoded, the same as in a search: {}",
+            details_url("bob's")
+        );
+    }
+
     #[test]
     fn refresh_and_update_all_plan_nothing() {
-        let choco = Choco::with_lib_dir(Client::shared(), std::env::temp_dir(), None);
+        let choco = Choco::with_lib_dir(no_network(), std::env::temp_dir(), None);
         for op in [
             Op::Refresh {
                 source: SourceKind::Choco,
