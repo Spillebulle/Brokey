@@ -144,11 +144,14 @@ These were decided before the first line and are not re-litigated in a fix:
   elevates `msiexec` on the MSI it has just lifted out of its own file. It
   cannot go through the helper: `brokey-helper.exe` is one of the files that
   MSI installs, so there is none on the machine yet. It is held narrow in code
-  rather than in this sentence. `run_installer` takes a `Staged`, which only
-  `stage` can make and only out of this process's own payload, and
-  `still_the_package` checks the file byte for byte immediately before the
-  prompt, so a file that has changed is refused and nothing is elevated. The
-  window it draws is never elevated itself, and neither is the Brokey the
+  rather than in this sentence, in three places that each close what the last
+  one leaves open: `install` reads `current_exe()` **before the window opens**,
+  so the file cannot be swapped while somebody reads it; `run_installer` takes
+  a `Staged`, whose fields only the `staging` module can fill and only out of
+  bytes `payload::read` lifted from that image; and `still_the_package`
+  compares the staged file byte for byte immediately before the prompt, so a
+  file that changed after it was written is refused and nothing is elevated.
+  The window it draws is never elevated itself, and neither is the Brokey the
   install leaves behind.
 - **A source never runs anything.** `Source::plan` returns steps; the Runner
   runs them. This is what makes every source testable with fixtures.

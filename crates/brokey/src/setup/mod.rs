@@ -46,6 +46,16 @@ impl Outcome {
 /// the window and a renamed copy says whatever it was renamed to. That is
 /// the caller's business and it is documented rather than prevented: the
 /// file in front of the user is the one they should be told about.
+///
+/// **The image is read here, before the window opens, and never again.**
+/// Windows keeps a running executable open with `FILE_SHARE_DELETE`, so the
+/// file at `current_exe()` can be renamed aside and replaced by anything
+/// running as this user. Reading it when the button is pressed would leave a
+/// gap as long as somebody takes to read a window, and whatever was dropped in
+/// during it would be the MSI that got the administrator prompt. Reading it
+/// once, before anything is drawn, puts the whole of the window's life behind
+/// the read; the bytes then travel to the worker thread by value and nothing
+/// touches that path again.
 #[cfg(windows)]
 pub fn install() -> i32 {
     let executable = std::env::current_exe();
@@ -59,23 +69,16 @@ pub fn install() -> i32 {
     };
     let title = format!("Install Brokey {version}");
 
-    let outcome = match executable {
-        Err(e) => window::report(
-            &title,
-            Outcome::failed(format!(
-                "Brokey could not find its own file, so it has nothing to unpack: {e}. \
-                 Run the setup executable from a folder you can read."
-            )),
-        ),
+    let outcome = match own_image(executable) {
+        Err(sentence) => window::report(&title, Outcome::failed(sentence)),
         // A copy carrying no package has nothing to offer, so it says so from
-        // the moment the window opens rather than after a button press.
-        // `carried_by` reads the last sixteen bytes and nothing else, and the
-        // file it reads is this process's own running image, so the only way
-        // it answers `false` is that the package really is not there.
-        Ok(path) if !payload::carried_by(&path) => {
+        // the moment the window opens rather than after a button press. This
+        // is the real read rather than the sixteen-byte probe, because the
+        // bytes are already here.
+        Ok(image) if payload::read(&image).is_none() => {
             window::report(&title, Outcome::failed(NO_PACKAGE.to_string()))
         }
-        Ok(path) => window::show(&title, Box::new(move || unpack_and_install(&path))),
+        Ok(image) => window::show(&title, Box::new(move || install_from(&image, &version))),
     };
 
     // Said twice on purpose. `brokey.exe` is a console application, which is
@@ -91,39 +94,49 @@ pub fn install() -> i32 {
     outcome.code
 }
 
-/// The whole of `--install` with the file named rather than asked for, which
-/// is what lets a test reach the "carries no installer" answer without a
-/// payload anywhere near it.
+/// This process's own executable, as bytes.
+///
+/// `Err` is the sentence to show. The two failures it reports are a machine
+/// that will not say where its own image is, which does not happen, and one
+/// that will not let this process read it, which happens when a setup
+/// executable is run straight out of an archive viewer or off a share that
+/// has gone away.
 #[cfg(windows)]
-fn unpack_and_install(executable: &Path) -> Outcome {
-    let version = version_in(executable);
-    let bytes = match std::fs::read(executable) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return Outcome::failed(format!(
-                "Brokey could not read {}: {e}. Copy the setup executable somewhere you can \
-                 read it, such as your Downloads folder, and run it again.",
-                executable.display()
-            ));
-        }
-    };
-    let Some(package) = payload::read(&bytes) else {
-        return Outcome::failed(NO_PACKAGE.to_string());
-    };
-    let staged = match stage(package, &version) {
-        Ok(path) => path,
-        Err(e) => {
-            return Outcome::failed(format!(
-                "Brokey could not write the installer to a temporary folder: {e}. \
-                 Check that there is room on the drive holding {}.",
-                std::env::temp_dir().display()
-            ));
-        }
-    };
-    // `staged` takes its own folder away when it goes out of scope, so the
-    // early returns above this line and the outcome below leave the same
-    // nothing behind.
-    run_installer(&staged, &version)
+fn own_image(executable: std::io::Result<PathBuf>) -> Result<Vec<u8>, String> {
+    let path = executable.map_err(|e| {
+        format!(
+            "Brokey could not find its own file, so it has nothing to unpack: {e}. \
+             Run the setup executable from a folder you can read."
+        )
+    })?;
+    std::fs::read(&path).map_err(|e| {
+        format!(
+            "Brokey could not read {}: {e}. Copy the setup executable somewhere you can read \
+             it, such as your Downloads folder, and run it again.",
+            path.display()
+        )
+    })
+}
+
+/// The install itself, over the bytes [`install`] already read.
+///
+/// A function of the image and nothing else, which is what lets the test
+/// reach the "carries no installer" answer with a handful of invented bytes
+/// and no file, no staging and no msiexec anywhere near it.
+#[cfg(windows)]
+fn install_from(image: &[u8], version: &str) -> Outcome {
+    match staging::stage(image, version) {
+        // `staged` takes its own folder away when it goes out of scope, so
+        // every path out of here leaves the same nothing behind.
+        Ok(Some(staged)) => run_installer(&staged, version),
+        Ok(None) => Outcome::failed(NO_PACKAGE.to_string()),
+        Err(e) => Outcome::failed(format!(
+            "Brokey could not put the installer in a folder of its own under {}: {e}. \
+             Check that the folder exists, that you can write to it, and that there is room \
+             on the drive it is on.",
+            std::env::temp_dir().display()
+        )),
+    }
 }
 
 /// The ordinary answer for a plain `brokey.exe`, which carries nothing and is
@@ -160,148 +173,282 @@ fn version_from_stem(stem: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// A package this process wrote out of its own payload.
+/// Putting the package somewhere msiexec can read it, and keeping it there
+/// unchanged until msiexec has.
 ///
-/// **The type is the narrowing.** [`run_installer`] elevates msiexec, and it
-/// takes one of these rather than a path, so there is no way to reach that
-/// call with a file somebody else chose: the only way to make a `Staged` is
-/// [`stage`], and the only thing `stage` writes is bytes that came out of this
-/// executable. The borrow of `package` is what lets
-/// [`still_the_package`] check the file again a moment before it is handed
-/// over, so the two cannot drift apart either.
+/// **A module rather than three loose functions, because the narrowing is the
+/// point.** [`Staged`]'s fields are private to this module, so nothing else in
+/// `setup` can build one; [`stage`] takes an executable image and lifts the
+/// package out of it with `payload::read` rather than accepting bytes from
+/// anywhere; and [`run_installer`](super::run_installer), the one call in
+/// Brokey outside `transaction/elevate/` that raises an administrator prompt,
+/// takes a `Staged` rather than a path. Put together, the only thing that call
+/// can be reached with is a file this process wrote out of an executable
+/// image, and `install` reads that image from `current_exe()` before the
+/// window opens.
 #[cfg(windows)]
-struct Staged<'a> {
-    /// The folder made for this run alone, and taken away again on the way
-    /// out.
-    folder: PathBuf,
-    /// The package inside it, which is what msiexec is given.
-    file: PathBuf,
-    /// The bytes that were written, still in memory from the read of
-    /// `current_exe()` that produced them.
-    package: &'a [u8],
-}
+mod staging {
+    use std::path::{Path, PathBuf};
 
-#[cfg(windows)]
-impl Drop for Staged<'_> {
-    /// Takes the folder away whichever way the install went, including the
-    /// paths that return early.
+    use super::payload;
+
+    /// A package written out of an executable image, and the folder it is
+    /// alone in.
+    pub(super) struct Staged<'a> {
+        /// The folder made for this run alone, and taken away again on the
+        /// way out.
+        folder: PathBuf,
+        /// The package inside it, which is what msiexec is given.
+        file: PathBuf,
+        /// The bytes that were written, still in memory from the read of
+        /// `current_exe()` they were lifted out of. [`still_the_package`]
+        /// compares the file with these, so the two cannot drift apart.
+        package: &'a [u8],
+    }
+
+    impl Staged<'_> {
+        /// The package's path, for the command line msiexec is given.
+        pub(super) fn file(&self) -> &Path {
+            &self.file
+        }
+    }
+
+    impl Drop for Staged<'_> {
+        /// Takes the folder away whichever way the install went, including
+        /// the paths that return early.
+        ///
+        /// Best effort: Windows Installer keeps its own copy of a package it
+        /// has accepted, so nothing needs this one once the wait has
+        /// returned, and a file left behind in a temporary folder is untidy
+        /// rather than a failure. It is not worth overriding an outcome the
+        /// user needs to read.
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.file);
+            let _ = std::fs::remove_dir(&self.folder);
+        }
+    }
+
+    /// Lifts the package out of `image` and writes it where msiexec can read
+    /// it. `Ok(None)` when the image carries no package, which is every
+    /// ordinary `brokey.exe`.
     ///
-    /// Best effort: Windows Installer keeps its own copy of a package it has
-    /// accepted, so nothing needs this one once the wait has returned, and a
-    /// file left behind in a temporary folder is untidy rather than a failure.
-    /// It is not worth overriding an outcome the user needs to read.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.file);
-        let _ = std::fs::remove_dir(&self.folder);
+    /// **Why the folder is made this carefully.** The user's temporary
+    /// directory is writable by the user, and what is written into it here is
+    /// about to be opened by a process running as Administrator. A
+    /// predictable path could be created in advance, as a junction pointing
+    /// somewhere else, by anything already running as this user; the package
+    /// would then be written through it and could be swapped for another
+    /// before msiexec opened it, and the swapped one would install as
+    /// Administrator. UAC is not a security boundary and the attacker in that
+    /// story is already the user, but a guessable staging path for an
+    /// elevated install is the shape of thing that ends up in an advisory, so
+    /// it is closed rather than argued about.
+    ///
+    /// Three things close it, and the first is the one that does the work:
+    ///
+    /// 1. `create_dir`, never `create_dir_all`. A folder that is already
+    ///    there is an error rather than a welcome, so a pre-created junction
+    ///    is refused.
+    /// 2. An unguessable name, so nobody is in a position to have created it.
+    /// 3. [`still_the_package`], run immediately before the file is elevated,
+    ///    which is what closes the gap between writing it and handing it
+    ///    over.
+    pub(super) fn stage<'a>(image: &'a [u8], version: &str) -> std::io::Result<Option<Staged<'a>>> {
+        let Some(package) = payload::read(image) else {
+            return Ok(None);
+        };
+        let folder = std::env::temp_dir().join(format!("brokey-setup-{}", scratch_name()));
+        std::fs::create_dir(&folder)?;
+        let file = folder.join(format!("brokey-{version}.msi"));
+        // Built before the write, not after, so a write that fails still
+        // leaves a `Staged` to drop and the empty folder goes with it. A disk
+        // that filled up is exactly when that matters, and it is exactly what
+        // the sentence the caller shows is about.
+        let staged = Staged {
+            folder,
+            file,
+            package,
+        };
+        std::fs::write(&staged.file, package)?;
+        Ok(Some(staged))
+    }
+
+    /// A folder name nobody can have chosen in advance.
+    ///
+    /// Sixty-four bits from the system's own random source, which is what
+    /// `BCryptGenRandom` with `USE_SYSTEM_PREFERRED_RNG` asks for, and the
+    /// clock after it so two runs cannot collide even if that source were
+    /// ever to repeat itself. The process id is deliberately **not** in here:
+    /// it is short, it is reused, and a reader could work it out.
+    ///
+    /// If the random source fails, which it does not on a machine that can
+    /// run Windows at all, the name falls back to the clock alone. That is
+    /// weaker, and it is `create_dir` in [`stage`] rather than this name that
+    /// makes a guess useless: a folder somebody else made is refused, not
+    /// written into.
+    fn scratch_name() -> String {
+        use windows_sys::Win32::Security::Cryptography::{
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
+        };
+
+        let mut bytes = [0u8; 8];
+        // SAFETY: a null algorithm handle is what `USE_SYSTEM_PREFERRED_RNG`
+        // requires, and the buffer and its length describe `bytes`, which is
+        // alive for the call. A non-zero `NTSTATUS` means it wrote nothing,
+        // which is why the result is only used when it is zero.
+        let status = unsafe {
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                bytes.as_mut_ptr(),
+                bytes.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        let random = if status == 0 {
+            u64::from_le_bytes(bytes)
+        } else {
+            0
+        };
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_nanos())
+            .unwrap_or(0);
+        format!("{random:016x}-{nanos:x}")
+    }
+
+    /// Whether the staged file is still, byte for byte, the package that was
+    /// lifted out of the image and written a moment ago.
+    ///
+    /// **This is what keeps the exception in `CLAUDE.md` narrow.** The one
+    /// place in Brokey outside `transaction/elevate/` that raises an
+    /// administrator prompt is `run_installer`, and the only thing it is
+    /// allowed to raise it for is a file this process wrote out of its own
+    /// image. Prose cannot hold that; this can, because a file that has
+    /// changed is refused and nothing is elevated.
+    ///
+    /// `Err` carries the sentence to show, already worded for whoever is
+    /// reading the window.
+    pub(super) fn still_the_package(staged: &Staged<'_>) -> Result<(), String> {
+        match std::fs::read(&staged.file) {
+            Ok(on_disk) if on_disk == staged.package => Ok(()),
+            Ok(_) => Err(format!(
+                "The installer at {} is not the one Brokey wrote there a moment ago, so it \
+                 was not run and nothing was installed. Something else on this machine \
+                 changed the file. Run the setup executable again, and if it happens again, \
+                 run a virus scan before installing anything.",
+                staged.file.display()
+            )),
+            Err(e) => Err(format!(
+                "Brokey could not read back the installer it had just written to {}: {e}. \
+                 Nothing was installed. Run the setup executable again.",
+                staged.file.display()
+            )),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// An executable image carrying a package, which is the only thing
+        /// [`stage`] accepts: there is no way in this module or out of it to
+        /// stage bytes that did not come out of one.
+        fn image(package: &[u8]) -> Vec<u8> {
+            payload::append(b"MZ this stands in for the setup executable", package)
+        }
+
+        /// **Nothing but the package written out of the image is elevated.**
+        ///
+        /// The administrator prompt in `run_installer` is the one elevation
+        /// call site outside `transaction/elevate/`, and what keeps that
+        /// exception from widening is that the file is checked against the
+        /// bytes in hand a moment before the prompt. This is that check, with
+        /// a real staged file and a real substitution, and it runs nothing:
+        /// `still_the_package` reads a file and compares bytes, and the
+        /// refusal it answers is returned before `ShellExecuteExW` is
+        /// reached.
+        #[test]
+        fn a_staged_package_that_changed_is_never_elevated() {
+            let package: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+            let carrier = image(&package);
+            let staged = stage(&carrier, "0.0.0-test")
+                .expect("the package is staged")
+                .expect("the image carries one");
+            assert!(
+                still_the_package(&staged).is_ok(),
+                "the file as written must be accepted"
+            );
+
+            // What an attacker swapping the file in the gap would leave
+            // behind.
+            std::fs::write(staged.file(), b"a different installer entirely").expect("the swap");
+            let refused = still_the_package(&staged).expect_err("a changed file must be refused");
+            assert!(
+                refused.contains("is not the one Brokey wrote there a moment ago"),
+                "the sentence says what happened: {refused}"
+            );
+            assert!(refused.contains("nothing was installed"));
+
+            // A truncation is a change too, and so is a file that has gone.
+            std::fs::write(staged.file(), &package[..package.len() - 1]).expect("the truncation");
+            assert!(still_the_package(&staged).is_err());
+            std::fs::remove_file(staged.file()).expect("the removal");
+            assert!(still_the_package(&staged).is_err());
+
+            let folder = staged.folder.clone();
+            drop(staged);
+            assert!(
+                !folder.exists(),
+                "the staging folder is taken away whichever way the install went"
+            );
+        }
+
+        /// An image with no package stages nothing at all, which is every
+        /// ordinary `brokey.exe`.
+        #[test]
+        fn an_image_with_no_package_stages_nothing() {
+            let staged = stage(b"MZ an ordinary program", "0.0.0-test").expect("no error");
+            assert!(staged.is_none());
+        }
+
+        /// **The staging folder is this run's alone.** A name anybody could
+        /// work out ahead of the run could be created first, as a junction,
+        /// and the package written through it; [`stage`] uses `create_dir`, so
+        /// a folder that is already there is refused, and the name carries
+        /// enough of the system's own randomness that nobody is in a position
+        /// to have made one.
+        #[test]
+        fn two_runs_never_stage_into_the_same_folder() {
+            let image = image(b"pretend this is a package");
+            let first = stage(&image, "0.0.0-test")
+                .expect("the first")
+                .expect("one");
+            let second = stage(&image, "0.0.0-test")
+                .expect("the second")
+                .expect("one");
+            assert_ne!(first.folder, second.folder);
+
+            // And the first sixteen characters, which are the random half,
+            // differ on their own: a clock that did not move would otherwise
+            // be the only thing keeping two runs apart.
+            let names: Vec<String> = (0..8).map(|_| scratch_name()).collect();
+            let random_halves: std::collections::HashSet<&str> =
+                names.iter().map(|name| &name[..16]).collect();
+            assert_eq!(
+                random_halves.len(),
+                names.len(),
+                "eight names, eight different random halves"
+            );
+            assert!(
+                random_halves.iter().any(|half| *half != "0000000000000000"),
+                "the system random source answered, rather than the fallback"
+            );
+        }
     }
 }
 
-/// Writes the package where msiexec can read it.
-///
-/// **Why the folder is made this carefully.** The user's temporary directory
-/// is writable by the user, and what is written into it here is about to be
-/// opened by a process running as Administrator. A predictable path could be
-/// created in advance, as a junction pointing somewhere else, by anything
-/// already running as this user; the package would then be written through it
-/// and could be swapped for another before msiexec opened it, and the swapped
-/// one would install as Administrator. UAC is not a security boundary and the
-/// attacker in that story is already the user, but a guessable staging path
-/// for an elevated install is the shape of thing that ends up in an advisory,
-/// so it is closed rather than argued about.
-///
-/// Three things close it, and the first is the one that does the work:
-///
-/// 1. `create_dir`, never `create_dir_all`. A folder that is already there is
-///    an error rather than a welcome, so a pre-created junction is refused.
-/// 2. An unguessable name, so nobody is in a position to have created it.
-/// 3. [`still_the_package`], run immediately before the file is elevated,
-///    which is what closes the gap between writing it and handing it over.
 #[cfg(windows)]
-fn stage<'a>(package: &'a [u8], version: &str) -> std::io::Result<Staged<'a>> {
-    let folder = std::env::temp_dir().join(format!("brokey-setup-{}", scratch_name()));
-    std::fs::create_dir(&folder)?;
-    let file = folder.join(format!("brokey-{version}.msi"));
-    std::fs::write(&file, package)?;
-    Ok(Staged {
-        folder,
-        file,
-        package,
-    })
-}
-
-/// A folder name nobody can have chosen in advance.
-///
-/// Sixty-four bits from the system's own random source, which is what
-/// `BCryptGenRandom` with `USE_SYSTEM_PREFERRED_RNG` asks for, and the clock
-/// after it so two runs cannot collide even if that source were ever to
-/// repeat itself. The process id is deliberately **not** in here: it is
-/// short, it is reused, and a reader could work it out.
-///
-/// If the random source fails, which it does not on a machine that can run
-/// Windows at all, the name falls back to the clock alone. That is weaker,
-/// and it is `create_dir` in [`stage`] rather than this name that makes a
-/// guess useless: a folder somebody else made is refused, not written into.
-#[cfg(windows)]
-fn scratch_name() -> String {
-    use windows_sys::Win32::Security::Cryptography::{
-        BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
-    };
-
-    let mut bytes = [0u8; 8];
-    // SAFETY: a null algorithm handle is what `USE_SYSTEM_PREFERRED_RNG`
-    // requires, and the buffer and its length describe `bytes`, which is
-    // alive for the call. A non-zero `NTSTATUS` means it wrote nothing, which
-    // is why the result is only used when it is zero.
-    let status = unsafe {
-        BCryptGenRandom(
-            std::ptr::null_mut(),
-            bytes.as_mut_ptr(),
-            bytes.len() as u32,
-            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-        )
-    };
-    let random = if status == 0 {
-        u64::from_le_bytes(bytes)
-    } else {
-        0
-    };
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_nanos())
-        .unwrap_or(0);
-    format!("{random:016x}-{nanos:x}")
-}
-
-/// Whether the staged file is still, byte for byte, the package this process
-/// lifted out of its own file and wrote a moment ago.
-///
-/// **This is what keeps the exception in `CLAUDE.md` narrow.** The one place
-/// in Brokey outside `transaction/elevate/` that raises an administrator
-/// prompt is [`run_installer`], and the only thing it is allowed to raise it
-/// for is a file this process wrote from its own payload. Prose cannot hold
-/// that; this can, because a file that has changed is refused and nothing is
-/// elevated.
-///
-/// `Err` carries the sentence to show, already worded for whoever is reading
-/// the window.
-#[cfg(windows)]
-fn still_the_package(staged: &Staged<'_>) -> Result<(), String> {
-    match std::fs::read(&staged.file) {
-        Ok(on_disk) if on_disk == staged.package => Ok(()),
-        Ok(_) => Err(format!(
-            "The installer at {} is not the one Brokey wrote there a moment ago, so it was not \
-             run and nothing was installed. Something else on this machine changed the file. \
-             Run the setup executable again, and if it happens again, run a virus scan before \
-             installing anything.",
-            staged.file.display()
-        )),
-        Err(e) => Err(format!(
-            "Brokey could not read back the installer it had just written to {}: {e}. Nothing \
-             was installed. Run the setup executable again.",
-            staged.file.display()
-        )),
-    }
-}
+use staging::{Staged, still_the_package};
 
 /// Runs `msiexec /i <package> /qn` with one administrator prompt, and waits
 /// for it to finish.
@@ -327,10 +474,11 @@ fn still_the_package(staged: &Staged<'_>) -> Result<(), String> {
 /// elevated here is msiexec, for as long as msiexec runs, and nothing else.
 ///
 /// **And it is narrow by construction, not by promise.** It takes a
-/// [`Staged`], which only [`stage`] can make, and it checks with
-/// [`still_the_package`] immediately before the call that the file is byte for
-/// byte what this process wrote out of its own payload. A file that is not
-/// gets no prompt.
+/// [`Staged`], whose fields only `staging` can fill and only out of an
+/// executable image, and it checks with [`still_the_package`] immediately
+/// before the call that the file is byte for byte what was written. The image
+/// itself came from `current_exe()` in [`install`], before the window opened.
+/// A file that is not that gets no prompt.
 #[cfg(windows)]
 fn run_installer(staged: &Staged<'_>, version: &str) -> Outcome {
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
@@ -339,7 +487,8 @@ fn run_installer(staged: &Staged<'_>, version: &str) -> Outcome {
         GetExitCodeProcess, INFINITE, WaitForSingleObject,
     };
     use windows_sys::Win32::UI::Shell::{
-        SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+        SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+        ShellExecuteExW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
@@ -354,15 +503,19 @@ fn run_installer(staged: &Staged<'_>, version: &str) -> Outcome {
     let verb = wide_null("runas");
     // The path is quoted because the user's temporary folder sits under their
     // profile, and profile names have spaces in them more often than not.
-    let parameters = wide_null(&format!("/i \"{}\" /qn", staged.file.display()));
+    let parameters = wide_null(&format!("/i \"{}\" /qn", staged.file().display()));
 
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
         // `NOCLOSEPROCESS` so `hProcess` comes back to wait on; `FLAG_NO_UI`
         // so a failure to start msiexec at all is reported in the sentence
         // below rather than by a native Windows error dialog Brokey did not
-        // write and cannot style.
-        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI,
+        // write and cannot style; `NOASYNC` because this runs on the window's
+        // worker thread, which has no message loop of its own, and
+        // `ShellExecuteEx` is documented to need it there so that it finishes
+        // its work before returning rather than leaving it to a thread that
+        // will never pump.
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
         lpVerb: verb.as_ptr(),
         lpFile: file.as_ptr(),
         lpParameters: parameters.as_ptr(),
@@ -392,15 +545,34 @@ fn run_installer(staged: &Staged<'_>, version: &str) -> Outcome {
         ));
     }
 
+    // `hProcess` is documented to be null when `ShellExecuteEx` succeeded
+    // without starting a process, which a verb handled by an already running
+    // instance can do. `OwnedHandle` is a niche type whose valid range
+    // excludes zero, so building one out of a null handle would be undefined
+    // behaviour rather than an error found later. Checked, therefore, rather
+    // than assumed.
+    if info.hProcess.is_null() {
+        return Outcome::failed(
+            "Windows did not start Windows Installer and did not say why, so nothing was \
+             installed. Run the setup executable again."
+                .to_string(),
+        );
+    }
+
     // SAFETY: `ShellExecuteExW` succeeded above with `SEE_MASK_NOCLOSEPROCESS`
-    // set, which is documented to fill `hProcess` with a fresh handle this
-    // call now owns exclusively. Owning it here is what closes it.
+    // set, and `hProcess` has just been checked to be non-null, so it is a
+    // real process handle this call now owns exclusively. Owning it here is
+    // what closes it.
     let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess as RawHandle) };
 
     // SAFETY: `process` owns a live process handle for the whole of this call,
     // and `INFINITE` is the documented "wait until it exits" value. The wait
     // is bounded by msiexec exiting, which it does whether the install
-    // succeeds, fails, or is stopped.
+    // succeeds, fails, or is stopped. Not bounded by anything else: an msiexec
+    // that hangs hangs this with it, and Task Manager is then the way out. A
+    // timeout was considered and rejected, because there is no length of time
+    // after which abandoning a half-finished per-machine install is the better
+    // answer.
     unsafe { WaitForSingleObject(process.as_raw_handle() as _, INFINITE) };
 
     let mut code: u32 = 0;
@@ -490,100 +662,23 @@ mod tests {
     use super::*;
 
     /// **The ordinary case, and the only test that goes near the install
-    /// path.** A file with no payload is every `brokey.exe` on every machine,
-    /// so the answer has to be a sentence rather than a panic.
+    /// path.** An image with no payload is every `brokey.exe` on every
+    /// machine, so the answer has to be a sentence rather than a panic.
     ///
-    /// The file this is given is one the test wrote, holding no magic bytes,
-    /// so `payload::read` answers `None` and the run stops on that line.
-    /// Nothing below it is reached: no package is staged, msiexec is never
-    /// started, no prompt appears and nothing is installed. That is the whole
-    /// reason the decision is a function of its own rather than the inside of
+    /// The bytes this is given hold no magic, so `staging::stage` answers
+    /// `Ok(None)` and the run stops there. Nothing below it is reached: no
+    /// folder is made, no package is written, msiexec is never started, no
+    /// prompt appears and nothing is installed. That is the whole reason
+    /// `install_from` is a function of the image rather than the inside of
     /// `install`.
     #[test]
     fn a_copy_with_no_package_says_so_and_installs_nothing() {
-        let folder = std::env::temp_dir().join(format!("brokey-setup-test-{}", std::process::id()));
-        std::fs::create_dir_all(&folder).expect("the scratch folder");
-        let plain = folder.join("brokey.exe");
-        std::fs::write(&plain, b"MZ this is an ordinary program").expect("write the plain file");
-
-        let outcome = unpack_and_install(&plain);
+        let outcome = install_from(b"MZ this is an ordinary program", "0.1.4");
         assert_eq!(outcome.sentence, NO_PACKAGE);
         assert_eq!(outcome.code, 1, "a copy that cannot install answers 1");
         assert!(
             outcome.sentence.contains("brokey-setup-"),
             "the sentence names the file that does carry the installer"
-        );
-
-        let _ = std::fs::remove_dir_all(&folder);
-    }
-
-    /// **Nothing but the package this process wrote is elevated.**
-    ///
-    /// The administrator prompt in `run_installer` is the one elevation call
-    /// site outside `transaction/elevate/`, and what keeps that exception from
-    /// widening is that the file is checked against the bytes in hand a moment
-    /// before the prompt. This is that check, with a real staged file and a
-    /// real substitution, and it runs nothing: `still_the_package` reads a
-    /// file and compares bytes, and the refusal it answers is returned before
-    /// `ShellExecuteExW` is reached.
-    #[test]
-    fn a_staged_package_that_changed_is_never_elevated() {
-        let package: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
-        let staged = stage(&package, "0.0.0-test").expect("the package is staged");
-        assert!(
-            still_the_package(&staged).is_ok(),
-            "the file as written must be accepted"
-        );
-
-        // What an attacker swapping the file in the gap would leave behind.
-        std::fs::write(&staged.file, b"a different installer entirely").expect("the swap");
-        let refused = still_the_package(&staged).expect_err("a changed file must be refused");
-        assert!(
-            refused.contains("is not the one Brokey wrote there a moment ago"),
-            "the sentence says what happened: {refused}"
-        );
-        assert!(refused.contains("nothing was installed"));
-
-        // A truncation is a change too, and so is a file that has gone.
-        std::fs::write(&staged.file, &package[..package.len() - 1]).expect("the truncation");
-        assert!(still_the_package(&staged).is_err());
-        std::fs::remove_file(&staged.file).expect("the removal");
-        assert!(still_the_package(&staged).is_err());
-
-        let folder = staged.folder.clone();
-        drop(staged);
-        assert!(
-            !folder.exists(),
-            "the staging folder is taken away whichever way the install went"
-        );
-    }
-
-    /// **The staging folder is this run's alone.** A name anybody could work
-    /// out ahead of the run could be created first, as a junction, and the
-    /// package written through it; `stage` uses `create_dir`, so a folder that
-    /// is already there is refused, and the name carries enough of the
-    /// system's own randomness that nobody is in a position to have made one.
-    #[test]
-    fn two_runs_never_stage_into_the_same_folder() {
-        let package = b"pretend this is a package".as_slice();
-        let first = stage(package, "0.0.0-test").expect("the first");
-        let second = stage(package, "0.0.0-test").expect("the second");
-        assert_ne!(first.folder, second.folder);
-
-        // And the first sixteen characters, which are the random half, differ
-        // on their own: a clock that did not move would otherwise be the only
-        // thing keeping two runs apart.
-        let names: Vec<String> = (0..8).map(|_| scratch_name()).collect();
-        let random_halves: std::collections::HashSet<&str> =
-            names.iter().map(|name| &name[..16]).collect();
-        assert_eq!(
-            random_halves.len(),
-            names.len(),
-            "eight names, eight different random halves"
-        );
-        assert!(
-            random_halves.iter().any(|half| *half != "0000000000000000"),
-            "the system random source answered, rather than the fallback"
         );
     }
 
