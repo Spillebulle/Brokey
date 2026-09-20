@@ -47,7 +47,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_PAINT, WNDCLASSW, WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
 };
 
-use super::Outcome;
+use super::{Outcome, wide_null};
 
 /// The window's own message, posted by the working thread when the install
 /// has finished and its outcome is waiting in [`State::result`].
@@ -179,8 +179,41 @@ struct State {
 impl State {
     /// A `tokens.css` pixel in screen pixels.
     fn px(&self, n: i32) -> i32 {
-        (n as f32 * self.scale).round() as i32
+        scaled(n, self.scale)
     }
+}
+
+/// A `tokens.css` pixel in screen pixels, at a scale given rather than held.
+///
+/// [`State::px`] is this with the state's own scale. The two places that have
+/// a scale and no state, [`create_window`] and [`fit_to`], call it directly
+/// rather than each writing the arithmetic out again.
+fn scaled(n: i32, scale: f32) -> i32 {
+    (n as f32 * scale).round() as i32
+}
+
+/// How tall the window's content wants to be for a sentence `text_height`
+/// screen pixels tall.
+///
+/// **This is the one statement of the layout below the header**, and it is
+/// one statement because it used to be two. [`fit_to`] works downward from
+/// the top of the client area to decide how tall the window has to be, and
+/// [`draw`] works upward from the bottom of whatever height it got to place
+/// the same run of things, and the only thing keeping the two in step was a
+/// comment saying they had to be. The stack is the sentence's own top, the
+/// sentence, a gap, the track, a gap, the button and the margin.
+///
+/// Pure, and tested without a window, a device context or a message loop.
+/// The track takes at least one pixel because [`draw`] always draws at least
+/// one: a rail that is not there reads differently from an empty one.
+fn content_height(scale: f32, text_height: i32) -> i32 {
+    scaled(size::LINE_TOP, scale)
+        + text_height
+        + scaled(size::GAP, scale)
+        + scaled(size::TRACK, scale).max(1)
+        + scaled(size::GAP, scale)
+        + scaled(size::BUTTON_HEIGHT, scale)
+        + scaled(size::MARGIN, scale)
 }
 
 /// The sentence shown before anything has been done.
@@ -331,7 +364,7 @@ fn open(title: &str, mut state: Box<State>) -> Result<Outcome, Box<State>> {
 const CLASS: &str = "BrokeySetupWindow";
 
 fn register_class() -> Option<u16> {
-    let name = wide(CLASS);
+    let name = wide_null(CLASS);
     // SAFETY: `GetModuleHandleW(null)` is the documented way to ask for this
     // process's own module and cannot fail for it.
     let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
@@ -375,9 +408,9 @@ fn register_class() -> Option<u16> {
 /// The scale is passed by value for the same reason: nothing here reads
 /// through the pointer at all.
 fn create_window(title: &str, state: *mut State, scale: f32) -> Option<HWND> {
-    let px = |n: i32| (n as f32 * scale).round() as i32;
-    let name = wide(CLASS);
-    let caption = wide(title);
+    let px = |n: i32| scaled(n, scale);
+    let name = wide_null(CLASS);
+    let caption = wide_null(title);
 
     // The client area is the size that matters; this asks Windows how much
     // border and title bar to add so the drawing area is exactly the size the
@@ -485,7 +518,7 @@ fn fit_to(hwnd: HWND) {
     let Some((line, scale)) = (unsafe { with_state(hwnd, |s| (s.line.clone(), s.scale)) }) else {
         return;
     };
-    let px = |n: i32| (n as f32 * scale).round() as i32;
+    let px = |n: i32| scaled(n, scale);
 
     let mut needed = RECT {
         left: 0,
@@ -505,7 +538,7 @@ fn fit_to(hwnd: HWND) {
         }
         let body = font(px(size::BODY_TEXT), 400);
         let old = SelectObject(dc, body);
-        let mut measured = wide(&line);
+        let mut measured = wide_null(&line);
         let count = measured.len() as i32 - 1;
         DrawTextW(
             dc,
@@ -519,16 +552,10 @@ fn fit_to(hwnd: HWND) {
         ReleaseDC(hwnd, dc);
     }
 
-    // The inverse of what `draw` lays out from the bottom of the client area:
-    // the sentence, a gap, the track, a gap, the button, the margin.
-    let wanted = (px(size::LINE_TOP)
-        + (needed.bottom - needed.top)
-        + px(size::GAP)
-        + px(size::TRACK)
-        + px(size::GAP)
-        + px(size::BUTTON_HEIGHT)
-        + px(size::MARGIN))
-    .max(px(size::HEIGHT));
+    // `content_height` is the same statement `draw` lays out from, so the
+    // two cannot drift. The minimum is the window's own and stays here:
+    // the sentence simply gets more room than it asked for.
+    let wanted = content_height(scale, needed.bottom - needed.top).max(px(size::HEIGHT));
 
     let mut frame = RECT {
         left: 0,
@@ -944,21 +971,24 @@ fn draw(state: &mut State, hdc: HDC, width: i32, height: i32) {
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
     );
 
-    // Laid out from the bottom of the client area up: the margin, the button,
-    // a gap, the track, a gap, and whatever is left over is the sentence's.
-    // `fit_to` runs this same arithmetic the other way round to decide how
-    // tall the window has to be, so the two must stay in step.
+    // The inverse of `content_height`, taken from `content_height` itself
+    // rather than written out again: asked what a sentence of no height at
+    // all would need, the answer is everything below the sentence, so what
+    // is left of the client area is exactly the sentence's room. Everything
+    // under it then follows downward, and `fit_to` sizing the window and this
+    // placing things in it are one statement.
     let gap = state.px(size::GAP);
     let track = state.px(size::TRACK).max(1);
-    let button_height = state.px(size::BUTTON_HEIGHT);
-    let button_top = height - margin - button_height;
-    let track_top = button_top - gap - track;
+    let line_top = state.px(size::LINE_TOP);
+    let line_bottom = line_top + (height - content_height(state.scale, 0));
+    let track_top = line_bottom + gap;
+    let button_top = track_top + track + gap;
 
     let mut line_box = RECT {
         left: margin,
-        top: state.px(size::LINE_TOP),
+        top: line_top,
         right: width - margin,
-        bottom: track_top - gap,
+        bottom: line_bottom,
     };
     text(
         hdc,
@@ -1071,7 +1101,7 @@ fn rounded(hdc: HDC, rect: &RECT, radius: i32, colour: COLORREF) {
 
 /// Text in a box, in one colour and one font.
 fn text(hdc: HDC, what: &str, box_: &mut RECT, with: HFONT, colour: COLORREF, format: u32) {
-    let mut wide_text = wide(what);
+    let mut wide_text = wide_null(what);
     let count = wide_text.len() as i32 - 1;
     // SAFETY: `wide_text` and `box_` are both alive for the whole call, the
     // count excludes the terminator `wide` appended, and the font is put back
@@ -1086,7 +1116,7 @@ fn text(hdc: HDC, what: &str, box_: &mut RECT, with: HFONT, colour: COLORREF, fo
 
 /// How wide a label is in a given font, which is what sizes the button.
 fn measure(hdc: HDC, with: HFONT, what: &str) -> i32 {
-    let wide_text = wide(what);
+    let wide_text = wide_null(what);
     let mut size = SIZE { cx: 0, cy: 0 };
     // SAFETY: the string and `size` are both alive for the call, the count
     // excludes the terminator, and the font is put back afterwards.
@@ -1112,7 +1142,7 @@ fn measure(hdc: HDC, with: HFONT, what: &str) -> i32 {
 /// Segoe UI in `--font-ui`'s own fallback stack, which makes this the
 /// family the page would fall back to on the same machine.
 fn font(height: i32, weight: i32) -> HFONT {
-    let face = wide("Segoe UI");
+    let face = wide_null("Segoe UI");
     // SAFETY: `face` is alive for the call, and every other argument is a
     // documented constant. A negative height asks for that character height
     // rather than that cell height, which is what a CSS pixel size means.
@@ -1181,19 +1211,90 @@ fn declare_dpi_awareness() {
     });
 }
 
-/// A null-terminated UTF-16 buffer, which is what every wide Win32 entry
-/// point in this file expects.
-fn wide(s: &str) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    std::ffi::OsStr::new(s)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The check that [`fit_to`] and [`draw`] are one statement.** They lay
+    /// the same run of things out in opposite directions, and before
+    /// [`content_height`] existed the only thing keeping them in step was a
+    /// comment saying they had to be, so the only way to notice they had
+    /// drifted was to look at the window on a high-DPI screen. That is the
+    /// exact blind spot that let the DPI defect through: this machine runs at
+    /// 96 dpi, where every scale here is 1.0 and nothing shows.
+    ///
+    /// So this asserts the inverse holds at the scales Windows actually
+    /// offers: a window given exactly the height a sentence asks for leaves
+    /// that sentence exactly the room it asked for. No window, no device
+    /// context and no message loop.
+    #[test]
+    fn what_draw_gives_the_sentence_is_what_fit_to_asked_for() {
+        for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
+            for text in [0, 1, 17, 40, 200] {
+                let height = content_height(scale, text);
+
+                // What `draw` does with that height: the sentence is given
+                // whatever a sentence of no height at all would have left
+                // over, which has to be the height it asked for.
+                let line_top = scaled(size::LINE_TOP, scale);
+                let line_bottom = line_top + (height - content_height(scale, 0));
+                let room = line_bottom - line_top;
+                assert_eq!(
+                    room, text,
+                    "at scale {scale} a sentence of {text} px was left {room} px of room"
+                );
+
+                // And the rest of the stack, placed downward from there as
+                // `draw` places it, has to land exactly on the bottom margin:
+                // not short of it, and not off the edge of the window.
+                let track_top = line_bottom + scaled(size::GAP, scale);
+                let button_top =
+                    track_top + scaled(size::TRACK, scale).max(1) + scaled(size::GAP, scale);
+                let bottom =
+                    button_top + scaled(size::BUTTON_HEIGHT, scale) + scaled(size::MARGIN, scale);
+                assert_eq!(
+                    bottom, height,
+                    "at scale {scale} the stack ended at {bottom} in a window {height} tall"
+                );
+            }
+        }
+    }
+
+    /// Every part of the stack is in the height. Written out once here, so
+    /// dropping one from [`content_height`] is a failing test rather than a
+    /// button drawn off the bottom edge of the window.
+    #[test]
+    fn the_height_is_the_whole_stack() {
+        let text = 30;
+        assert_eq!(
+            content_height(1.0, text),
+            size::LINE_TOP
+                + text
+                + size::GAP
+                + size::TRACK
+                + size::GAP
+                + size::BUTTON_HEIGHT
+                + size::MARGIN
+        );
+    }
+
+    /// [`draw`] never draws a track thinner than a pixel, because a rail that
+    /// is not there reads differently from an empty one. The height has to
+    /// reserve that same pixel or the two drift apart at the small end, which
+    /// is the half of the scale range nobody looks at.
+    #[test]
+    fn the_track_keeps_its_pixel_at_every_scale() {
+        for scale in [0.1_f32, 0.25, 0.5, 1.0] {
+            let everything_else = scaled(size::LINE_TOP, scale)
+                + scaled(size::GAP, scale) * 2
+                + scaled(size::BUTTON_HEIGHT, scale)
+                + scaled(size::MARGIN, scale);
+            assert!(
+                content_height(scale, 0) - everything_else >= 1,
+                "at scale {scale} the track was rounded away"
+            );
+        }
+    }
 
     /// The colours are `tokens.css`'s, converted once and written down. The
     /// two that carry the brand are pinned here so a change made in one place

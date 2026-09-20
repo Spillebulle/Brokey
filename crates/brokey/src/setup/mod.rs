@@ -651,7 +651,11 @@ fn outcome_of(code: u32, version: &str) -> Outcome {
 }
 
 /// Encodes a Rust string as a null-terminated UTF-16 buffer, the form every
-/// wide Win32 entry point in this module expects.
+/// wide Win32 entry point in this subsystem expects.
+///
+/// Here rather than in each module that calls Win32, because [`window`] wants
+/// the same thing and two copies of a function this short is how two copies
+/// come to differ.
 #[cfg(windows)]
 fn wide_null(s: &str) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
