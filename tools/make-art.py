@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import math
 import re
+import struct
 import sys
 from pathlib import Path
 
@@ -253,6 +254,30 @@ def readable(path: Path, size: tuple[int, int], light: tuple[int, int, int, int]
         )
 
 
+def largest_first(path: Path) -> None:
+    """Reorder an .ico's directory so its biggest image is the first entry.
+
+    Tauri decides a window's icon in `tauri-codegen`'s `new_ico`, and what it
+    takes is `icon_dir.entries()[0]` with no search for a size. Pillow sorts
+    the sizes it is given ascending whatever order they arrive in, so the
+    first entry is the 16, and every Brokey window carried a 16-pixel icon
+    that Windows then stretched to taskbar size. Measured at 8x: the parcel's
+    lines were smeared across three pixels each.
+
+    An ICONDIR entry holds its own offset into the file, so the order of the
+    entries is not the order of the images and reversing the directory moves
+    no image data. Windows itself picks by size and does not care; only a
+    reader that takes the first entry does, which is the one that matters.
+    """
+    data = bytearray(path.read_bytes())
+    count = struct.unpack_from("<H", data, 4)[0]
+    entries = [bytes(data[6 + i * 16 : 22 + i * 16]) for i in range(count)]
+    # Byte 0 of an entry is its width, with 0 standing for 256.
+    entries.sort(key=lambda e: e[0] or 256, reverse=True)
+    data[6 : 6 + count * 16] = b"".join(entries)
+    path.write_bytes(bytes(data))
+
+
 def main() -> int:
     colour = accent()
     print(f"accent #{colour[0]:02X}{colour[1]:02X}{colour[2]:02X}")
@@ -264,6 +289,7 @@ def main() -> int:
     for s, img in images.items():
         img.save(icons / f"brokey-{s}.png")
     images[256].save(icons / "brokey.ico", sizes=[(s, s) for s in (16, 32, 48, 64, 128, 256)])
+    largest_first(icons / "brokey.ico")
 
     # icon.ico is written here too, and it used not to be. That file is the
     # one tauri-build compiles into brokey.exe as its RT_GROUP_ICON, and the
@@ -281,6 +307,7 @@ def main() -> int:
     images[256].save(tauri / "128x128@2x.png")
     images[512].save(tauri / "icon.png")
     images[256].save(tauri / "icon.ico", sizes=[(s, s) for s in (16, 32, 48, 64, 128, 256)])
+    largest_first(tauri / "icon.ico")
     print(f"wrote {len(sizes)} icon sizes, both .ico files and Tauri's four")
 
     installer_art(images)
