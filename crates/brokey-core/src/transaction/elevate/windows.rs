@@ -1053,6 +1053,93 @@ mod tests {
         sddl
     }
 
+    /// One SDDL account string, whatever form it is in, as a raw SID.
+    ///
+    /// Windows does not hand a descriptor back in the words it was given.
+    /// It renders a well-known SID as its two-letter SDDL alias, so an
+    /// account that went in as `S-1-5-21-...-500` comes back as `LA`. That
+    /// is not hypothetical: GitHub's Windows runner runs as the built-in
+    /// Administrator, and [`both_pipes_carry_the_descriptor`] failed there
+    /// for three days on a DACL that was exactly right, because it looked
+    /// for the SID as text. Converting the account back to a SID compares
+    /// the thing that matters instead of the spelling of it.
+    fn sid_of_account(account: &str) -> String {
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+
+        let text = wide_null(account);
+        let mut sid: windows_sys::Win32::Security::PSID = ptr::null_mut();
+        // SAFETY: `text` is a live null-terminated UTF-16 buffer and `sid`
+        // is a valid out-parameter; on success it points at memory this
+        // call allocates, freed with `LocalFree` below.
+        let converted = unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut sid) };
+        assert_ne!(
+            converted,
+            0,
+            "{account} is not an account SDDL can name: {}",
+            io::Error::last_os_error()
+        );
+
+        let mut rendered: windows_sys::core::PWSTR = ptr::null_mut();
+        // SAFETY: `sid` is the SID the call above allocated and `rendered`
+        // is a valid out-parameter; on success it points at memory this
+        // call allocates, freed with `LocalFree` below.
+        let back = unsafe { ConvertSidToStringSidW(sid, &mut rendered) };
+        assert_ne!(
+            back,
+            0,
+            "a SID Windows just built does not render: {}",
+            io::Error::last_os_error()
+        );
+        let canonical = string_from_wide_ptr(rendered);
+
+        // SAFETY: each pointer was allocated by one of the two calls above
+        // and each is freed exactly once, now that the text is copied out.
+        unsafe { LocalFree(rendered as HLOCAL) };
+        unsafe { LocalFree(sid as HLOCAL) };
+        canonical
+    }
+
+    /// The accounts every allow entry of `sddl` names, each as a raw SID.
+    ///
+    /// An entry is `(A;;FA;;;LA)`: six semicolon-separated fields, the
+    /// account last. Deny entries are not collected, because a DACL that
+    /// grew one would fail the count assertion beside the caller first.
+    fn allowed_sids(sddl: &str) -> Vec<String> {
+        sddl.split('(')
+            .filter_map(|entry| entry.split_once(')').map(|(ace, _)| ace))
+            .filter(|ace| ace.starts_with("A;"))
+            .filter_map(|ace| ace.split(';').nth(5))
+            .map(sid_of_account)
+            .collect()
+    }
+
+    /// `sid_of_account` resolves an alias to the SID it stands for, and
+    /// leaves a raw SID alone.
+    ///
+    /// This is the half of [`both_pipes_carry_the_descriptor`]'s repair
+    /// that can be exercised on any Windows machine. The alias path only
+    /// runs there when the user happens to be the built-in Administrator,
+    /// which is true on CI and false on a development machine, so without
+    /// this the fix would be tested on exactly the machine that did not
+    /// need it. `BA` is Administrators and its SID is the same everywhere.
+    #[test]
+    fn an_sddl_alias_and_a_raw_sid_name_the_same_thing() {
+        assert_eq!(sid_of_account("BA"), "S-1-5-32-544");
+        assert_eq!(sid_of_account("S-1-5-32-544"), "S-1-5-32-544");
+        assert_eq!(sid_of_account("WD"), "S-1-1-0");
+        assert_eq!(sid_of_account(&expected_sid()), expected_sid());
+    }
+
+    /// The account fields are read out of the entries and nothing else is.
+    #[test]
+    fn the_accounts_come_out_of_the_entries() {
+        assert_eq!(
+            allowed_sids("D:(A;;FA;;;BA)(A;;FA;;;WD)"),
+            ["S-1-5-32-544", "S-1-1-0"]
+        );
+        assert!(allowed_sids("D:").is_empty());
+    }
+
     /// Both pipes carry the DACL, not only whichever was created first.
     /// This is the security boundary: a pipe that admitted anyone else
     /// would let something on the machine answer in the helper's place or
@@ -1073,13 +1160,16 @@ mod tests {
             .zip(server.handles())
         {
             let sddl = dacl_of(handle);
+            // Compared as SIDs, not as text: see `sid_of_account` for why
+            // the text that comes back is not the text that went in.
+            let admitted = allowed_sids(&sddl);
             assert!(
-                sddl.contains(&format!(";;;{sid})")),
-                "{which} does not admit this user: {sddl}"
+                admitted.contains(&sid),
+                "{which} does not admit this user {sid}: {sddl} resolves to {admitted:?}"
             );
             assert!(
-                sddl.contains(";;;BA)"),
-                "{which} does not admit Administrators: {sddl}"
+                admitted.iter().any(|s| s == "S-1-5-32-544"),
+                "{which} does not admit Administrators: {sddl} resolves to {admitted:?}"
             );
             assert_eq!(
                 sddl.matches("(A;").count(),
