@@ -22,7 +22,7 @@
 //! made it and it changes with every build, so an offset written down anywhere
 //! but the very end would have to be patched after the fact. Reading backwards
 //! from the end of the file needs to know nothing about what is in front of the
-//! package — which is also what makes this survive the executable being rebuilt
+//! package. That is also what makes this survive the executable being rebuilt
 //! at a different size.
 //!
 //! Windows loads a PE by its headers rather than by the file's length, so bytes
@@ -34,8 +34,8 @@
 //! **It is not a signature and must not be described as one.** The magic says
 //! "something appended this deliberately", which distinguishes a payload from a
 //! file that happens to end in the right eight bytes; it says nothing whatever
-//! about where the package came from. Brokey does not sign its releases — see
-//! `selfupdate`'s standing rule — and a length check is not authenticity here
+//! about where the package came from. Brokey does not sign its releases (see
+//! `selfupdate`'s standing rule), and a length check is not authenticity here
 //! any more than it is on a download.
 //!
 //! It is also **not compression**. An MSI is already a compressed cabinet, so a
@@ -57,8 +57,8 @@ const MAX_PACKAGE: u64 = 512 * 1024 * 1024;
 
 /// The package carried by `bytes`, if there is one.
 ///
-/// `None` for a plain executable, which is the ordinary case — `brokey.exe`
-/// itself is one — and for anything that does not add up. Every length here
+/// `None` for a plain executable, which is the ordinary case (`brokey.exe`
+/// itself is one), and for anything that does not add up. Every length here
 /// comes off the end of a file somebody could have edited, so each is checked
 /// against what is actually there rather than trusted.
 pub fn read(bytes: &[u8]) -> Option<&[u8]> {
@@ -92,7 +92,7 @@ pub fn read(bytes: &[u8]) -> Option<&[u8]> {
 ///
 /// **This is what makes a binary the installer, and an argument is not.** A
 /// setup executable is double-clicked, so it is launched with no command line
-/// at all — `--install` only ever arrives when something spawns it deliberately,
+/// at all. `--install` only ever arrives when something spawns it deliberately,
 /// which nothing does. Deciding on the payload instead means the file that
 /// carries a package installs it and the file that does not runs as Brokey,
 /// which is the only distinction there actually is between them.
@@ -140,7 +140,7 @@ pub fn carried_by(path: &std::path::Path) -> bool {
 /// Build the bytes of a setup executable.
 ///
 /// The one place the format is written, used by `examples/make-setup.rs` and
-/// read back by [`read`] — so the builder and the reader cannot drift by there
+/// read back by [`read`], so the builder and the reader cannot drift by there
 /// being a second implementation of either one.
 pub fn append(executable: &[u8], package: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(executable.len() + package.len() + FOOTER);
@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(read(&lying), None);
 
         // Long enough to swallow the executable as well, leaving nothing to
-        // run — which is not an installer whatever else it is.
+        // run. That is not an installer whatever else it is.
         let mut greedy = good.clone();
         let n = greedy.len();
         let all = (greedy.len() - FOOTER) as u64;
