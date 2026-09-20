@@ -15,6 +15,7 @@
 
 use brokey_core::model::*;
 use brokey_core::transaction::allow;
+use brokey_core::transaction::elevate;
 use brokey_core::transaction::progress::{Reading, parser_for};
 use brokey_core::transaction::runner::{self, Outcome, Runner};
 use std::os::unix::fs::PermissionsExt;
@@ -240,6 +241,36 @@ fn starts(events: &[Event]) -> Vec<usize> {
             _ => None,
         })
         .collect()
+}
+
+/// The seam gives back the same three things the runner used to take off
+/// the child directly: somewhere to write the plan, somewhere to read
+/// lines, and an exit code. If this breaks, the helper cannot be spoken
+/// to at all.
+#[test]
+fn the_elevate_seam_carries_a_plan_and_brings_back_lines() {
+    // `cat` stands in for the helper: whatever is written to it comes
+    // straight back on its output, which is exactly the shape the seam has
+    // to carry.
+    //
+    // It has to be `sh -c cat` rather than `cat` itself. The seam appends
+    // the helper path and `run` to the wrapper, and plain `cat` would read
+    // those as filenames and fail; after `sh -c cat` they land in `$0` and
+    // `$1`, where nothing looks at them, and `cat` reads its standard input
+    // as intended. The helper path is unused for the same reason, so it is
+    // named to say so.
+    let wrapper = ["sh".to_string(), "-c".to_string(), "cat".to_string()];
+    let mut e = elevate::start(Path::new("unused-by-this-wrapper"), &wrapper)
+        .expect("the seam starts a process");
+    {
+        use std::io::Write;
+        let mut input = e.input.take().expect("there is somewhere to write");
+        writeln!(input, "hello").expect("the plan is written");
+    }
+    let first = e.lines.recv().expect("a line comes back");
+    assert_eq!(first.text, "hello");
+    assert!(!first.stderr, "it came back on the output stream");
+    assert_eq!(e.wait().expect("the child is waited on"), Some(0));
 }
 
 #[test]

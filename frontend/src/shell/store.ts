@@ -149,3 +149,8 @@ export function selectNav(state: ShellState): View {
   }
   return "search";
 }
+
+/** Whether this window is talking to a Windows machine. Linux is the default while `system` is still loading. */
+export function selectIsWindows(state: ShellState): boolean {
+  return state.system?.platform === "windows";
+}

@@ -9,6 +9,28 @@
 use crate::model::{Platform, SystemInfo};
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+#[cfg(windows)]
+use std::ptr;
+
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    MAXIMUM_REPARSE_DATA_BUFFER_SIZE, OPEN_EXISTING,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::IO::DeviceIoControl;
+#[cfg(windows)]
+use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
+#[cfg(windows)]
+use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_APPEXECLINK;
+
 /// The values read from `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion`.
 /// Kept apart from the reading so the naming is a pure function with tests.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -127,6 +149,254 @@ pub fn which_in(name: &str, path: &str, pathext: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// `raw` as an [`OwnedHandle`], or `None` where Windows handed one of the
+/// two values that are not a handle back.
+///
+/// `OwnedHandle` carries `rustc_layout_scalar_valid_range` attributes that
+/// exclude both null and `INVALID_HANDLE_VALUE`, so wrapping either is
+/// undefined behaviour rather than a value that would be caught later. None
+/// of the calls in this crate returns null on success, so the null half is
+/// unreachable today; it is checked because an invariant nothing states is
+/// one the next call site will not know it has to keep.
+#[cfg(windows)]
+pub(crate) fn owned_handle(raw: HANDLE) -> Option<OwnedHandle> {
+    if raw.is_null() || raw == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    // SAFETY: `raw` is a fresh handle from a call that reported success and
+    // that nothing else has taken ownership of, and it is neither of the
+    // two values `OwnedHandle` excludes, so this takes it and closes it
+    // exactly once.
+    Some(unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) })
+}
+
+/// The executable an App Execution Alias names, or `path` unchanged.
+///
+/// `winget.exe` in `%LOCALAPPDATA%\Microsoft\WindowsApps` is not a program.
+/// It is a zero-length reparse point whose data names the real executable,
+/// and `CreateProcess` follows it when the alias is started. The folder it
+/// sits in grants the invoking user full control, measured on the
+/// development machine by creating a file there and deleting it again from
+/// an unelevated shell, so a step naming the alias names a file a standard
+/// user can replace. This answers the file that will really run, which is
+/// the one worth asking permission questions about.
+///
+/// Only version 3 of `IO_REPARSE_TAG_APPEXECLINK` is read. The version is
+/// taken from the buffer rather than assumed, and any other value returns
+/// `path` unchanged, because where the strings sit after it is not known to
+/// be the same.
+///
+/// Everything else that can go wrong returns `path` unchanged too: a name
+/// that is not on the disk, one that is not a reparse point, a reparse
+/// point that cannot be opened or read, a tag that is not
+/// `IO_REPARSE_TAG_APPEXECLINK`, a buffer that claims more than it carries
+/// or holds fewer than three strings, a third string that is not absolute
+/// under a drive letter, and a target that is not a file. No path is ever
+/// returned that was not found on the disk.
+///
+/// Whether handing back an unresolved path is the safe direction is not a
+/// property of this function, and this comment used to present it as one.
+/// It is safe because of where the alias sits.
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps` grants the invoking user full
+/// control, so the closed list refuses the alias as a program this account
+/// can replace, and the failure ends there. Point this at an alias
+/// somewhere an unprivileged process cannot write, a machine-wide one or a
+/// future layout change, and the same failure hands on a path the closed
+/// list will admit, after which `CreateProcess` follows reparse data
+/// nothing examined. The day the alias moves, that stops being true, and
+/// nothing in the code will notice.
+///
+/// What this does not do, and does not try to. It does not ask what is in
+/// the target, who put it there or whether it is signed; that is the closed
+/// list's question. It resolves nothing but an App Execution Alias, so a
+/// symbolic link or a junction comes back as it stands. It follows no
+/// chain: were the target an alias in turn, the first target is the answer.
+/// And it says what was true of the disk at the moment it was asked, as
+/// every filesystem answer does.
+#[cfg(windows)]
+pub fn resolve_app_execution_alias(path: &Path) -> PathBuf {
+    alias_target(path).unwrap_or_else(|| path.to_path_buf())
+}
+
+/// The target of `path` when it is an App Execution Alias that leads
+/// somewhere this machine really has, and `None` in every other case. See
+/// [`resolve_app_execution_alias`], which is what turns the `None` back
+/// into the original path.
+#[cfg(windows)]
+fn alias_target(path: &Path) -> Option<PathBuf> {
+    use std::os::windows::fs::MetadataExt;
+
+    // `symlink_metadata` asks about the name rather than about what it
+    // leads to, which is the only way the attribute is visible at all. A
+    // name that is not on the disk fails here.
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+        return None;
+    }
+    let target = PathBuf::from(appexeclink_target(&reparse_data(path)?)?);
+    // Narrower than the question `transaction::allow` puts to the program
+    // it is about to elevate, which also asks the volume what it is: this
+    // only refuses a target that names no drive letter at all, a UNC path
+    // among them. A target on a mapped network drive comes back from here
+    // and is refused there. Then the target has to be a file that is really
+    // there, because a path this never saw is a path this must not hand
+    // on.
+    if !under_a_drive_letter(&target) || !target.is_file() {
+        return None;
+    }
+    Some(target)
+}
+
+/// Whether `path` is absolute under a drive letter, `X:\...` or the
+/// `\\?\X:\...` form, rather than merely absolute. A UNC path is absolute
+/// too, and a target of `\\somewhere\share\winget.exe` is one this would be
+/// starting over the network.
+#[cfg(windows)]
+fn under_a_drive_letter(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    path.is_absolute()
+        && matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        )
+}
+
+/// The raw reparse buffer of `path`, cut to the number of bytes Windows
+/// says it wrote, or `None` when it cannot be read.
+///
+/// Two Win32 calls. `CreateFileW` opens the name itself rather than what it
+/// leads to, and `DeviceIoControl` with `FSCTL_GET_REPARSE_POINT` copies the
+/// reparse data out. Nothing outlives this function: the handle becomes an
+/// `OwnedHandle` on the line after it is checked, so it is closed exactly
+/// once on every path out of here, and the buffer is one `Vec<u8>` freed by
+/// the same rule.
+#[cfg(windows)]
+fn reparse_data(path: &Path) -> Option<Vec<u8>> {
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // No access rights are asked for. A handle opened for nothing still
+    // carries the metadata this needs, and asking for read access would
+    // fail on a file whose contents are not this account's to read.
+    // `FILE_FLAG_OPEN_REPARSE_POINT` is what stops Windows following the
+    // link; `FILE_FLAG_BACKUP_SEMANTICS` is what lets a directory be opened
+    // the same way, because nothing promises an alias is a file.
+    // SAFETY: `wide` is a valid null-terminated wide string that outlives
+    // the call; a null security-attributes pointer is the documented way to
+    // ask for the default, and `OPEN_EXISTING` requires the template handle
+    // to be null, which it is.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            ptr::null_mut(),
+        )
+    };
+    // `owned_handle` rather than a bare check against
+    // `INVALID_HANDLE_VALUE`, because null is the other value an
+    // `OwnedHandle` may not hold. It closes the handle exactly once on
+    // every path out of this function, including the failure below.
+    let handle = owned_handle(handle)?;
+
+    let mut buffer = vec![0u8; MAXIMUM_REPARSE_DATA_BUFFER_SIZE as usize];
+    let mut written: u32 = 0;
+    // SAFETY: `handle` is open for the whole call; `FSCTL_GET_REPARSE_POINT`
+    // takes no input, which is what the null pointer and the zero length
+    // say; `buffer` is a writable allocation of exactly the length passed
+    // and is borrowed for no longer than the call; `written` is a writable
+    // out-parameter; and a null overlapped pointer asks for the blocking
+    // form, which is the only form a handle opened without
+    // `FILE_FLAG_OVERLAPPED` has.
+    let read = unsafe {
+        DeviceIoControl(
+            handle.as_raw_handle() as HANDLE,
+            FSCTL_GET_REPARSE_POINT,
+            ptr::null(),
+            0,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+            &mut written,
+            ptr::null_mut(),
+        )
+    };
+    if read == 0 {
+        return None;
+    }
+    buffer.truncate(written as usize);
+    Some(buffer)
+}
+
+/// The third string of an `IO_REPARSE_TAG_APPEXECLINK` buffer, which is the
+/// executable the alias names.
+///
+/// The layout is an eight-byte reparse header (`ULONG ReparseTag`,
+/// `USHORT ReparseDataLength`, `USHORT Reserved`), then `ULONG Version`,
+/// then consecutive null-terminated UTF-16 strings. Read back from
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe` on the development
+/// machine: 406 bytes returned, tag `0x8000001B`, data length 398,
+/// version 3, and four strings, being the package family name, the
+/// application user model id, the executable under
+/// `C:\Program Files\WindowsApps` and a flag of `0`.
+///
+/// Nothing here trusts the buffer. `data` is only as long as Windows said
+/// it wrote, every read is taken from it with a checked range, and a
+/// declared data length that runs past the end, an odd number of bytes of
+/// strings, fewer than three strings, an empty third one and one that is
+/// not UTF-16 all answer `None`.
+#[cfg(windows)]
+fn appexeclink_target(data: &[u8]) -> Option<String> {
+    /// `ULONG ReparseTag`, `USHORT ReparseDataLength`, `USHORT Reserved`.
+    /// `ReparseDataLength` counts the bytes that follow this header.
+    const HEADER: usize = 8;
+    /// The `ULONG Version` that comes first in the data.
+    const VERSION_LENGTH: usize = 4;
+    /// The one version this reads. See [`resolve_app_execution_alias`] for
+    /// what happens to any other.
+    const VERSION: u32 = 3;
+    /// The package family name and the application user model id come
+    /// first, so the executable is the third string.
+    const TARGET: usize = 2;
+
+    let tag = u32::from_le_bytes(data.get(..4)?.try_into().ok()?);
+    if tag != IO_REPARSE_TAG_APPEXECLINK {
+        return None;
+    }
+    let length = u16::from_le_bytes(data.get(4..6)?.try_into().ok()?) as usize;
+    let version = u32::from_le_bytes(data.get(HEADER..HEADER + VERSION_LENGTH)?.try_into().ok()?);
+    if version != VERSION {
+        return None;
+    }
+    let strings = data.get(HEADER + VERSION_LENGTH..HEADER.checked_add(length)?)?;
+    if !strings.len().is_multiple_of(2) {
+        return None;
+    }
+    let units: Vec<u16> = strings
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .collect();
+    // Consecutive null-terminated strings, so splitting on the terminator
+    // is the whole parse. A buffer holding fewer than three yields either
+    // nothing or the empty tail after the last terminator, and both are
+    // refused.
+    let target = units.split(|unit| *unit == 0).nth(TARGET)?;
+    if target.is_empty() {
+        return None;
+    }
+    // Strict rather than lossy: a target that is not UTF-16 is not a path
+    // to hand to anybody.
+    String::from_utf16(target).ok()
 }
 
 /// No NVIDIA enquiry is made on Windows. `has_nvidia` exists only for the
@@ -375,5 +645,74 @@ mod tests {
     #[test]
     fn there_is_no_nvidia_enquiry_on_windows() {
         assert!(!has_nvidia());
+    }
+
+    /// An ordinary file carries no reparse point, so there is nothing to
+    /// resolve and the path comes back as it was given. This is the common
+    /// case: `choco.exe` is a real file and every source but winget hands
+    /// one of these in.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_that_is_not_a_reparse_point_comes_back_unchanged() {
+        let dir = tempdir();
+        let file = dir.join("plain.exe");
+        std::fs::write(&file, b"not an alias").unwrap();
+        assert_eq!(resolve_app_execution_alias(&file), file);
+    }
+
+    /// A name that is not on the disk comes back unchanged rather than
+    /// panicking or inventing something. The caller hands it on to the
+    /// closed list, which asks its own question about a path that is not
+    /// there.
+    #[cfg(windows)]
+    #[test]
+    fn a_path_that_is_not_there_comes_back_unchanged() {
+        let missing = tempdir().join("nothing-is-here.exe");
+        assert!(!missing.exists(), "the test invents a name nothing uses");
+        assert_eq!(resolve_app_execution_alias(&missing), missing);
+    }
+
+    /// The real thing, on the machine running the test: the App Execution
+    /// Alias winget is reached through. Skipped with a reason where it is
+    /// absent rather than failed, so the suite stays green on a machine
+    /// without winget and on Linux.
+    ///
+    /// What is asserted is what the resolution promises and no more: the
+    /// answer is a different path from the alias, it is a file that is
+    /// really there, and it is still a `winget.exe`. Nothing here asserts
+    /// where it lives, because that is a package version in the name and it
+    /// changes under every App Installer update.
+    #[cfg(windows)]
+    #[test]
+    fn the_real_winget_alias_resolves_to_the_executable_that_runs() {
+        let Ok(local) = std::env::var("LOCALAPPDATA") else {
+            eprintln!("skipped: LOCALAPPDATA is not set, so the alias cannot be found");
+            return;
+        };
+        let alias = Path::new(&local)
+            .join("Microsoft")
+            .join("WindowsApps")
+            .join("winget.exe");
+        if !alias.exists() {
+            eprintln!("skipped: {} is not on this machine", alias.display());
+            return;
+        }
+
+        let target = resolve_app_execution_alias(&alias);
+        assert_ne!(target, alias, "the alias is not the program");
+        assert!(
+            target.is_file(),
+            "{} was resolved, so it is on the disk",
+            target.display()
+        );
+        assert_eq!(
+            target
+                .file_name()
+                .map(|name| name.to_string_lossy().to_lowercase()),
+            Some("winget.exe".to_string()),
+            "{} is still winget",
+            target.display()
+        );
+        eprintln!("{} resolved to {}", alias.display(), target.display());
     }
 }

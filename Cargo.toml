@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/brokey-core", "crates/brokey-helper", "crates/brokey"]
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
@@ -37,6 +37,9 @@ regex = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 # Only to unwrap that one member. No encryption, no zip64 writing.
 zip = { version = "6", default-features = false, features = ["deflate"] }
+# The Windows privilege path: a named pipe with its own DACL, and
+# ShellExecuteEx, which is the only call that elevates.
+windows-sys = "0.61"
 
 # Debug builds keep our own crates cheap to recompile while dependencies are
 # built optimised: parsing a 36 MB package database in an unoptimised

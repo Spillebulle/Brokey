@@ -1,4 +1,4 @@
-import { Cpu, HardDrive, RefreshCw, Search, Settings } from "lucide-react";
+import { Cpu, HardDrive, Package, RefreshCw, Search, Settings } from "lucide-react";
 import type { ReactNode } from "react";
 import pkg from "../../../package.json";
 import { isLive, selectActivePlan, useActivity } from "../activity/store";
@@ -6,7 +6,7 @@ import { ICON } from "../components/icons";
 import { formatCount, plural } from "../format";
 import { sourceLabel, type PlanStatus } from "../types";
 import { SelfUpdateNotice } from "./SelfUpdateNotice";
-import { selectNav, useShell, type View } from "./store";
+import { selectIsWindows, selectNav, useShell, type View } from "./store";
 
 interface NavItem {
   view: View;
@@ -46,7 +46,9 @@ function MenuBar() {
   const status = useShell((s) => s.status);
   return (
     <header className="bk-menubar">
-      <span className="bk-mark" aria-hidden="true" />
+      <span className="bk-mark" aria-hidden="true">
+        <Package />
+      </span>
       <span className="bk-appname">Brokey</span>
       <span className="bk-menubar-status" role="status" aria-live="polite">
         {status ?? ""}
@@ -86,16 +88,22 @@ function Sidebar() {
   );
 }
 
+/** State {@link planLine} needs beside the plan: whether it is being cancelled, and which platform is asking for elevation. */
+interface PlanLineFlags {
+  cancelling: boolean;
+  windows: boolean;
+}
+
 /** What the status bar says about a running plan: the step in hand, and nothing when idle. */
-function planLine(plan: PlanStatus | null, cancelling: boolean): string | null {
+function planLine(plan: PlanStatus | null, flags: PlanLineFlags): string | null {
   if (!plan || !isLive(plan.state)) return null;
-  if (cancelling) return "Cancelling…";
+  if (flags.cancelling) return "Cancelling…";
   const what = plural(plan.plan.ops.length, "operation");
   switch (plan.state) {
     case "pending":
       return `Starting ${what}…`;
     case "authorising":
-      return "Waiting for your password…";
+      return flags.windows ? "Waiting for Administrator…" : "Waiting for your password…";
     default: {
       const started = [...plan.events].reverse().find((e) => e.event === "step_started");
       return `${started && started.event === "step_started" ? started.title : `Running ${what}`}…`;
@@ -107,10 +115,11 @@ function StatusBar() {
   const system = useShell((s) => s.system);
   const sources = useShell((s) => s.sources);
   const loadError = useShell((s) => s.loadError);
+  const windows = useShell(selectIsWindows);
   const plan = useActivity(selectActivePlan);
   const cancelling = useActivity((s) => (plan ? s.cancelling[plan.plan.id] !== undefined : false));
   const live = sources.filter((s) => s.available).map((s) => sourceLabel(s.kind));
-  const line = planLine(plan, cancelling);
+  const line = planLine(plan, { cancelling, windows });
   return (
     <footer className="bk-status">
       <div className="bk-status-side">

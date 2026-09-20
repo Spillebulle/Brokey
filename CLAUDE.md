@@ -11,27 +11,39 @@ stands between the user and every package manager the machine has.
 `docs/architecture.md` is the design document and is where the shape was
 settled; read it before changing the shape. `brokey-core` is one library for
 both platforms, split by `#[cfg]` where the machine actually differs
-(`system/`, `sources/{linux,windows}/`, `launch.rs`, `transaction/runner.rs`);
+(`system/`, `sources/{linux,windows}/`, `launch.rs`, `transaction/runner.rs`,
+`transaction/elevate/`);
 see `docs/superpowers/specs/2026-09-19-windows-support-design.md` for the
 Windows side of that split and what it supersedes in `architecture.md`.
 
 **Early and building out.** The first machine is Arch (CachyOS): pacman and the
 AUR are the reference sources. apt and dnf are written to the same interface and
 are marked untested until they have run on a real Debian and Fedora. Windows
-now has two sources, Add/Remove Programs (`sources/windows/arp.rs`) and winget
-(`sources/windows/winget/`): winget's catalogue is downloaded and read by
-Brokey rather than shelled out to, which is why search works without winget
-installed, and its installed list is the registry joined to that catalogue.
-`brokey-helper` still has no Windows implementation, so nothing is actually
-installed or removed there yet. `README.md`'s "What is not there yet" is the
+has four sources, in the order the page draws them: Add/Remove Programs
+(`sources/windows/arp.rs`), winget (`sources/windows/winget/`), Chocolatey
+(`sources/windows/choco.rs`) and Scoop (`sources/windows/scoop.rs`). None of
+them shells out to read anything: winget's catalogue is downloaded and read by Brokey
+itself, which is why search works without winget installed, and its installed
+list is the registry joined to that catalogue; Chocolatey searches the
+community feed over HTTP and reads its own `lib` directory; Scoop reads the
+buckets on disk, or the main bucket over HTTP when there are none.
+`brokey-helper` runs on Windows too, elevated through `ShellExecuteEx` and
+answering on a pair of named pipes, so installing, updating and removing
+work there. `README.md`'s "What is not there yet" is the
 user-facing list and is kept honest.
 
 The house reference for conventions is `../Muster` and `../Umber` (Rust
 workspaces with the same release shape, the same updater rules, the same
 packaging scriptlets). When a question here has an answer there, take it.
 
-UI follows `../Design-Principles/STYLE-GUIDE.md` and uses `tokens.css`; accent
-hue is `300`. Desktop application, so **never** `class="web"` on the root.
+UI follows `../Design-Principles/STYLE-GUIDE.md` and uses `tokens.css`. The
+accent is `#D42B48`, set as `--accent-fixed` with `--accent-h` at `18` and
+`--accent-ink-fixed` at `#FFFFFF`: Brokey is the one app that takes the style
+guide's §2.3 exception for a brand colour that must match exactly, so the
+accent is not derived from the hue and `--accent-ink` resolves to white
+rather than the house near-black. Those three values are the only thing
+edited in this copy of `tokens.css`. Desktop application,
+so **never** `class="web"` on the root.
 Never a raw hex in a component.
 
 ## Decisions
@@ -39,11 +51,11 @@ Never a raw hex in a component.
 | | |
 |---|---|
 | Language | Rust 2024 edition, stable toolchain, one workspace; TypeScript for the page |
-| Interface | Tauri 2 + React 19 + Vite. Plain CSS: `frontend/src/tokens.css` (verbatim from Design-Principles) and `frontend/src/app.css` (components). No Tailwind, no CSS-in-JS |
+| Interface | Tauri 2 + React 19 + Vite. Plain CSS: `frontend/src/tokens.css` (copied from Design-Principles, with the three accent values above set here under the style guide's 2.3 exception and nothing else edited) and `frontend/src/app.css` (components). No Tailwind, no CSS-in-JS |
 | Icons | Lucide, through `lucide-react`. Nothing hand-drawn; nothing from a CDN |
 | Font | Archivo, bundled from `assets/fonts/` |
 | Databases | Read directly in pure Rust. No libalpm, no libapt, and on Windows no shelling out to winget/choco/etc to parse their output |
-| Privilege | Linux: `brokey-helper` via `pkexec` with a closed list of operations. Windows: elevates through `ShellExecuteEx`/`runas` (helper still a stub). The window never runs as root or Administrator |
+| Privilege | Linux: `brokey-helper` via `pkexec` with a closed list of operations. Windows: `ShellExecuteEx` with `runas`, the plan and the events carried on two named pipes whose DACL admits only this user and Administrators, and a closed list of its own. The window never runs as root or Administrator |
 | Targets | Linux x86-64 and ARM64, and Windows x86-64 and ARM64. See `docs/superpowers/specs/2026-09-19-windows-support-design.md`, which supersedes the "Targets" row of `docs/architecture.md` |
 
 ## Commands
@@ -58,13 +70,16 @@ cargo run -p brokey -- search steam        # text mode: exercises the sources wi
 cargo run -p brokey -- sources             # which sources this machine has and why not
 cargo run -p brokey -- updates
 
-# Frontend (Node is in ~/.local/bin on the development machine)
-cd frontend && npm install && npm run build   # tsc + vite build into frontend/dist
-cd frontend && npm run dev                    # vite dev server on :1420 with the mock backend
+# Frontend. package.json and node_modules are at the repository root, not in
+# frontend/, so these run from the root (Node is in ~/.local/bin on the Linux
+# development machine)
+npm install && npm run build   # tsc + vite build into frontend/dist
+npm run dev                    # vite dev server on :1420 with the mock backend
 
-# The window
-cd frontend && npm run tauri dev              # needs webkit2gtk-4.1 installed on the machine
-cd frontend && npm run tauri build
+# The window. The scripts are app:dev and app:build; there is no `tauri dev`
+# script, and `npm run tauri dev` would start the window with no page built
+npm run app:dev                # Linux needs webkit2gtk-4.1 installed on the machine
+npm run app:build
 
 # Packaging sanity, no tools needed
 sh packaging/check.sh
@@ -95,11 +110,15 @@ crates/brokey-core/src/
   sources/          one module per source, split by platform and selected by #[cfg]
     linux/          pacman.rs, aur.rs, flatpak.rs, snap.rs, apt.rs, dnf.rs, github.rs, fwupd.rs, chwd.rs
     windows/        arp.rs (Add/Remove Programs), winget/ (mod.rs, index.rs,
-                    query.rs, version.rs); Chocolatey, Scoop and the Store
-                    come next, per the Windows spec
+                    query.rs, version.rs), choco.rs, scoop.rs, pe.rs and
+                    icon.rs (an installed application's own icon); the
+                    Microsoft Store comes next, per the Windows spec
   appstream/        catalogue XML parser, icon resolution, index
   group.rs          packages -> apps. Pure. Fixture-tested
   transaction/      Plan building and the Runner (spawns the helper and user-session steps)
+    elevate/        the one place that obtains privilege: unix.rs is pkexec with
+                    piped stdio, windows.rs is ShellExecuteEx with runas and the
+                    two named pipes the plan and the events travel on
   updates.rs        merged update list
   selfupdate/       install detection (Muster's install.rs shape), release check, remedy
   system/           mod.rs, linux.rs, windows.rs: which OS this is, which tools exist, paths
@@ -109,15 +128,23 @@ crates/brokey-helper/src/main.rs
 crates/brokey/src/
   main.rs           text mode dispatch, then the window
   lib.rs            Tauri builder, plugins, state
+  cli.rs            the text mode itself: argument parsing and its output
   commands.rs       every #[tauri::command], thin
+  state.rs          the store and the settings the commands share
   settings.rs       key = value preferences
+  setup/            the Windows setup executable, and the one sanctioned
+                    exception to the first invariant: mod.rs (lifting the MSI
+                    out, staging it, elevating msiexec), payload.rs (the
+                    package carried on the end of the binary and its footer),
+                    window.rs (the hand-written Win32 and GDI window it draws)
 crates/brokey/icons/icon.ico
                     required by tauri-build for a Windows target, whatever
                     tauri.conf.json's bundle.icon lists
 frontend/src/
   main.tsx, App.tsx shell, routing by view state
   api.ts            typed wrappers over invoke(); mock.ts stands in under `vite dev`
-  tokens.css        never edited here; copied from Design-Principles
+  tokens.css        copied from Design-Principles; the only edits here are
+                    --accent-h, --accent-fixed and --accent-ink-fixed
   app.css           components, one block per §7 component, prefixed class names
   components/       Button, Dropdown, MultiSelect, Segmented, Toggle, Field, Badge, Row, Card, Panel, Dialog, Toast, Progress
   pages/            Search, AppDetail, Installed, Updates, Drivers, Settings
@@ -130,7 +157,28 @@ These were decided before the first line and are not re-litigated in a fix:
 
 - **The window has no root.** A privileged operation is an entry in
   `brokey-helper`'s closed list, with a test that the helper refuses anything
-  else. Never a `pkexec` call site outside `transaction/runner.rs`.
+  else. Never an elevation call site, `pkexec` or `ShellExecuteEx`, outside
+  `transaction/elevate/`. **There is one exception and it is the setup
+  executable**, `crates/brokey/src/setup/mod.rs`'s `run_installer`, which
+  elevates `msiexec` on the MSI it has just lifted out of its own file. It
+  cannot go through the helper: `brokey-helper.exe` is one of the files that
+  MSI installs, so there is none on the machine yet. It is held narrow in code
+  rather than in this sentence, in three places that each close what the last
+  one leaves open: `install` reads `current_exe()` **before the window opens**,
+  so the file cannot be swapped while somebody reads it; `run_installer` takes
+  a `Staged`, whose fields only the `staging` module can fill and only out of
+  bytes `payload::read` lifted from that image; and `still_the_package`
+  compares the staged file byte for byte immediately before the prompt, so a
+  file that changed after it was written is refused and nothing is elevated.
+  The window it draws is never elevated itself, and neither is the Brokey the
+  install leaves behind, with the one qualification
+  `packaging/windows/brokey.wxs` records: an install started from a console
+  that is already elevated leaves the msiexec client elevated too, so the
+  MSI's Start Brokey tickbox starts Brokey elevated whatever
+  `Impersonate="yes"` says, and nothing in a `.wxs` can prevent it. Anyone
+  installing that way should untick the box, and anyone testing this
+  invariant should know that an install from an administrator console proves
+  nothing about it.
 - **A source never runs anything.** `Source::plan` returns steps; the Runner
   runs them. This is what makes every source testable with fixtures.
 - **Opening an installed application is the one process started outside the
@@ -170,7 +218,10 @@ These were decided before the first line and are not re-litigated in a fix:
   because the two sides spelt a tag differently and each tested its own.
 - **CHANGELOG.md is the release notes.** `crates/brokey/tests/release.rs`
   fails if the section for the current version is missing or is not newest.
-- **`frontend/src/tokens.css` is not edited here.** It is a copy; a change
+- **`frontend/src/tokens.css` is a copy, and the only thing edited in it
+  here is the accent.** `--accent-h`, `--accent-fixed` and
+  `--accent-ink-fixed` are set in this copy, under the style guide's 2.3
+  exception for a brand colour that must match exactly. Every other change
   goes to Design-Principles first and is copied back.
 
 ## Things that look like shortcuts and are not

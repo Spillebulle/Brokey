@@ -1,30 +1,35 @@
-//! Executes a plan. Root steps go to `brokey-helper` through `pkexec`, one
-//! helper run per maximal stretch of consecutive root steps; session steps
-//! run here as the user. Every line either child prints becomes an
-//! `Event::Log`, and is read by the progress parser for the step's program
-//! so the activity panel can say "Installing foo" with a fraction when the
-//! tool stated one.
+//! Executes a plan. Root steps go to `brokey-helper`, however `elevate`
+//! starts it on this platform, one helper run per maximal stretch of
+//! consecutive root steps; session steps run here as the user. Every line
+//! either child prints becomes an `Event::Log`, and is read by the progress
+//! parser for the step's program so the activity panel can say "Installing
+//! foo" with a fraction when the tool stated one.
 //!
-//! This is the only place in the workspace that spawns `pkexec`. A new
-//! privileged operation is a new entry in `allow.rs` with a test, never a
-//! second call site.
+//! A new privileged operation is a new entry in `allow.rs` with a test,
+//! never a second call site.
 //!
 //! Cancellation is a flag checked between lines. A session child is killed
-//! with its whole process group, so a `sh -c` wrapper and what it started go
-//! together. A root child under pkexec belongs to root and the user cannot
-//! signal it, so the runner writes `cancel` on the helper's stdin and the
-//! helper stops after the step that is running; the events say so.
+//! with its whole process group on Linux, so a `sh -c` wrapper and what it
+//! started go together; Windows has no process group and reaches only the
+//! child itself. A root child under the helper belongs to a different user
+//! and cannot be signalled from here, so the runner writes `cancel` on the
+//! helper's stdin and the helper stops after the step that is running; the
+//! events say so.
 
 use crate::model::*;
 use crate::transaction::CancelToken;
 use crate::transaction::allow::{self, Allowed};
+use crate::transaction::elevate;
 use crate::transaction::progress::{self, ProgressParser};
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as Process, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 /// Receives events as a plan runs.
 pub trait Sink: Send {
@@ -55,12 +60,20 @@ pub const CANCELLING_ROOT: &str =
 /// Shown when a session step is being killed. paru, yay and makepkg start a
 /// root pacman through pkexec, which the user's signal does not reach; that
 /// pacman finishes on its own and the runner waits for it.
+#[cfg(unix)]
 pub const CANCELLING_SESSION: &str = "Cancelling. A package manager this step started under pkexec finishes first; nothing after it will start.";
+/// Shown when a session step is being killed. Windows has no process group to
+/// signal, so this reaches only the child; an installer it started is left to
+/// finish on its own, which is the truthful thing to promise.
+#[cfg(windows)]
+pub const CANCELLING_SESSION: &str =
+    "Cancelling. An installer this step started finishes first; nothing after it will start.";
 
 /// The word written to the helper's stdin to stop it between steps.
 pub const CANCEL_LINE: &str = "cancel";
 
 /// Where a packaged helper lives, in the order they are tried.
+#[cfg(unix)]
 pub const HELPER_PATHS: [&str; 2] = [
     "/usr/lib/brokey/brokey-helper",
     "/usr/libexec/brokey/brokey-helper",
@@ -81,13 +94,25 @@ impl Default for Runner {
 
 impl Runner {
     /// A runner that finds the helper the way the application does and
-    /// starts it through `pkexec`.
+    /// starts it however this platform elevates.
     pub fn new() -> Runner {
+        #[cfg(unix)]
+        let wrapper = vec!["pkexec".to_string()];
+        #[cfg(windows)]
+        let wrapper = Vec::new();
+        #[cfg(unix)]
+        let allowed = Allowed::for_home(std::env::var_os("HOME").map(PathBuf::from).as_deref());
+        // The same list the helper builds. `execute_inner` validates every
+        // root run against this before the first prompt, so a runner left
+        // with no removals would refuse every removal before the user was
+        // ever asked, and the helper's own check would never be reached.
+        #[cfg(windows)]
+        let allowed = Allowed::with_registered_removals();
         Runner {
             helper: locate_helper(),
-            wrapper: vec!["pkexec".to_string()],
+            wrapper,
             cancel: CancelToken::new(),
-            allowed: Allowed::for_home(std::env::var_os("HOME").map(PathBuf::from).as_deref()),
+            allowed,
         }
     }
 
@@ -112,8 +137,9 @@ impl Runner {
     }
 
     /// The program (and leading arguments) the helper is started through.
-    /// `pkexec` by default; tests use `env`, and the helper itself refuses
-    /// to run without root, so that path cannot install anything.
+    /// `pkexec` by default on Linux, empty on Windows; tests use `env`, and
+    /// the helper itself refuses to run without root, so that path cannot
+    /// install anything.
     pub fn with_wrapper(mut self, wrapper: Vec<String>) -> Runner {
         self.wrapper = wrapper;
         self
@@ -225,8 +251,11 @@ impl Runner {
             )
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
+            .stderr(Stdio::piped());
+        // A session step gets its own process group so cancelling reaches the
+        // whole tree. Windows has no equivalent and does not need one here.
+        #[cfg(unix)]
+        process.process_group(0);
         if let Some(cwd) = &step.command.cwd {
             process.current_dir(cwd);
         }
@@ -330,17 +359,8 @@ impl Runner {
         let json = serde_json::to_string(&sub)
             .map_err(|e| format!("The plan could not be encoded: {e}."))?;
         sink.event(Event::AuthRequired { plan: id.clone() });
-        let Some((program, leading)) = self.wrapper.split_first() else {
-            return Err("No privilege wrapper is configured.".to_string());
-        };
-        let mut child = Process::new(program)
-            .args(leading)
-            .arg(helper)
-            .arg("run")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+        let program = elevation_program(&self.wrapper, helper)?;
+        let mut elevated = elevate::start(helper, &self.wrapper)
             .map_err(|e| format!("Could not start {program}: {e}."))?;
         // The plan is written on its own thread. pkexec reads nothing until
         // the dialog has been answered, so a plan larger than the pipe buffer
@@ -348,7 +368,7 @@ impl Runner {
         // written here. The same thread owns the cancel line, so stdin has
         // one owner and closes when the thread ends.
         let (cancel_tx, cancel_rx) = mpsc::channel::<()>();
-        if let Some(mut stdin) = child.stdin.take() {
+        if let Some(mut stdin) = elevated.input.take() {
             std::thread::spawn(move || {
                 let written = stdin
                     .write_all(json.as_bytes())
@@ -369,7 +389,7 @@ impl Runner {
                 }
             });
         }
-        let lines = stream_lines(&mut child);
+        let lines = &elevated.lines;
         let mut current = run.first;
         let mut parser: Box<dyn ProgressParser> =
             progress::parser_for(&plan.steps[run.first].command.program);
@@ -470,10 +490,10 @@ impl Runner {
             }
         }
         drop(cancel_tx);
-        let status = child
+        let exit = elevated
             .wait()
             .map_err(|e| format!("Could not wait for the helper: {e}."))?;
-        match (status.code(), helper_said) {
+        match (exit, helper_said) {
             (Some(0), Some((true, _))) | (Some(0), None) => {
                 // A helper that exited cleanly finished every step, whether
                 // or not each `StepFinished` arrived intact.
@@ -542,10 +562,42 @@ fn sub_plan(plan: &Plan, run: &Run) -> Plan {
     }
 }
 
+/// What is about to be started, for the sentence shown when it cannot be,
+/// and the check that there is anything to start at all.
+///
+/// The two platforms differ in kind, not in detail. Linux starts the helper
+/// through a wrapper, `pkexec`, so a runner whose wrapper is empty cannot
+/// elevate at all and that is a misconfiguration worth its own sentence.
+/// Windows has no wrapper: `elevate::start` calls `ShellExecuteEx` with the
+/// `runas` verb on the helper itself and ignores the wrapper entirely, so
+/// the empty one `Runner::new` builds there is correct, and the thing being
+/// started is the helper.
+///
+/// This was one check for both platforms until a real Windows run met it.
+/// An empty wrapper is normal on Windows, so every plan was refused with
+/// "No privilege wrapper is configured." before it reached the seam that
+/// does not need one.
+fn elevation_program(wrapper: &[String], helper: &Path) -> Result<String, String> {
+    #[cfg(unix)]
+    {
+        let _ = helper;
+        match wrapper.split_first() {
+            Some((program, _)) => Ok(program.clone()),
+            None => Err("No privilege wrapper is configured.".to_string()),
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = wrapper;
+        Ok(helper.display().to_string())
+    }
+}
+
 /// Where the helper is on this machine: `BROKEY_HELPER` for development, then
 /// beside the running executable (a `cargo run` build, or a test binary in
 /// `target/debug/deps` with the helper one level up), then the packaged
 /// locations.
+#[cfg(unix)]
 pub fn locate_helper() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("BROKEY_HELPER").map(PathBuf::from)
         && path.is_file()
@@ -569,6 +621,25 @@ pub fn locate_helper() -> Option<PathBuf> {
         }
     }
     HELPER_PATHS.iter().map(PathBuf::from).find(|p| p.is_file())
+}
+
+/// Where a packaged helper lives on Windows: beside the application, which
+/// is where the installer puts it. There is no system-wide libexec here.
+#[cfg(windows)]
+pub fn locate_helper() -> Option<PathBuf> {
+    // `BROKEY_HELPER` wins, as on Linux, so a build tree can point at the
+    // helper it just built.
+    if let Ok(path) = std::env::var("BROKEY_HELPER") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let beside = std::env::current_exe()
+        .ok()?
+        .parent()?
+        .join("brokey-helper.exe");
+    beside.is_file().then_some(beside)
 }
 
 /// The plan-level fraction. Weights are the steps' own; a step of unknown
@@ -653,14 +724,15 @@ fn emit_progress(
     });
 }
 
-struct Line {
-    text: String,
-    stderr: bool,
+/// One line of a child's output, and which stream it came from.
+pub struct Line {
+    pub text: String,
+    pub stderr: bool,
 }
 
 /// Read the child's stdout and stderr on two threads into one channel, so a
 /// child that fills one pipe while the other is being read cannot block.
-fn stream_lines(child: &mut Child) -> mpsc::Receiver<Line> {
+pub(crate) fn stream_lines(child: &mut Child) -> mpsc::Receiver<Line> {
     let (tx, rx) = mpsc::channel();
     if let Some(out) = child.stdout.take() {
         let tx = tx.clone();
@@ -669,6 +741,16 @@ fn stream_lines(child: &mut Child) -> mpsc::Receiver<Line> {
     if let Some(err) = child.stderr.take() {
         std::thread::spawn(move || pump(err, true, tx));
     }
+    rx
+}
+
+/// One reader's lines, for a transport that has a single stream. A named
+/// pipe has no separate error stream, so everything that arrives is
+/// output. `stream_lines` is the two-stream version, for piped stdio.
+#[cfg(windows)]
+pub(crate) fn stream_lines_from(reader: impl Read + Send + 'static) -> mpsc::Receiver<Line> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || pump(reader, false, tx));
     rx
 }
 
@@ -702,14 +784,18 @@ fn pump(reader: impl Read, stderr: bool, tx: mpsc::Sender<Line>) {
 // libc's kill(2), declared here rather than through the libc crate, which
 // the workspace does not carry. Spawning `/usr/bin/kill` was the other way
 // and would have made cancellation depend on a binary being on PATH.
+#[cfg(unix)]
 unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
+#[cfg(unix)]
 const SIGTERM: i32 = 15;
+#[cfg(unix)]
 const SIGKILL: i32 = 9;
 
 /// Stop the child and everything in its process group: SIGTERM, a moment
 /// for it to finish, then SIGKILL.
+#[cfg(unix)]
 fn kill_group(child: &mut Child) {
     let pgid = -(child.id() as i32);
     // SAFETY: kill(2) takes two integers and touches no memory; a wrong pid
@@ -725,6 +811,15 @@ fn kill_group(child: &mut Child) {
     }
     // SAFETY: as above.
     unsafe { kill(pgid, SIGKILL) };
+}
+
+/// Stop the child. Windows has no process group to signal, so this reaches
+/// the child itself and not its descendants: an installer the step started
+/// is left to finish, which is the truthful thing to promise and is what
+/// `CANCELLING_SESSION` says.
+#[cfg(windows)]
+fn kill_group(child: &mut Child) {
+    let _ = child.kill();
 }
 
 fn first_line(text: &str) -> &str {
@@ -763,6 +858,43 @@ pub fn summary(ops: &[Op]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wrapper `Runner::new` actually builds on this platform, which is
+    /// the state a real run meets. On Windows it is empty, and that used to
+    /// refuse every plan.
+    #[test]
+    fn the_default_wrapper_can_start_something() {
+        let runner = Runner::new();
+        let helper = Path::new("brokey-helper");
+        assert!(
+            elevation_program(&runner.wrapper, helper).is_ok(),
+            "a runner built the ordinary way cannot name what it would start"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_needs_no_wrapper_and_names_the_helper() {
+        let helper = Path::new(r"C:\Program Files\Brokey\brokey-helper.exe");
+        assert_eq!(
+            elevation_program(&[], helper),
+            Ok(helper.display().to_string()),
+            "ShellExecuteEx elevates the helper itself, so an empty wrapper is right"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linux_without_a_wrapper_cannot_elevate() {
+        assert_eq!(
+            elevation_program(&[], Path::new("brokey-helper")),
+            Err("No privilege wrapper is configured.".to_string())
+        );
+        assert_eq!(
+            elevation_program(&["pkexec".to_string()], Path::new("brokey-helper")),
+            Ok("pkexec".to_string())
+        );
+    }
 
     fn step(root: bool, weight: u32) -> Step {
         Step {
@@ -803,6 +935,43 @@ mod tests {
             ]
         );
         assert!(split_runs(&[]).is_empty());
+    }
+
+    /// The runner's closed list is the registry-backed one, not the bare
+    /// system list. Nothing else in the suite would notice the difference:
+    /// `execute_inner` validates every root run against this before the
+    /// first prompt, so a runner built with `Allowed::system()` would refuse
+    /// every Add/Remove Programs removal, and only a live removal after a
+    /// UAC prompt would ever say so.
+    ///
+    /// The assertion is the wiring rather than a count, because the number
+    /// of machine-wide removals is a property of the machine. On one whose
+    /// registry records none the two lists are equal anyway and this can
+    /// only pass; on any machine with software installed for all users it
+    /// can fail, which is every machine this will actually run on.
+    #[cfg(windows)]
+    #[test]
+    fn the_runners_closed_list_is_the_registry_backed_one() {
+        assert_eq!(Runner::new().allowed, Allowed::with_registered_removals());
+    }
+
+    /// The runner is built on both platforms. Before this, `Runner` did not
+    /// exist on Windows at all, so a plan could not even be described there.
+    #[test]
+    fn a_runner_can_be_built_and_asked_about_its_helper() {
+        let runner = Runner::new().with_helper(None);
+        assert!(runner.helper().is_none());
+    }
+
+    /// Splitting a plan into runs is arithmetic, not a process, so it gives
+    /// the same answer on both platforms.
+    #[test]
+    fn splitting_runs_works_on_every_platform() {
+        let steps = vec![step(false, 1), step(true, 1), step(true, 1)];
+        let runs = split_runs(&steps);
+        assert_eq!(runs.len(), 2);
+        assert!(!runs[0].root);
+        assert!(runs[1].root);
     }
 
     #[test]

@@ -9,6 +9,10 @@
  *
  * To adopt in a project:
  *   - copy this file in, set --accent-h (and nothing else) at the top
+ *   - an app whose accent is a brand colour it must match exactly sets
+ *     --accent-fixed (and --accent-ink-fixed if the ink has to change with it)
+ *     instead of living on the derived ramp. STYLE-GUIDE.md 2.3 says what that
+ *     costs and what you must then check by hand.
  *   - put class="dark" or data-theme="dark" on <html> for the dark theme, "light" for light,
  *     nothing at all to follow the OS
  *   - a hosted web app also puts class="web" on <html>; a desktop app never does
@@ -31,7 +35,14 @@
 
 :root {
   /* ── The one number an app changes ─────────────────────────────────────── */
-  --accent-h: 300;           /* Brokey plum. Umber 60/68, Muster 200, HomeLab 160, Tally 255. */
+  --accent-h: 18;            /* Brokey red. Umber 60/68, Muster 200, HomeLab 160, Tally 255. */
+
+  /* Set this only if the accent is a brand colour that must match exactly. It
+     replaces --accent in both themes, so the app leaves the shared lightness
+     ramp and owes the 3:1 check in STYLE-GUIDE.md 2.3 by hand. --accent-h is
+     still read: it drives --accent-dim and --control-active. */
+  --accent-fixed: #D42B48;      /* Brokey's own red, matched exactly rather than derived. */
+  --accent-ink-fixed: #FFFFFF;  /* The house near-black reads 3.78:1 on it; white reads 4.95:1. */
 
   /* ── Type ──────────────────────────────────────────────────────────────── */
   --font-ui: "Archivo", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -157,10 +168,11 @@
   --text-dim:        oklch(0.622 0.008 261);  /* status bar, notes, disabled                     #84878C */
   --placeholder:     oklch(0.481 0.009 261);  /* input hint, eyebrow labels                      #5B5E63 */
 
-  /* Accent — derived from --accent-h. Umber ochre at h=68 gives #C08A4E / #6B4E2E. */
-  --accent:          oklch(0.674 0.101 var(--accent-h));
+  /* Accent — derived from --accent-h. Umber ochre at h=68 gives #C08A4E / #6B4E2E.
+     --accent-fixed, when an app sets it, replaces the derived value here. */
+  --accent:          var(--accent-fixed, oklch(0.674 0.101 var(--accent-h)));
   --accent-dim:      oklch(0.447 0.061 var(--accent-h));   /* dashed outlines, quiet marks */
-  --accent-ink:      var(--window);                        /* text ON an accent fill */
+  --accent-ink:      var(--accent-ink-fixed, var(--window)); /* text ON an accent fill */
   --accent-tint:     color-mix(in oklab, var(--accent) 7%, transparent);   /* selected card wash */
   --accent-ring:     color-mix(in oklab, var(--accent) 35%, transparent);  /* focus ring */
 
@@ -213,9 +225,9 @@
     --text-muted:     oklch(0.526 0.007 75);   /* #6D6A66 */
     --text-dim:       oklch(0.634 0.008 81);   /* #8D8A85 */
     --placeholder:    oklch(0.72 0.008 81);
-    --accent:         oklch(0.55 0.10 var(--accent-h));   /* h=68 → #9C622F */
+    --accent:         var(--accent-fixed, oklch(0.55 0.10 var(--accent-h)));  /* h=68 → #9C622F */
     --accent-dim:     oklch(0.79 0.036 var(--accent-h));  /* #C9B8A2 */
-    --accent-ink:     #FFFFFF;
+    --accent-ink:     var(--accent-ink-fixed, #FFFFFF);
     --caution:        oklch(0.518 0.114 39);   /* #9E4E33 */
     --caution-bg:     oklch(0.943 0.018 49);   /* #F7E9E2 */
     --caution-line:   oklch(0.832 0.042 51);   /* #DFC1B0 */
@@ -252,9 +264,9 @@
   --text-muted:     oklch(0.526 0.007 75);
   --text-dim:       oklch(0.634 0.008 81);
   --placeholder:    oklch(0.72 0.008 81);
-  --accent:         oklch(0.55 0.10 var(--accent-h));
+  --accent:         var(--accent-fixed, oklch(0.55 0.10 var(--accent-h)));
   --accent-dim:     oklch(0.79 0.036 var(--accent-h));
-  --accent-ink:     #FFFFFF;
+  --accent-ink:     var(--accent-ink-fixed, #FFFFFF);
   --caution:        oklch(0.518 0.114 39);
   --caution-bg:     oklch(0.943 0.018 49);
   --caution-line:   oklch(0.832 0.042 51);

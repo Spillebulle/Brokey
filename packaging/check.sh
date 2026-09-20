@@ -69,3 +69,61 @@ version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
 grep -q "<release version=\"$version\"" "$metainfo" || \
     fail "$metainfo has no <release version=\"$version\">; add one for this version"
 ok "metainfo lists release $version"
+
+# Windows. Nothing here needs wix, a display or Pillow, so it runs on Linux
+# with everything else, which is where this script mainly runs.
+wxs=packaging/windows/brokey.wxs
+[ -f "$wxs" ] || fail "no WiX source at $wxs"
+
+# The taskbar matches a running window to an installed shortcut by the
+# application id, so the id the shortcut carries and the id the application
+# declares have to be one string. The .wxs says so beside the property and
+# nothing checked it.
+aumid=$(sed -n 's/.*System.AppUserModel.ID" Value="\([^"]*\)".*/\1/p' "$wxs" | head -1)
+identifier=$(sed -n 's/^[[:space:]]*"identifier"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    crates/brokey/tauri.conf.json | head -1)
+[ -n "$aumid" ] || \
+    fail "$wxs sets no System.AppUserModel.ID on the Start menu shortcut; add one carrying the identifier from crates/brokey/tauri.conf.json"
+[ "$aumid" = "$identifier" ] || \
+    fail "the shortcut's System.AppUserModel.ID is '$aumid' and tauri.conf.json's identifier is '$identifier'; spell them the same, or the taskbar cannot match a running window to the installed shortcut"
+ok "the shortcut's AppUserModel.ID is $identifier"
+
+# Five GUIDs: the UpgradeCode and one per component. Two components sharing a
+# GUID makes Windows Installer treat them as one component, so an upgrade or a
+# removal reference-counts the wrong files.
+guids=$(sed -n -e 's/.*UpgradeCode="\([^"]*\)".*/\1/p' -e 's/.*Guid="\([^"]*\)".*/\1/p' "$wxs")
+written=$(printf '%s\n' "$guids" | wc -l | tr -d ' ')
+[ "$written" -eq 5 ] || \
+    fail "$wxs writes $written GUIDs and this check expects five, the UpgradeCode and one for each of its four components. If a component lost its Guid attribute, give it a fresh one from python -c \"import uuid; print(uuid.uuid4())\". If you added or removed a component on purpose, change the five here to match"
+dupe=$(printf '%s\n' "$guids" | sort | uniq -d | head -1)
+[ -z "$dupe" ] || \
+    fail "$wxs uses the GUID $dupe more than once; every GUID in it is Brokey's alone, so generate a fresh one for the second"
+ok "the five GUIDs are five and are all different"
+
+# WiX's stock dialog set takes exactly two bitmap sizes and no others, and a
+# wrong one is a stretched picture with no error anywhere. The sizes are read
+# out of the BMP headers themselves, two 32-bit integers at bytes 18 and 22,
+# which od does without any image library.
+#
+# BMP stores them little-endian and `od -tu4` reads them in the host's order,
+# so this is right on the little-endian machines Brokey is built on, which is
+# every x86-64 and every aarch64 runner in the release workflow, and would read
+# the bytes backwards on a big-endian host. Stated rather than worked around:
+# the failure is a size check reporting nonsense on a machine Brokey does not
+# target, not a wrong bitmap going unnoticed on one it does.
+bmp_int() { od -An -tu4 -j "$2" -N 4 -v "$1" | tr -d ' \n'; }
+
+check_bmp() {
+    bmp="packaging/windows/$1.bmp"
+    [ -f "$bmp" ] || fail "$bmp is missing and the MSI needs it; run python tools/make-art.py"
+    declared=$(sed -n "s/^$2 = (\([0-9]*\), \([0-9]*\))\$/\1 \2/p" tools/make-art.py | head -1)
+    [ -n "$declared" ] || \
+        fail "tools/make-art.py declares no $2 size, so there is nothing to check $bmp against; restore the $2 constant"
+    drawn="$(bmp_int "$bmp" 18) $(bmp_int "$bmp" 22)"
+    [ "$drawn" = "$declared" ] || \
+        fail "$bmp is ${drawn% *} by ${drawn#* } pixels and tools/make-art.py draws $2 at ${declared% *} by ${declared#* }; rerun python tools/make-art.py and commit the bitmap"
+    ok "$bmp is ${declared% *} by ${declared#* }, the size make-art.py draws"
+}
+
+check_bmp banner BANNER
+check_bmp dialog DIALOG

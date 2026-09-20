@@ -258,18 +258,14 @@ pub fn sentence(message: &str) -> String {
 pub mod logic {
     use super::{PlanPreview, SelfUpdate, selfupdate_adapter, sentence};
     use crate::settings::Settings;
-    #[cfg(unix)]
     use crate::state::PlanState;
     use crate::state::{AppState, SELF_UPDATE_MAX_AGE, UPDATES_MAX_AGE};
-    #[cfg(unix)]
     use brokey_core::Plan;
-    #[cfg(unix)]
     use brokey_core::transaction::runner::Runner;
     use brokey_core::updates::UpdateList;
     use brokey_core::{
         DriversReport, Event, Op, Package, PackageRef, Query, SearchResult, SourceStatus, Store,
     };
-    #[cfg(unix)]
     use std::sync::Arc;
 
     /// The most results a source is asked for. Above this the grouper and
@@ -533,17 +529,7 @@ pub mod logic {
                 "There is nothing to do. Everything asked for is already in place.".to_string(),
             );
         }
-        #[cfg(unix)]
-        {
-            Ok(start_plan(state, store, plan, emit))
-        }
-        #[cfg(windows)]
-        {
-            // The runner (pkexec, the helper's closed list) is Linux only
-            // for now; a later plan gives Windows its own privilege path.
-            let _ = (state, store, plan, emit);
-            Err("Running a plan is not available on Windows yet.".to_string())
-        }
+        Ok(start_plan(state, store, plan, emit))
     }
 
     /// Record the plan and run it on a thread of its own. The thread holds a
@@ -554,11 +540,10 @@ pub mod logic {
     /// appended to the plan's record before it is sent, so a page that
     /// reacts to an event by asking `active_plans` already sees it there.
     ///
-    /// Linux only: it is built on the runner (`pkexec`, the helper), which
-    /// has no Windows counterpart yet. `run_plan` and `self_update_apply`
-    /// are the callers, and each has its own Windows answer that never
-    /// reaches here.
-    #[cfg(unix)]
+    /// Built on the runner, which elevates root steps the way each platform
+    /// does: `pkexec` and the helper's closed list on Linux, `ShellExecuteEx`
+    /// with `runas` and the helper's closed list on Windows. `run_plan` and
+    /// `self_update_apply` are the callers, on both platforms.
     pub fn start_plan(
         state: &AppState,
         store: Arc<Store>,
@@ -631,7 +616,6 @@ pub mod logic {
         emit(&event);
     }
 
-    #[cfg(unix)]
     fn run_to_completion(
         state: &AppState,
         store: &Store,
@@ -688,15 +672,7 @@ pub mod logic {
         if plan.steps.is_empty() {
             return Err("The update has no steps to run on this machine. The check says how to get it instead.".to_string());
         }
-        #[cfg(unix)]
-        {
-            Ok(start_plan(state, state.store(), plan, emit))
-        }
-        #[cfg(windows)]
-        {
-            let _ = (state, plan, emit);
-            Err("Applying a self-update is not available on Windows yet.".to_string())
-        }
+        Ok(start_plan(state, state.store(), plan, emit))
     }
 
     /// Remember that this edition does not belong to its group.
@@ -828,6 +804,64 @@ mod tests {
         }
     }
 
+    /// A source with one root step to remove, so a plan can reach the
+    /// runner on Windows without needing the machine's real winget
+    /// catalogue.
+    #[cfg(windows)]
+    struct FakeWinget;
+
+    #[cfg(windows)]
+    impl Source for FakeWinget {
+        fn kind(&self) -> SourceKind {
+            SourceKind::Winget
+        }
+        fn status(&self) -> SourceStatus {
+            SourceStatus {
+                kind: SourceKind::Winget,
+                available: true,
+                reason: None,
+                detail: None,
+                searchable: false,
+                setup: None,
+            }
+        }
+        fn search(&self, _query: &Query) -> brokey_core::Result<Vec<Package>> {
+            Ok(Vec::new())
+        }
+        fn installed(&self) -> brokey_core::Result<Vec<Package>> {
+            Ok(Vec::new())
+        }
+        fn updates(&self) -> brokey_core::Result<Vec<Update>> {
+            Ok(Vec::new())
+        }
+        fn details(&self, id: &str) -> brokey_core::Result<Package> {
+            Err(brokey_core::Error::new(format!("{id} is not known.")))
+        }
+        fn plan(&self, _op: &Op) -> brokey_core::Result<Vec<Step>> {
+            Ok(vec![Step {
+                source: SourceKind::Winget,
+                title: "Removing Test.App".into(),
+                command: brokey_core::Command {
+                    program: "winget".into(),
+                    args: vec![
+                        "uninstall".into(),
+                        "--id".into(),
+                        "Test.App".into(),
+                        "--silent".into(),
+                    ],
+                    env: Vec::new(),
+                    cwd: None,
+                },
+                needs_root: true,
+                weight: 1,
+            }])
+        }
+        fn refresh_index(&self) -> brokey_core::Result<()> {
+            Ok(())
+        }
+        fn finished(&self, _op: &Op, _ok: bool) {}
+    }
+
     #[test]
     fn a_sentence_ends_with_a_full_stop_and_nothing_is_said_twice() {
         assert_eq!(
@@ -937,9 +971,11 @@ mod tests {
         assert_eq!(refreshes(), 2, "a forced check always refreshes");
     }
 
-    // pacman is always a source on Linux, whether or not it is installed;
-    // on Windows there is no source at all until Task 8, so this has
-    // nothing to preview against yet.
+    // pacman is always a source on Linux, whether or not it is installed.
+    // Windows has its own sources (Add/Remove Programs, winget) since Task
+    // 8, but pacman itself is Linux-only by design and never one of them,
+    // so a plan asking for a pacman package still has nothing to preview
+    // against there.
     #[cfg(unix)]
     #[test]
     fn a_preview_is_a_dry_run_with_notices() {
@@ -955,9 +991,10 @@ mod tests {
     }
 
     // The AUR is always a source on Linux (its refresh is a no-op by
-    // design, its index being the RPC), so this reaches "nothing to do";
-    // on Windows there is no AUR source until Task 8, so it reaches "is
-    // not a source on this machine" instead.
+    // design, its index being the RPC), so this reaches "nothing to do".
+    // The AUR is Arch's own user repository, so unlike pacman it was never
+    // in line for a Windows counterpart; on Windows this reaches "is not a
+    // source on this machine" instead, Task 8 or no Task 8.
     #[cfg(unix)]
     #[test]
     fn a_plan_with_nothing_to_do_is_refused_before_it_starts() {
@@ -974,25 +1011,36 @@ mod tests {
         assert!(state.plans().is_empty());
     }
 
-    // Exercises `start_plan`, which is built on the Linux-only runner.
-    #[cfg(unix)]
+    // Exercises `start_plan`, which the runner now backs on both
+    // platforms.
     #[test]
     fn a_started_plan_settles_and_tells_the_page_when_the_runner_stops() {
         let state = state_with("start", empty_store());
+        // A session step that fails at once: no helper, no prompt, and the
+        // runner still has to end the plan with a sentence. `sh` and `cmd`
+        // are what each platform's own shell always provides, so the test
+        // needs nothing beyond what a bare install of either OS has.
+        #[cfg(unix)]
+        let command = brokey_core::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "exit 3".into()],
+            env: Vec::new(),
+            cwd: None,
+        };
+        #[cfg(windows)]
+        let command = brokey_core::Command {
+            program: "cmd".into(),
+            args: vec!["/C".into(), "exit 3".into()],
+            env: Vec::new(),
+            cwd: None,
+        };
         let plan = Plan {
             id: "plan-test".into(),
             ops: vec![Op::Install { package: steam() }],
-            // A session step that fails at once: no helper, no prompt, and
-            // the runner still has to end the plan with a sentence.
             steps: vec![brokey_core::Step {
                 source: SourceKind::Pacman,
                 title: "Failing on purpose".into(),
-                command: brokey_core::Command {
-                    program: "sh".into(),
-                    args: vec!["-c".into(), "exit 3".into()],
-                    env: Vec::new(),
-                    cwd: None,
-                },
+                command,
                 needs_root: false,
                 weight: 1,
             }],
@@ -1017,7 +1065,14 @@ mod tests {
             Event::PlanFinished { plan, ok, message } => {
                 assert_eq!(plan, "plan-test");
                 assert!(!ok);
-                assert!(message.ends_with('.'), "a sentence: {message}");
+                // A spawn failure could not produce this exact sentence (it
+                // says "Could not start cmd: ...." instead), so this is what
+                // proves the fixture actually ran and exited with code 3,
+                // rather than merely failing to start.
+                assert!(
+                    message.contains("failed with exit code 3."),
+                    "the step ran and exited with code 3: {message}"
+                );
             }
             other => panic!("expected PlanFinished, got {other:?}"),
         }
@@ -1030,6 +1085,52 @@ mod tests {
             "the record and the page agree"
         );
         assert!(status.started > 0);
+    }
+
+    /// A winget removal is a root step; on Windows it must reach the
+    /// runner rather than be refused here for being on Windows. Building
+    /// against a real winget source would need the machine's actual
+    /// catalogue, so the plan comes from a fake that hands back one root
+    /// step instead; what is under test is that `run_plan` starts it
+    /// rather than answering with a platform sentence.
+    #[cfg(windows)]
+    #[test]
+    fn a_winget_removal_reaches_the_runner_rather_than_a_platform_refusal() {
+        let store = Store {
+            system: brokey_core::system::from_os_release(""),
+            sources: vec![Box::new(FakeWinget)],
+        };
+        let state = state_with("winget-removal", store);
+        let package = PackageRef {
+            source: SourceKind::Winget,
+            id: "Test.App".into(),
+        };
+
+        let preview = preview(
+            &state,
+            vec![Op::Remove {
+                package: package.clone(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(preview.plan.steps.len(), 1, "the fake source's root step");
+
+        let id = run_plan(
+            &state,
+            vec![Op::Remove {
+                package: package.clone(),
+            }],
+            |_| {},
+        )
+        .unwrap();
+        assert!(
+            !id.is_empty(),
+            "the plan reached the runner and was given an id"
+        );
+        assert!(
+            state.plans().iter().any(|p| p.plan.id == id),
+            "a started plan is on record"
+        );
     }
 
     #[test]

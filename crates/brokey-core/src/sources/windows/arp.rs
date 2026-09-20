@@ -6,14 +6,29 @@
 //! The registry knows what is on the machine and has no notion of a newer
 //! version, so it never searches and never reports an update.
 //!
-//! Everything here except [`read`] is a pure function of [`RawEntry`], so
-//! it is tested against a fixture rather than against whatever happens to
-//! be installed on the machine running the tests.
+//! Everything here is a pure function of [`RawEntry`], and is tested against
+//! a fixture rather than against whatever happens to be installed on the
+//! machine running the tests, with three exceptions: [`read`], which is what
+//! turns the registry into a `RawEntry` in the first place;
+//! [`msiexec_program`], which asks the machine for its own system directory
+//! rather than for anything installed on it; and [`icon`], which is the only
+//! thing in this module that touches the disk at all and the only one that
+//! writes. It hands the entry's `DisplayIcon` value to [`icon::reference`]
+//! to be parsed, which is pure, and then to [`icon::cached`], which reads
+//! the file that value names and writes an `.ico` into the cache directory.
+//! [`to_package`] calls it on every entry, so listing what is installed
+//! reads a file per application and can leave new files behind.
+//! `msiexec_program` still has a machine-dependent test beside its
+//! fixture-driven callers, in this same module, because it is the only test
+//! that would catch a mistake in the syscall behind it; `icon` is covered by
+//! `icon.rs`'s own tests, which write their sources into a temporary
+//! directory.
 
+use super::icon;
 use crate::model::{Command, Op, Package, PackageKind, Picture, SourceKind, Step};
 use crate::{Error, Query, Result, Source, SourceStatus, Update};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Which of the three uninstall keys an entry came from. It is part of the
 /// package id, because the same key name can appear in more than one.
@@ -217,25 +232,27 @@ pub fn install_dir(e: &RawEntry) -> Option<PathBuf> {
     })
 }
 
-/// The application's own icon. `DisplayIcon` is a path, optionally followed
-/// by a comma and a resource index; the index is dropped because the page
-/// asks the shell for the picture rather than for one numbered resource.
+/// The application's own icon, extracted into the cache and served from
+/// there.
+///
+/// `DisplayIcon` is a path, optionally followed by a comma and a resource
+/// index. Nothing here asks the shell for the picture: nothing in this
+/// codebase does, and believing otherwise is why the index used to be
+/// dropped. The index names which icon group the file carries, and 52 of the
+/// reference machine's 112 `DisplayIcon` values carry one, so discarding it
+/// meant drawing the wrong icon, or none, on nearly half the machine.
+/// [`icon::reference`] splits the value into a file and which icon inside it;
+/// [`icon::cached`] does the extracting, writing an `.ico` under `cache` that
+/// the asset protocol is allowed to serve, which the original path in
+/// Program Files is not.
 ///
 /// This value is never used as something to launch: it frequently points at
 /// an uninstaller or at a file with no code in it at all.
-pub fn icon(e: &RawEntry) -> Option<Picture> {
-    let raw = e.display_icon.as_deref()?.trim();
-    let raw = raw.strip_prefix('"').unwrap_or(raw);
-    let path = match raw.rsplit_once(',') {
-        // Only a trailing integer is an index. A bare comma in a path is not.
-        Some((path, index)) if index.trim().parse::<i32>().is_ok() => path,
-        _ => raw,
-    };
-    let path = path.trim().trim_end_matches('"');
-    if path.is_empty() {
-        return None;
-    }
-    Some(Picture::File(PathBuf::from(path)))
+pub fn icon(e: &RawEntry, cache: &Path) -> Option<Picture> {
+    let raw = e.display_icon.as_deref()?;
+    let reference = icon::reference(raw)?;
+    let path = icon::cached(cache, &reference)?;
+    Some(Picture::File(path))
 }
 
 /// The id this source uses, naming the hive as well as the key, because the
@@ -263,7 +280,7 @@ fn is_driver(e: &RawEntry) -> bool {
 /// and knows nothing about a newer one, so the installed version is also the
 /// available version; saying anything else would draw an update that is not
 /// there.
-pub fn to_package(e: &RawEntry) -> Package {
+pub fn to_package(e: &RawEntry, cache: &Path) -> Package {
     let name = e.display_name.clone().unwrap_or_default();
     let mut p = Package::new(SourceKind::Arp, package_id(e), name);
     p.kind = if is_driver(e) {
@@ -279,7 +296,7 @@ pub fn to_package(e: &RawEntry) -> Package {
     p.version = e.display_version.clone();
     p.developer = e.publisher.clone();
     p.homepage = e.url_info_about.clone();
-    p.icon = icon(e);
+    p.icon = icon(e, cache);
     // EstimatedSize is kilobytes; Package counts bytes.
     p.installed_size = e.estimated_size.map(|kb| kb * 1024);
     if let Some(dir) = install_dir(e) {
@@ -359,15 +376,68 @@ pub fn removal(e: &RawEntry) -> Option<Removal> {
     Some(Removal::Interactive(interactive))
 }
 
+/// The full path to `msiexec.exe`, which is what an MSI removal runs and
+/// the one program in a removal command that the registry does not name in
+/// full.
+///
+/// A path rather than the bare name, because the helper never searches for
+/// a program: it refuses anything that is not a full path, so a bare name
+/// would fail every MSI removal on the machine (179 of 280 on the
+/// development machine's registry).
+///
+/// The system directory comes from `GetSystemDirectoryW` and not from
+/// `%SystemRoot%`. The elevated helper inherits the environment of the
+/// unelevated process that started it, so an environment variable is a
+/// thing an unprivileged caller can choose, and this one would choose which
+/// program runs as Administrator. The kernel's answer cannot be chosen.
+#[cfg(windows)]
+pub fn msiexec_program() -> String {
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buffer = [0u16; 260];
+    // SAFETY: `buffer` is a writable array of exactly the length passed
+    // alongside it, which is what this call is documented to fill.
+    let written = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+    // Zero is failure, and anything longer than the buffer means it wrote
+    // nothing and is reporting the size it wanted. Neither is worth a
+    // second attempt: `System32` is not somewhere else on a machine where
+    // this fails, and a wrong answer here is worse than a fixed one.
+    let directory = if written == 0 || written > buffer.len() {
+        r"C:\Windows\System32".to_string()
+    } else {
+        String::from_utf16_lossy(&buffer[..written])
+    };
+    format!(r"{directory}\msiexec.exe")
+}
+
+/// Off Windows there is no system directory to ask about and no MSI to
+/// remove. The bare name keeps `removal_step` an ordinary function of its
+/// fixture on the platform where the fixture tests run.
+#[cfg(not(windows))]
+pub fn msiexec_program() -> String {
+    "msiexec.exe".to_string()
+}
+
 /// The step that removes the entry. `needs_root` means Administrator here:
 /// software the whole machine has needs it, software only this user has
 /// does not, which is what keeps the common case free of a prompt.
-pub fn removal_step(e: &RawEntry) -> Option<Step> {
+///
+/// `msiexec` is the full path to `msiexec.exe`, which an MSI removal runs
+/// and which the registry never names in full. It is a parameter, exactly
+/// as `winget::operation_step`'s `program` is, so that this stays a pure
+/// function of its fixture: asking the kernel for the system directory in
+/// here would make the module's fixture tests depend on the machine that
+/// runs them, which is what the module comment at the top promises they do
+/// not. [`msiexec_program`] is what both call sites pass, and they must
+/// pass the same value: the runner and the helper each build the closed
+/// list from this function, and a disagreement between them would refuse
+/// every MSI removal after the prompt rather than before it.
+pub fn removal_step(e: &RawEntry, msiexec: &str) -> Option<Step> {
     let name = e.display_name.clone().unwrap_or_else(|| e.key_name.clone());
     let command = match removal(e)? {
         Removal::Quiet(c) | Removal::Interactive(c) => c,
         Removal::Msi { product_code } => Command {
-            program: "msiexec.exe".to_string(),
+            program: msiexec.to_string(),
             args: vec![
                 "/x".to_string(),
                 product_code,
@@ -402,6 +472,10 @@ fn count(n: usize, noun: &str) -> String {
 /// source is built, as the pacman source reads its database once.
 pub struct Arp {
     pub(crate) entries: Vec<RawEntry>,
+    /// Where extracted icons are written. `crate::system::Dirs::new().cache`
+    /// on a real machine; a temporary directory in every test, so a test run
+    /// never writes into the user's actual cache.
+    pub(crate) cache: PathBuf,
 }
 
 impl Arp {
@@ -410,7 +484,19 @@ impl Arp {
     /// compile and run on Linux as well.
     #[cfg(windows)]
     pub fn new() -> Arp {
-        Arp { entries: read() }
+        Arp {
+            entries: read(),
+            cache: crate::system::Dirs::new().cache,
+        }
+    }
+
+    /// Built from entries already in hand, with an explicit cache directory
+    /// rather than `crate::system::Dirs::new().cache`. Tests use this so
+    /// icon extraction writes into a temporary directory instead of the
+    /// user's real cache.
+    #[cfg(test)]
+    fn with_cache(entries: Vec<RawEntry>, cache: PathBuf) -> Arp {
+        Arp { entries, cache }
     }
 
     fn applications(&self) -> impl Iterator<Item = &RawEntry> {
@@ -454,7 +540,10 @@ impl Source for Arp {
     }
 
     fn installed(&self) -> Result<Vec<crate::Package>> {
-        Ok(self.applications().map(to_package).collect())
+        Ok(self
+            .applications()
+            .map(|e| to_package(e, &self.cache))
+            .collect())
     }
 
     /// An uninstall key records one version, the installed one, and knows
@@ -464,12 +553,16 @@ impl Source for Arp {
     }
 
     fn details(&self, id: &str) -> Result<crate::Package> {
-        self.find(id).map(to_package).ok_or_else(|| {
-            Error::from_source(
-                SourceKind::Arp,
-                format!("{id} is not in the uninstall registry. It may have been removed already."),
-            )
-        })
+        self.find(id)
+            .map(|e| to_package(e, &self.cache))
+            .ok_or_else(|| {
+                Error::from_source(
+                    SourceKind::Arp,
+                    format!(
+                        "{id} is not in the uninstall registry. It may have been removed already."
+                    ),
+                )
+            })
     }
 
     /// Removal is the only operation this source has. Any other kind is
@@ -490,7 +583,9 @@ impl Source for Arp {
                 ),
             )
         })?;
-        Ok(removal_step(entry).into_iter().collect())
+        Ok(removal_step(entry, &msiexec_program())
+            .into_iter()
+            .collect())
     }
 }
 
@@ -563,6 +658,13 @@ mod tests {
             .iter()
             .find(|e| e.display_name.as_deref() == Some(name))
             .unwrap_or_else(|| panic!("{name} is not in the fixture"))
+    }
+
+    /// A cache directory for a test to extract icons into, so a test run
+    /// never touches the user's real cache. Dropping the returned `TempDir`
+    /// removes it; callers keep it alive for as long as the path is used.
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("a temporary directory")
     }
 
     /// An ordinary application with a name and an uninstaller is kept.
@@ -767,24 +869,88 @@ mod tests {
         );
     }
 
-    /// DisplayIcon carries a resource index after a comma. The file is what
-    /// matters; the index is dropped.
+    /// A `DisplayIcon` naming a file that is not there gives nothing back:
+    /// nothing about the value can be extracted without reading a real file.
+    /// The path is inside a directory that is created but never written to,
+    /// rather than one of the fixture's own paths, because the fixture's
+    /// paths are Program Files paths from the reference machine and this
+    /// suite also runs on that same machine, where some of them are real.
+    /// `a_display_icon_becomes_a_cached_picture_file`, below, is where a
+    /// file the test itself wrote goes all the way to a `Picture::File`
+    /// under the cache.
     #[test]
-    fn an_icon_index_is_stripped() {
+    fn a_display_icon_naming_a_file_that_is_not_there_gives_no_icon() {
         let entries = fixture();
-        let icon = icon(named(&entries, "Obsidian")).expect("there is an icon");
-        assert_eq!(
-            icon,
-            crate::model::Picture::File(std::path::PathBuf::from(
-                "C:\\Program Files\\Obsidian\\Obsidian.exe"
-            ))
+        let cache = tempdir();
+        let missing = tempdir();
+        let mut entry = named(&entries, "Obsidian").clone();
+        entry.display_icon = Some(
+            missing
+                .path()
+                .join("nothing-here.exe")
+                .display()
+                .to_string(),
         );
+        assert_eq!(icon(&entry, cache.path()), None);
     }
 
     #[test]
     fn an_entry_with_no_icon_has_none() {
         let entries = fixture();
-        assert_eq!(icon(named(&entries, "A per-user application")), None);
+        let cache = tempdir();
+        assert_eq!(
+            icon(named(&entries, "A per-user application"), cache.path()),
+            None
+        );
+    }
+
+    /// The whole way, end to end: a `DisplayIcon` naming a real file the
+    /// test wrote produces a `Package` whose icon is a `Picture::File` under
+    /// the cache directory, not the original path.
+    #[test]
+    fn a_display_icon_becomes_a_cached_picture_file() {
+        let cache = tempdir();
+        let source_dir = tempdir();
+        let icon_path = source_dir.path().join("app.ico");
+        let mut bytes = vec![0x00, 0x00, 0x01, 0x00];
+        bytes.extend_from_slice(b"pretend icon directory bytes");
+        std::fs::write(&icon_path, &bytes).unwrap();
+
+        let entries = fixture();
+        let mut entry = named(&entries, "Obsidian").clone();
+        entry.display_icon = Some(icon_path.display().to_string());
+
+        let package = to_package(&entry, cache.path());
+        let Some(Picture::File(path)) = package.icon else {
+            panic!("expected a Picture::File icon, got {:?}", package.icon);
+        };
+        assert!(
+            path.starts_with(cache.path()),
+            "{} should be under {}",
+            path.display(),
+            cache.path().display()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+        // The index has to reach `cached` through `arp::icon`, not just
+        // through `reference` and `cached` separately: a second entry naming
+        // the same file with a different index must produce a different
+        // cached file. This is what catches `arp::icon` dropping the index
+        // and always asking for the first icon, which is the exact defect
+        // this task exists to fix.
+        let mut second = entry.clone();
+        second.display_icon = Some(format!("{},1", icon_path.display()));
+        let second_package = to_package(&second, cache.path());
+        let Some(Picture::File(second_path)) = second_package.icon else {
+            panic!(
+                "expected a Picture::File icon, got {:?}",
+                second_package.icon
+            );
+        };
+        assert_ne!(
+            path, second_path,
+            "the same file at two different indices must cache to two different files"
+        );
     }
 
     /// The id names the hive as well as the key, because the same key name
@@ -806,7 +972,8 @@ mod tests {
     #[test]
     fn a_package_carries_what_the_page_draws() {
         let entries = fixture();
-        let p = to_package(named(&entries, "7-Zip 26.00 (x64)"));
+        let cache = tempdir();
+        let p = to_package(named(&entries, "7-Zip 26.00 (x64)"), cache.path());
         assert_eq!(p.source, crate::model::SourceKind::Arp);
         assert_eq!(p.name, "7-Zip 26.00 (x64)");
         assert_eq!(p.installed_version.as_deref(), Some("26.00"));
@@ -832,7 +999,11 @@ mod tests {
                     .is_some_and(|n| n.contains("Arduino"))
             })
             .expect("the fixture has one");
-        assert_eq!(to_package(driver).kind, crate::model::PackageKind::Driver);
+        let cache = tempdir();
+        assert_eq!(
+            to_package(driver, cache.path()).kind,
+            crate::model::PackageKind::Driver
+        );
     }
 
     /// The quiet string is preferred wherever there is one: nothing opens
@@ -936,19 +1107,61 @@ mod tests {
     #[test]
     fn only_a_machine_wide_entry_needs_elevation() {
         let entries = fixture();
-        let machine = removal_step(named(&entries, "Obsidian")).expect("a step");
-        let user = removal_step(named(&entries, "A per-user application")).expect("a step");
+        let machine = removal_step(named(&entries, "Obsidian"), MSIEXEC).expect("a step");
+        let user =
+            removal_step(named(&entries, "A per-user application"), MSIEXEC).expect("a step");
         assert!(machine.needs_root);
         assert!(!user.needs_root);
         assert_eq!(machine.source, crate::model::SourceKind::Arp);
         assert_eq!(machine.title, "Removing Obsidian");
     }
 
+    /// The path the caller resolves and hands in, so the fixture tests stay
+    /// a pure function of the fixture on both platforms.
+    const MSIEXEC: &str = r"C:\Windows\System32\msiexec.exe";
+
+    /// `msiexec_program` itself, which the fixture tests deliberately do not
+    /// exercise: they are handed a path rather than asking for one. This is
+    /// the only test that would catch a length or slicing mistake in the
+    /// `unsafe` block, or the hard-coded fallback being taken on a machine
+    /// where `GetSystemDirectoryW` answers perfectly well.
+    #[cfg(windows)]
+    #[test]
+    fn msiexec_is_a_real_program_in_the_system_directory() {
+        let program = msiexec_program();
+        let path = std::path::Path::new(&program);
+        assert!(path.is_absolute(), "{program}");
+        assert_eq!(
+            path.file_name().map(|n| n.to_string_lossy().to_lowercase()),
+            Some("msiexec.exe".to_string()),
+            "{program}"
+        );
+        assert!(
+            path.is_file(),
+            "{program} is not a file, so the system directory was read wrongly"
+        );
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let parent = path
+            .parent()
+            .expect("a full path has a parent")
+            .to_string_lossy()
+            .to_lowercase();
+        assert!(
+            parent.starts_with(&root.to_lowercase()),
+            "{program} is not under {root}"
+        );
+    }
+
     #[test]
     fn an_msi_step_runs_msiexec_quietly() {
         let entries = fixture();
-        let step = removal_step(named(&entries, "A per-user application")).expect("a step");
-        assert_eq!(step.command.program, "msiexec.exe");
+        let step =
+            removal_step(named(&entries, "A per-user application"), MSIEXEC).expect("a step");
+        assert_eq!(step.command.program, MSIEXEC);
+        assert_eq!(
+            windows_file_stem(&step.command.program).to_lowercase(),
+            "msiexec"
+        );
         assert_eq!(
             step.command.args,
             [
@@ -960,8 +1173,20 @@ mod tests {
         );
     }
 
-    fn source_from_fixture() -> Arp {
-        Arp { entries: fixture() }
+    /// Some of the fixture's `DisplayIcon` paths are real files on the
+    /// machine the fixture was recorded from (Obsidian's and the Arduino
+    /// driver's, at least), so `installed()` and `details()` below may really
+    /// extract an icon here and write it into the returned cache directory,
+    /// and not in CI, where none of those paths exist. No test in this group
+    /// asserts on `Package::icon`, so no result depends on which machine runs
+    /// it; only the side effect (a written file) and the runtime differ. The
+    /// caller keeps the returned guard alive for as long as `Arp` is used, so
+    /// the directory is removed when the test is done with it rather than
+    /// leaked.
+    fn source_from_fixture() -> (Arp, tempfile::TempDir) {
+        let cache = tempdir();
+        let arp = Arp::with_cache(fixture(), cache.path().to_path_buf());
+        (arp, cache)
     }
 
     /// The registry has no notion of a newer version, so this source never
@@ -969,14 +1194,14 @@ mod tests {
     /// would be inventing something.
     #[test]
     fn it_neither_searches_nor_updates() {
-        let arp = source_from_fixture();
+        let (arp, _cache) = source_from_fixture();
         assert!(arp.search(&Query::new("obsidian")).unwrap().is_empty());
         assert!(arp.updates().unwrap().is_empty());
     }
 
     #[test]
     fn installed_is_the_filtered_entries_as_packages() {
-        let arp = source_from_fixture();
+        let (arp, _cache) = source_from_fixture();
         let installed = arp.installed().unwrap();
         assert_eq!(installed.len(), 5);
         assert!(installed.iter().all(|p| p.installed));
@@ -989,7 +1214,7 @@ mod tests {
 
     #[test]
     fn details_answers_for_an_id_it_has_and_says_so_for_one_it_does_not() {
-        let arp = source_from_fixture();
+        let (arp, _cache) = source_from_fixture();
         assert_eq!(arp.details("HKLM\\Obsidian").unwrap().name, "Obsidian");
         let e = arp.details("HKLM\\Nothing").unwrap_err();
         assert!(e.message.contains("HKLM\\Nothing"), "{}", e.message);
@@ -999,7 +1224,7 @@ mod tests {
     /// has nothing to do, which is an empty list rather than an error.
     #[test]
     fn it_plans_a_removal_and_nothing_else() {
-        let arp = source_from_fixture();
+        let (arp, _cache) = source_from_fixture();
         let reference = crate::model::PackageRef {
             source: SourceKind::Arp,
             id: "HKLM\\Obsidian".to_string(),
@@ -1022,7 +1247,7 @@ mod tests {
     /// remove would report that it worked.
     #[test]
     fn planning_a_removal_for_an_id_it_does_not_have_says_so() {
-        let arp = source_from_fixture();
+        let (arp, _cache) = source_from_fixture();
         let e = arp
             .plan(&Op::Remove {
                 package: crate::model::PackageRef {
@@ -1035,11 +1260,62 @@ mod tests {
         assert!(e.message.contains("nothing to remove"), "{}", e.message);
     }
 
+    /// Ties `Arp::plan` to `allow`'s closed list, the same way the winget
+    /// coverage test in `sources::windows::winget` ties `plan_with` to it.
+    /// `Arp`'s `entries` field is `pub(crate)`, so a fixture builds one
+    /// without the registry, and this drives every fixture application's
+    /// removal through the real `plan` and checks whatever comes back with
+    /// `needs_root` against an `Allowed` built the way the runner builds it
+    /// (`with_registered_removals`), except sourced from the fixture rather
+    /// than the live registry so the test does not depend on what is
+    /// installed on the machine running it.
+    ///
+    /// `Op` has other variants, but `Arp::plan` answers all of them with an
+    /// empty list; only `Op::Remove` is exercised here for that reason, the
+    /// same as `it_plans_a_removal_and_nothing_else` above.
+    #[cfg(windows)]
+    #[test]
+    fn every_removal_plan_step_that_needs_root_passes_the_closed_list() {
+        use crate::transaction::allow::{self, Allowed};
+
+        let (arp, _cache) = source_from_fixture();
+        let msiexec = msiexec_program();
+        let removals: Vec<Command> = arp
+            .entries
+            .iter()
+            .filter(|e| e.hive.needs_elevation())
+            .filter_map(|e| removal_step(e, &msiexec))
+            .map(|step| step.command)
+            .collect();
+        let allowed = Allowed {
+            removals,
+            ..Allowed::system()
+        };
+
+        for entry in arp.applications() {
+            let package = crate::model::PackageRef {
+                source: SourceKind::Arp,
+                id: package_id(entry),
+            };
+            for step in arp.plan(&Op::Remove { package }).unwrap_or_default() {
+                if step.needs_root {
+                    assert_eq!(
+                        allow::check_step(&step, &allowed),
+                        Ok(()),
+                        "removing {:?} produced a step the closed list refuses: {:?}",
+                        entry.display_name,
+                        step.command
+                    );
+                }
+            }
+        }
+    }
+
     /// The source is always there: the registry is part of Windows. It says
     /// how many applications it found, for the status bar.
     #[test]
     fn it_is_always_available_and_says_how_much_it_found() {
-        let arp = source_from_fixture();
+        let (arp, _cache) = source_from_fixture();
         let status = arp.status();
         assert!(status.available);
         assert_eq!(status.reason, None);

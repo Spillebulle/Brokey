@@ -233,12 +233,28 @@ img {
   border-bottom: var(--hairline) solid var(--line);
 }
 
+/* The guide's mark is a plain accent square, and `--mark` still says so.
+   Brokey draws the parcel inside it, because the application icon is that
+   parcel on that square and the bar should show what the taskbar shows. */
 .bk-mark {
   flex: none;
+  display: grid;
+  place-items: center;
   width: var(--mark);
   height: var(--mark);
   border-radius: var(--r-tight);
   background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* The same 0.70 of the tile's side that tools/make-art.py draws the glyph
+   at, as a share so it tracks `--mark` at either size rather than needing a
+   second number. The stroke is heavier than a row icon's for the reason
+   ICON_MARK exists: at ten pixels a 1.5 stroke is a smudge. */
+.bk-mark > svg {
+  width: 70%;
+  height: 70%;
+  stroke-width: 2.5;
 }
 
 .bk-appname {

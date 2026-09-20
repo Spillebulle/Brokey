@@ -6,6 +6,7 @@
 //! tracks the tool and `searchable` tracks the catalogue.
 
 pub mod index;
+pub mod manifest;
 pub mod query;
 pub mod version;
 
@@ -17,10 +18,14 @@ use std::sync::Arc;
 /// A catalogue row as the page's `Package`.
 ///
 /// The index is a search index: it has an id, a name, a moniker, a version
-/// and a publisher, and nothing else. Every other field stays `None` rather
-/// than being guessed at, which is what `Package` already expects of a source
-/// that does not know them. Descriptions, homepages and icons arrive with the
-/// metadata ladder in a later plan.
+/// and a publisher key, and nothing else. Every other field stays `None`
+/// rather than being guessed at, which is what `Package` already expects of a
+/// source that does not know them. This is what a search result is, and a
+/// search never fetches anything per package. [`Source::details`] asks for
+/// one package and can afford one request, so it fills the summary, the
+/// description, the homepage, the licence, the publisher and the categories
+/// from the locale manifest through [`manifest::describe`], which also
+/// appends two rows to the facts column. Icons arrive with a later plan.
 pub fn to_package(row: &query::Row) -> crate::model::Package {
     let mut facts = Vec::new();
     facts.push(("Package id".to_string(), row.id.clone()));
@@ -43,11 +48,13 @@ pub fn to_package(row: &query::Row) -> crate::model::Package {
         licence: None,
         homepage: None,
         // The index stores only `norm_publishers2`, which is a join key and not
-        // a name: `igorpavlov`, `pythonsoftwarefoundation`. There is no column
-        // holding the publisher as a person would recognise it, so this stays
-        // empty rather than showing a fact nobody wrote. When Add/Remove
-        // Programs knows the same application, its edition carries the real
-        // name and the grouped app shows that.
+        // a name: `igorpavlov`, `pythonsoftwarefoundation`. It has no column
+        // holding the publisher as a person would recognise it, so a row from
+        // the index leaves this empty rather than showing a fact nobody wrote.
+        // `details` fills it from the locale manifest, which carries
+        // `Publisher: The GIMP Team` in plain text. When Add/Remove Programs
+        // knows the same application, its edition carries the real name too
+        // and the grouped app shows that.
         developer: None,
         updated: None,
         download_size: None,
@@ -62,6 +69,37 @@ pub fn to_package(row: &query::Row) -> crate::model::Package {
         sandboxed: false,
         facts,
     }
+}
+
+/// How long a locale manifest is trusted before it is fetched again. The
+/// same length as [`index::MAX_AGE`], for the same reason: this is Brokey's
+/// own snapshot of somebody else's catalogue, not a live query, and a
+/// description does not change between two openings of a detail page.
+pub const MANIFEST_MAX_AGE: std::time::Duration = index::MAX_AGE;
+
+/// A catalogue row as the detail page's `Package`: [`to_package`], and then
+/// whatever the locale manifest adds to it.
+///
+/// `fetch` is how the manifest is read. [`Source::details`] passes the cached
+/// HTTP client; a test passes a closure, which is what lets the failing path
+/// below be exercised without a network.
+///
+/// A fetch that fails, an id whose manifest has no derivable address, and a
+/// manifest that says nothing all leave the package exactly as the index
+/// described it. A missing description is not an error the page should show:
+/// the package is still installable and everything the catalogue knows about
+/// it is still there.
+fn described_package(
+    row: &query::Row,
+    fetch: &dyn Fn(&str) -> Result<String>,
+) -> crate::model::Package {
+    let mut package = to_package(row);
+    if let Some(url) = manifest::manifest_url(&row.id, &row.latest_version)
+        && let Ok(text) = fetch(&url)
+    {
+        manifest::describe(&mut package, &manifest::parse(&text));
+    }
+    package
 }
 
 /// Where the App Installer bundle and its hash come from. The release is
@@ -210,7 +248,13 @@ pub enum OpKind {
 /// terminal: a prompt would hang the plan rather than ask anybody anything.
 /// `--exact` because the id is exact and a near match would install something
 /// the user did not choose.
-pub fn operation_step(kind: OpKind, id: &str) -> Step {
+///
+/// `program` is the full path to `winget.exe`, resolved by the caller. It is
+/// a parameter rather than a lookup in here so that this stays a pure
+/// function of its arguments, and so that resolution happens once, in the
+/// one process whose environment is the right one to resolve it in. See
+/// [`winget_program`].
+pub fn operation_step(kind: OpKind, id: &str, program: &str) -> Step {
     let (verb, title) = match kind {
         OpKind::Install => ("install", format!("Installing {id}")),
         OpKind::Update => ("upgrade", format!("Updating {id}")),
@@ -233,7 +277,7 @@ pub fn operation_step(kind: OpKind, id: &str) -> Step {
         source: SourceKind::Winget,
         title,
         command: Command {
-            program: "winget.exe".to_string(),
+            program: program.to_string(),
             args,
             env: Vec::new(),
             cwd: None,
@@ -248,10 +292,90 @@ pub fn operation_step(kind: OpKind, id: &str) -> Step {
     }
 }
 
+/// The one step that updates everything winget can, which is a different
+/// command from any single package's: `--all` in place of an id.
+///
+/// It lives here beside [`operation_step`] and takes its program the same
+/// way, so the closed list can rebuild it and compare the whole command
+/// rather than carrying a second copy of this argument list that could
+/// drift away from this one.
+pub fn update_all_step(program: &str) -> Step {
+    Step {
+        source: SourceKind::Winget,
+        title: "Updating everything winget can".to_string(),
+        command: Command {
+            program: program.to_string(),
+            args: vec![
+                "upgrade".to_string(),
+                "--all".to_string(),
+                "--silent".to_string(),
+                "--disable-interactivity".to_string(),
+                "--accept-source-agreements".to_string(),
+                "--accept-package-agreements".to_string(),
+            ],
+            env: Vec::new(),
+            cwd: None,
+        },
+        needs_root: true,
+        weight: 10,
+    }
+}
+
 /// Where `winget.exe` is, if it is anywhere.
 #[cfg(windows)]
 pub fn winget_exe() -> Option<std::path::PathBuf> {
     crate::system::windows::which("winget")
+}
+
+/// The program a winget step names: the full path to the `winget.exe` that
+/// will really run.
+///
+/// Resolution happens here, in the unelevated process, and never in the
+/// helper. `which` reads `PATH` from the calling process's own environment,
+/// and winget is reached through a per-user app execution alias in
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps`. When elevation is answered with
+/// an administrator's credentials the elevated helper has that
+/// administrator's profile, so a bare name looked up there would search the
+/// wrong profile and find nothing, or something else. The helper therefore
+/// searches nothing at all and refuses a program that is not a full path;
+/// this is the end that does the looking, because this is the end whose
+/// environment is the user's.
+///
+/// What `which` finds is the alias and not the program. The alias is a
+/// zero-length reparse point in a folder the invoking user has full control
+/// of, and `CreateProcess` follows it to an executable under
+/// `C:\Program Files\WindowsApps`, so the file a step should name is the
+/// target and not the alias:
+/// [`resolve_app_execution_alias`](crate::system::windows::resolve_app_execution_alias)
+/// is what turns one into the other. Elevating the alias would elevate
+/// whatever the user last put there, which is why the closed list refuses
+/// it; elevating the target is the thing that was meant all along. When the
+/// path is not an alias, or the alias cannot be read, what `which` found is
+/// handed over unchanged and the closed list judges that instead.
+///
+/// The path is otherwise passed on as it stands and is not canonicalised.
+///
+/// When winget is not installed there is nothing to resolve and the bare
+/// name stands in. `status()` already reports the source unavailable in
+/// that case, so no plan should reach here; if one does, the helper refuses
+/// it by the absolute-path rule rather than searching for it.
+#[cfg(windows)]
+pub fn winget_program() -> String {
+    winget_exe()
+        .map(|path| {
+            crate::system::windows::resolve_app_execution_alias(&path)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_else(|| "winget.exe".to_string())
+}
+
+/// There is no `winget.exe` to find off Windows, and `sources::all` never
+/// selects this source there, so nothing resolves: the bare name is what a
+/// step would carry, and the Linux closed list refuses it.
+#[cfg(not(windows))]
+pub fn winget_program() -> String {
+    "winget.exe".to_string()
 }
 
 const BY_CODE_SQL: &str = "
@@ -456,49 +580,45 @@ impl Source for Winget {
                 format!("{id} is not in the winget catalogue. The catalogue is a daily snapshot; a very new package may not be in it yet."),
             )
         })?;
-        Ok(to_package(&row))
+        Ok(described_package(&row, &|url| {
+            self.client.get_text_cached(url, MANIFEST_MAX_AGE)
+        }))
     }
 
     fn plan(&self, op: &crate::model::Op) -> Result<Vec<Step>> {
+        // Resolved once, here, where the environment is the user's own. The
+        // elevated helper is handed the result and searches nothing.
+        let program = winget_program();
+        self.plan_with(op, &program)
+    }
+}
+
+impl Winget {
+    /// [`Source::plan`]'s body, with the resolved path to `winget.exe` taken
+    /// as a parameter rather than looked up here. That is what lets a test
+    /// drive every `Op` variant against a fixed path without winget being
+    /// installed on the machine running the test; `plan` itself still
+    /// resolves the program the normal way and is not otherwise changed.
+    fn plan_with(&self, op: &crate::model::Op, program: &str) -> Result<Vec<Step>> {
         use crate::model::Op;
         let step = match op {
             Op::Install { package } if package.source == SourceKind::Winget => {
-                operation_step(OpKind::Install, &package.id)
+                operation_step(OpKind::Install, &package.id, program)
             }
             Op::Update { package } if package.source == SourceKind::Winget => {
-                operation_step(OpKind::Update, &package.id)
+                operation_step(OpKind::Update, &package.id, program)
             }
             Op::Remove { package } if package.source == SourceKind::Winget => {
-                operation_step(OpKind::Remove, &package.id)
+                operation_step(OpKind::Remove, &package.id, program)
             }
-            Op::UpdateAll { source } if *source == SourceKind::Winget => Step {
-                source: SourceKind::Winget,
-                title: "Updating everything winget can".to_string(),
-                command: Command {
-                    program: "winget.exe".to_string(),
-                    args: vec![
-                        "upgrade".to_string(),
-                        "--all".to_string(),
-                        "--silent".to_string(),
-                        "--disable-interactivity".to_string(),
-                        "--accept-source-agreements".to_string(),
-                        "--accept-package-agreements".to_string(),
-                    ],
-                    env: Vec::new(),
-                    cwd: None,
-                },
-                needs_root: true,
-                weight: 10,
-            },
+            Op::UpdateAll { source } if *source == SourceKind::Winget => update_all_step(program),
             // Refresh is Brokey's own catalogue, not winget's, and `catalogue`
             // fetches it when it is stale. There is nothing to run.
             _ => return Ok(Vec::new()),
         };
         Ok(vec![step])
     }
-}
 
-impl Winget {
     /// The catalogue's package count, read from whatever is already on disk.
     /// Never fetches: `status()` runs before every search, installed list,
     /// updates run and plan, and again whenever the page redraws its source
@@ -695,25 +815,60 @@ mod tests {
         assert!(!is_sha256("aa' -and $false -and 'bb"));
     }
 
+    /// A full path to winget, of the shape the caller hands over. It is not
+    /// what `winget_program` answers on a real machine any more: that is
+    /// the executable the App Execution Alias names, under
+    /// `C:\Program Files\WindowsApps`. Nothing below reads the disk, so the
+    /// shape is all these tests need.
+    const WINGET: &str = r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\winget.EXE";
+
     /// Every operation is non-interactive, because the helper has no terminal
     /// and a prompt would hang the plan rather than ask anyone anything.
     #[test]
     fn every_operation_is_silent_and_pre_agreed() {
         for kind in [OpKind::Install, OpKind::Update, OpKind::Remove] {
-            let s = operation_step(kind, "Valve.Steam");
+            let s = operation_step(kind, "Valve.Steam", WINGET);
             let args = s.command.args.join(" ");
             assert!(args.contains("--silent"), "{args}");
             assert!(args.contains("--disable-interactivity"), "{args}");
             assert!(args.contains("--accept-source-agreements"), "{args}");
-            assert_eq!(s.command.program, "winget.exe");
+            assert_eq!(s.command.program, WINGET);
         }
+    }
+
+    /// A step carries the full path its caller resolved, not a bare name,
+    /// and the closed list still recognises it. The helper searches for
+    /// nothing, so a bare name would be refused there; this is the end that
+    /// makes the path concrete.
+    ///
+    /// Windows only, because it asks `std::path` Windows questions. Off
+    /// Windows a backslash is an ordinary character, `is_absolute` is false
+    /// and `file_name` answers the whole string, so both assertions would
+    /// fail on the machine most of this project's tests run on. The rest of
+    /// this module stays ungated so the pure halves keep being tested there.
+    #[cfg(windows)]
+    #[test]
+    fn a_step_carries_the_resolved_path() {
+        let s = operation_step(OpKind::Install, "Valve.Steam", WINGET);
+        assert!(
+            std::path::Path::new(&s.command.program).is_absolute(),
+            "{}",
+            s.command.program
+        );
+        assert_eq!(
+            std::path::Path::new(&s.command.program)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase()),
+            Some("winget.exe".to_string()),
+            "the closed list compares the file name, so this must still be winget"
+        );
     }
 
     /// An install names the package exactly. A near match would install
     /// something the user did not choose.
     #[test]
     fn an_install_is_exact_and_names_the_id() {
-        let s = operation_step(OpKind::Install, "Valve.Steam");
+        let s = operation_step(OpKind::Install, "Valve.Steam", WINGET);
         assert_eq!(s.command.args[0], "install");
         assert!(s.command.args.contains(&"--exact".to_string()));
         assert!(s.command.args.contains(&"Valve.Steam".to_string()));
@@ -777,12 +932,113 @@ mod tests {
         );
     }
 
+    fn gimp_row() -> query::Row {
+        query::Row {
+            id: "GIMP.GIMP".to_string(),
+            name: "GIMP".to_string(),
+            moniker: Some("gimp".to_string()),
+            latest_version: "3.2.4".to_string(),
+            publisher: Some("thegimpteam".to_string()),
+        }
+    }
+
+    fn gimp_manifest() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/winget/gimp.locale.yaml");
+        std::fs::read_to_string(&path).expect("the fixture is checked in")
+    }
+
+    /// The detail page gets what the index never had. The address the fetch
+    /// is asked for is checked too, because a package's manifest is the one
+    /// thing here that could quietly become some other package's.
+    #[test]
+    fn a_detail_page_takes_what_the_manifest_says() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let p = described_package(&gimp_row(), &|url| {
+            asked.borrow_mut().push(url.to_string());
+            Ok(gimp_manifest())
+        });
+        assert_eq!(
+            asked.into_inner(),
+            [
+                "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/g/GIMP/GIMP/3.2.4/GIMP.GIMP.locale.en-US.yaml"
+            ]
+        );
+        assert!(
+            p.summary
+                .is_some_and(|s| s.starts_with("GIMP is an acronym"))
+        );
+        assert_eq!(p.licence.as_deref(), Some("GPLv3"));
+        assert_eq!(
+            p.homepage.as_deref(),
+            Some("https://www.gimp.org/downloads/")
+        );
+        assert_eq!(p.developer.as_deref(), Some("The GIMP Team"));
+        assert!(p.categories.contains(&"image-editor".to_string()));
+        // What the index already knew is still there.
+        assert_eq!(p.version.as_deref(), Some("3.2.4"));
+        assert!(
+            p.facts
+                .contains(&("Moniker".to_string(), "gimp".to_string()))
+        );
+    }
+
+    /// A machine that is offline, a manifest that was never written, a
+    /// GitHub that answers 404: the detail page still draws everything the
+    /// catalogue knows. A missing description is not an error to show.
+    ///
+    /// The error below is shaped like a manifest on purpose. What a failed
+    /// fetch carries is a sentence for the user, and reading it as the file
+    /// that was not fetched would put that sentence on the detail page as
+    /// though the publisher had written it.
+    #[test]
+    fn a_manifest_that_cannot_be_fetched_leaves_the_package_as_the_index_had_it() {
+        let row = gimp_row();
+        let p = described_package(&row, &|_| {
+            Err(crate::Error::new(
+                "License: could not reach raw.githubusercontent.com".to_string(),
+            ))
+        });
+        assert_eq!(p, to_package(&row));
+        assert_eq!(p.description, None);
+        assert_eq!(p.homepage, None);
+    }
+
+    /// An id with no derivable address costs no request at all, rather than
+    /// one that is certain to fail.
+    #[test]
+    fn an_id_with_no_derivable_address_is_never_fetched() {
+        let mut row = gimp_row();
+        row.id = "nodot".to_string();
+        let asked = std::cell::Cell::new(0);
+        let p = described_package(&row, &|_| {
+            asked.set(asked.get() + 1);
+            Ok(gimp_manifest())
+        });
+        assert_eq!(asked.get(), 0);
+        assert_eq!(p, to_package(&row));
+    }
+
+    /// Search builds its rows with `to_package` and nothing else, so a page
+    /// of twenty results costs no manifest fetches. This pins the half of
+    /// that which is a fact about `to_package` rather than about the caller.
+    #[test]
+    fn a_search_row_carries_no_manifest_fields() {
+        let p = to_package(&gimp_row());
+        assert_eq!(p.summary, None);
+        assert_eq!(p.description, None);
+        assert_eq!(p.homepage, None);
+        assert_eq!(p.licence, None);
+        assert_eq!(p.developer, None);
+        assert!(p.categories.is_empty());
+    }
+
     /// Uninstall takes no package agreement. Nothing is being agreed to, and
     /// `winget uninstall` does not accept the flag at all, so passing it would
     /// fail the step rather than be ignored. Checked against winget 1.30.140.
     #[test]
     fn a_removal_does_not_accept_a_package_agreement() {
-        let s = operation_step(OpKind::Remove, "Valve.Steam");
+        let s = operation_step(OpKind::Remove, "Valve.Steam", WINGET);
         assert_eq!(s.command.args[0], "uninstall");
         assert!(
             !s.command
@@ -810,7 +1066,10 @@ mod tests {
     }
 
     /// A plan for an operation this source has nothing to do with is empty, not
-    /// an error. The store asks every source about every operation.
+    /// an error. The store never asks for one: `transaction::plan`'s `Gatherer`
+    /// looks the operation's own source up and asks that source alone. What
+    /// this pins is the trait's contract, which a caller holding a `dyn Source`
+    /// relies on.
     #[test]
     fn an_operation_for_another_source_plans_nothing() {
         let w = Winget::new(crate::http::Client::shared());
@@ -834,5 +1093,85 @@ mod tests {
             .unwrap();
         assert_eq!(steps.len(), 1);
         assert!(steps[0].command.args.contains(&"--all".to_string()));
+    }
+
+    /// Ties `plan_with` to `allow`'s closed list, so a future producer added
+    /// to its match is caught here rather than by someone remembering to
+    /// grep for every place that builds a `winget.exe` command.
+    ///
+    /// Every `Op` variant is driven through, with the match below written
+    /// with no wildcard arm: a variant added to `Op` later makes this fail
+    /// to compile, which is what forces whoever adds it to also decide
+    /// whether the step it produces needs a place in `ops` and, if the step
+    /// needs root, that `check_step` actually admits it. Every step that
+    /// comes back with `needs_root == true` is checked against an `Allowed`
+    /// built the way the runner builds it, `with_registered_removals`,
+    /// because that is what stands between the step and Administrator in
+    /// the real path.
+    ///
+    /// `plan_with` takes the program as a parameter for exactly this: `plan`
+    /// itself resolves `winget.exe` by searching the machine and then
+    /// resolving the App Execution Alias it finds, which would make this
+    /// test depend on winget being installed. The fixed path below is only
+    /// the shape of a resolved program, and no such file needs to exist for
+    /// this test: `plan_with` never touches the disk, and the gate admits a
+    /// name under `C:\Users` that nothing unprivileged could create.
+    #[cfg(windows)]
+    #[test]
+    fn every_step_plan_with_returns_passes_the_closed_list() {
+        use crate::model::{Op, PackageRef};
+        use crate::transaction::allow::{self, Allowed};
+
+        const PROGRAM: &str = r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\winget.exe";
+        let package = PackageRef {
+            source: SourceKind::Winget,
+            id: "Valve.Steam".to_string(),
+        };
+        let ops = [
+            Op::Install {
+                package: package.clone(),
+            },
+            Op::Remove {
+                package: package.clone(),
+            },
+            Op::Update {
+                package: package.clone(),
+            },
+            Op::UpdateAll {
+                source: SourceKind::Winget,
+            },
+            Op::Refresh {
+                source: SourceKind::Winget,
+            },
+            Op::Setup {
+                source: SourceKind::Winget,
+            },
+        ];
+
+        let w = Winget::new(crate::http::Client::shared());
+        let allowed = Allowed::with_registered_removals();
+        for op in &ops {
+            // No wildcard: every current variant is named, so a variant
+            // added to `Op` without a matching entry above fails to
+            // compile here.
+            match op {
+                Op::Install { .. }
+                | Op::Remove { .. }
+                | Op::Update { .. }
+                | Op::UpdateAll { .. }
+                | Op::Refresh { .. }
+                | Op::Setup { .. } => {}
+            }
+            for step in w.plan_with(op, PROGRAM).unwrap() {
+                if step.needs_root {
+                    assert_eq!(
+                        allow::check_step(&step, &allowed),
+                        Ok(()),
+                        "plan_with({op:?}) produced a step the closed list refuses: {:?}",
+                        step.command
+                    );
+                }
+            }
+        }
     }
 }

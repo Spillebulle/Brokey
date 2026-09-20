@@ -65,6 +65,11 @@ pub fn run(args: &[String]) -> i32 {
             println!("{USAGE}");
             0
         }
+        "--version" | "-V" => {
+            println!("brokey {}", env!("CARGO_PKG_VERSION"));
+            0
+        }
+        "--install" => install(rest),
         "search" => search(rest),
         "sources" => sources(rest),
         "updates" => updates(rest),
@@ -74,6 +79,31 @@ pub fn run(args: &[String]) -> i32 {
         "self-update" => self_update(rest),
         "open" => open(rest),
         other => usage_error(&format!("{other} is not a command.")),
+    }
+}
+
+/// `--install`: the setup executable installs the Brokey it carries.
+///
+/// Deliberately not in [`USAGE`]. It belongs to `brokey-setup-<version>-<architecture>.exe`
+/// and does nothing for the `brokey.exe` a user has on their path, so
+/// listing it would offer everybody a command that answers "this copy
+/// carries no installer". It is written down in `setup/payload.rs`, which is
+/// where somebody looking for it would be.
+fn install(args: &[String]) -> i32 {
+    if let Some(code) = no_arguments("--install", args) {
+        return code;
+    }
+    #[cfg(windows)]
+    {
+        crate::setup::install()
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!(
+            "--install belongs to the Windows setup executable, and this is the Linux build. \
+             Install Brokey here from the AppImage or from the package your distribution has."
+        );
+        2
     }
 }
 
@@ -1194,8 +1224,9 @@ Note: Flatpak is not installed. It is installed and Flathub is added.
         // answers with nothing; they still complete.
         assert_eq!(run(&args(&["sources"])), 0);
         // pacman is always a source on Linux, whether or not it is
-        // installed; on Windows there is no source at all until Task 8,
-        // so planning against one is refused instead.
+        // installed. Windows has its own sources (Add/Remove Programs,
+        // winget), but pacman itself is Linux-only by design and never one
+        // of them, so planning against it is refused instead.
         #[cfg(unix)]
         assert_eq!(run(&args(&["plan", "install", "pacman:steam"])), 0);
         #[cfg(windows)]

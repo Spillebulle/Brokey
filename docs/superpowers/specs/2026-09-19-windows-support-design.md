@@ -35,7 +35,7 @@ real backend for the first time rather than against `mock.ts`.
 | Shape | One workspace, one library. `sources/windows/` beside `sources/linux/`, selected by `#[cfg]`. No second repository, no fork |
 | Targets | Linux x86-64 and ARM64, **and Windows x86-64 and ARM64**. Supersedes the "Targets" row of `docs/architecture.md` |
 | Sources | winget, Add/Remove Programs, Chocolatey, Scoop, Microsoft Store and MSIX, GitHub releases, Windows optional features |
-| Privilege | The window never elevates. `brokey-helper.exe` is elevated per plan through `ShellExecuteEx` with `runas`, and the Plan and its Events travel over a named pipe because that call cannot redirect standard streams |
+| Privilege | The window never elevates. `brokey-helper.exe` is elevated per plan through `ShellExecuteEx` with `runas`, and the Plan and its Events travel over two named pipes, one per direction, because that call cannot redirect standard streams |
 | Scope preference | Per-user wherever a source offers it, so the common install raises no prompt at all. Elevation only when the package forces it, and the confirm dialog says which package did |
 | Package databases | Read directly, in pure Rust, as on Linux: winget's pre-indexed SQLite index, Chocolatey's `.nuspec` files, Scoop's bucket JSON, the uninstall registry. No shelling out to a tool to ask it what it knows |
 | Metadata | No AppStream on Windows. A ladder ending in a Flathub AppStream lookup matched by name, carrying `confidence < 1` and labelled in the interface |
@@ -244,12 +244,21 @@ Event per line. What changes is only how it is started and how it is spoken to.
 
 Elevation on Windows is `ShellExecuteEx` with the `runas` verb. That call
 **cannot redirect standard streams**, and `CreateProcess`, which can, cannot
-elevate. So before elevating, the unelevated side creates a named pipe whose
-DACL admits the current user and the Administrators group and nobody else,
-passes the pipe's name as a command-line argument, and waits for the helper to
-connect. The Plan goes down it and Events come back up it. From
-`runner.rs`'s point of view the contract is unchanged: it holds a writer and a
-line reader, and `CANCEL_LINE` still stops the helper between steps.
+elevate. So before elevating, the unelevated side creates two named pipes
+whose DACL admits the current user and the Administrators group and nobody
+else, passes the base name they are both derived from as a command-line
+argument, and waits for the helper to connect to both. The Plan goes down one
+and Events come back up the other. From `runner.rs`'s point of view the
+contract is unchanged: it holds a writer and a line reader, and `CANCEL_LINE`
+still stops the helper between steps.
+
+One pipe per direction rather than one duplex pipe, because a Windows handle
+created without `FILE_FLAG_OVERLAPPED` is synchronous and the I/O manager
+serialises every operation on such a file object, `try_clone` included: the
+runner reads Events from the moment the helper starts, so on one pipe the
+write of the Plan would queue behind a read that cannot finish until the Plan
+has arrived, and both sides would wait for ever. This is what Linux already
+has in `pkexec`'s stdin and stdout.
 
 The running-state copy is still Linux-worded and has to change with this
 section. `FlowDialog.tsx` already says Administrator on Windows, because a
@@ -483,6 +492,131 @@ Three additions beyond ports of existing tests:
 
 CI gains a `windows-latest` job running the same three commands. Live tests
 stay `#[ignore]` and named `live_*`.
+
+## Metadata and icons, measured
+
+**Added 2026-09-20, after the installer shipped.** The section above was
+written from documentation. Everything below was measured on a real Windows 11
+machine with 159 Add/Remove Programs applications and 85 Appx packages, and it
+supersedes the ladder above where the two disagree.
+
+### Why no icon appears today, which is two faults and not one
+
+`arp.rs` already reads `DisplayIcon` and already returns a `Picture::File`.
+Nothing renders. Both reasons had to be found before either mattered.
+
+The first is the asset protocol scope in `crates/brokey/tauri.conf.json`. It
+lists ten globs, nine of them Linux paths and the tenth `$CACHE/**`. A picture
+at `C:\Program Files\...` is outside every one of them, so the protocol
+refuses the request before any decoding is attempted. This is not a bug to fix
+by widening the scope: a scope covering `C:\Program Files\**` would let the
+page read any file it could name under it. `$CACHE/**` is already in the list,
+and that is where extracted icons belong.
+
+The second is that most of those paths are not pictures. Of 112 entries
+carrying a `DisplayIcon`, 83 point at an `.exe` and 4 at a `.dll`; 25 point at
+an `.ico`. A WebView renders the `.ico` and can do nothing with the other 87.
+
+A third fault sits in the parser. 52 of the 112 values carry a resource index,
+and `icon()` discards it, on a comment saying the page asks the shell for the
+picture. Nothing asks the shell for anything. Both forms occur on the
+reference machine: `OneDrive.App.exe",1` is the second icon group in order,
+and `OneDriveSetup.exe,-101` is resource id 101. Dropping the index gives the
+wrong icon for nearly half the entries that have one.
+
+### Extraction is byte-shuffling, and therefore testable on Linux
+
+An icon lives in a PE as one `RT_GROUP_ICON` resource naming several `RT_ICON`
+resources. An `.ico` file on disk is the same directory in a slightly wider
+form. Turning one into the other copies the image bytes untouched and rewrites
+a 14-byte directory entry into a 16-byte one. No image is decoded, no image is
+encoded, and no Windows API is called: the resource directory is walked from
+the file's own bytes.
+
+That settles the platform question the same way `arp`'s filter did. The
+extractor is a pure function from a byte slice and an index to an `.ico` byte
+vector, so it is tested against checked-in fixtures on both platforms, and CI
+compiles and runs it on Linux.
+
+Verified against four real binaries before this was written: a 64-bit PE with
+a positive index, a 32-bit PE, a negative resource id, and a group mixing
+PNG-compressed 256×256 frames with 32-bit DIB frames. All four produced files
+that load as images.
+
+**Brokey therefore writes an `.ico`, not a PNG.** WebView2 renders `.ico`, the
+reassembly needs no decoder, and the workspace gains no image dependency.
+
+### The Store catalogue is never searched by name
+
+The ladder above puts the Store catalogue first for anything it knows, matched
+by name, with the detail page saying "artwork matched by name". Fifteen real
+application names were put to the Store's `manifestSearch` endpoint to measure
+that. Six matched nothing. Three matched a **different application**: Git
+returned GitHub Copilot App, Vortex returned Vortex Torrent Downloader, and
+Steam returned SteamGridDB for Xbox.
+
+A ladder rung that is wrong one time in five, silently, and draws the wrong
+publisher's logo beside the right application's name, is worse than an empty
+control block. The confidence marking the spec offers does not save it: a user
+reading "Steam" beside SteamGridDB's artwork has been told something false in
+the largest type on the page.
+
+**So rung 1 and rung 4 are both struck.** The Store catalogue is consulted
+only through an exact key, and artwork is never matched by name. The rules
+that replace them:
+
+1. The application's own icon, extracted from `DisplayIcon`. Exact, local,
+   needs no network, and covers the Installed page on its own.
+2. For an Appx package, the `<Logo>` its own manifest names. Exact and local.
+3. For a package winget knows, the icon its manifest names, when it names one.
+4. The Store catalogue, only where an exact key reaches it: a
+   `PackageFamilyName`, from the Appx state or from the index's `pfns2`.
+5. The `control` block with the first letter.
+
+Flathub is not consulted for Windows artwork at all. The AppStream parser and
+the Flathub client stay where they are, serving Linux.
+
+### Where a description comes from
+
+The catalogue carries none. `source2.msix` was opened and its eleven tables
+counted: `packages` holds id, name, moniker, latest version, an ARP version
+range and a hash, and the side tables hold commands, normalised names,
+normalised publishers, product codes, upgrade codes, tags and package family
+names. There is no description column and no icon column anywhere in it.
+
+Descriptions come from two places, both exact:
+
+- **An Appx package describes itself.** Its manifest gives `<Logo>` and a
+  `Description`, both usually as an `ms-resource:` indirection, which
+  `SHLoadIndirectString` resolves against the package's own resource index.
+  This is local, localised, and needs no network. Verified: Microsoft.Paint
+  resolves to "Paint" and to its full store description.
+- **A winget package is described in its manifest.** Not in the index, but in
+  `winget-pkgs` on GitHub, at a path derivable from the id and the version the
+  index already holds. It gives `ShortDescription`, `License`, `LicenseUrl`,
+  `PublisherUrl`, `PackageUrl`, `Tags` and `ReleaseNotesUrl`. Verified against
+  `GIMP.GIMP` 3.2.4.
+
+  One fetch per manifest, so it is a detail-page lookup and never a search-page
+  one. A search result carries what the index holds, and opening it fills the
+  rest in.
+
+  There is no REST alternative: `api.winget.microsoft.com`, which several
+  guides name, does not resolve. It was checked against a real resolver and
+  returns NXDOMAIN.
+
+- **An Add/Remove Programs entry describes nothing.** The registry has no
+  description field. It reaches one only by the exact join the grouping
+  section already specifies, `productcodes2` and `upgradecodes2`, and then
+  through the winget manifest above.
+
+### What the Appx source must filter
+
+85 Appx packages remain after dropping frameworks and the non-removable ones,
+and they are not 85 applications. PowerToys alone contributes four context
+menu handlers. The source needs a filter of the same kind `arp` has, tested
+the same way against a checked-in fixture, and for the same reason: what
+Settings shows a user is a much smaller list than what the API returns.
 
 ## Rejected
 

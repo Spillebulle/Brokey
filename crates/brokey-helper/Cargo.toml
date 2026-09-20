@@ -11,3 +11,13 @@ description = "The one part of Brokey that runs as root. Reads a plan, runs a cl
 brokey-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# Only what the privilege check asks for. The helper creates no pipe and
+# elevates nothing: it is handed a pipe that already exists and is already
+# elevated, so it needs none of the rest of the API surface.
+[target."cfg(windows)".dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }

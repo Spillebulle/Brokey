@@ -6,6 +6,7 @@
 pub mod cli;
 pub mod commands;
 pub mod settings;
+pub mod setup;
 pub mod state;
 
 pub fn run() {

@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "brokey"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "brokey-core",
  "directories",
@@ -419,11 +419,12 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tauri-plugin-window-state",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "brokey-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "directories",
@@ -440,16 +441,18 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "windows-registry",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
 [[package]]
 name = "brokey-helper"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "brokey-core",
  "serde",
  "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

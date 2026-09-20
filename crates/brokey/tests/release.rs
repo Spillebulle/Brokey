@@ -14,8 +14,14 @@
 //! itself 0.1.0 in its own About dialog is the kind of wrong that gets
 //! believed.
 //!
-//! Muster's `release.rs`, transcribed; its README download-link guards are
-//! left out because Brokey's README does not carry a download table yet.
+//! Muster's `release.rs`, transcribed. Its README download-link guards are
+//! not here yet, and they are wanted: `README.md` now carries a table of ten
+//! release URLs, and every one of them had to be bumped by hand for 0.1.5.
+//! The guard is deliberately not written in the change that added the table,
+//! because a test and the thing it tests written together leave neither one
+//! checked. It is recorded as a follow-up in
+//! `docs/superpowers/plans/2026-09-20-windows-installer.md` for the next plan
+//! that touches the release workflow.
 
 use std::path::{Path, PathBuf};
 

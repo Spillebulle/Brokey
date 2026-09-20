@@ -33,7 +33,7 @@ Chocolatey, Scoop, the Microsoft Store and GitHub releases.
 | Package databases | Read directly, in pure Rust, with no libalpm and no libapt linkage: `/var/lib/pacman/sync/*.db` and `/var/lib/pacman/local`, `/var/lib/apt/lists` and `/var/lib/dpkg/status`. One binary runs on every distribution |
 | Metadata | AppStream is the spine: the distribution catalogue under `/usr/share/swcatalog` or `/var/lib/swcatalog`, Flatpak's per-remote `appstream.xml.gz`, and Flathub's web API. Icons and screenshots come from there; a package without a component is still listed, as a package rather than an application |
 | Grouping | Results from different sources that are the same application are one row with several **editions**. The join key is the AppStream component id where both sides have one, then a normalised name match with a confidence score. Never a guess presented as certain |
-| Accent hue | **300** (plum). Umber is 60/68, Muster 200, HomeLab 160, Tally 255 |
+| Accent | **#D42B48**, set as `--accent-fixed` with `--accent-h` at 18. Brokey takes the style guide's §2.3 exception for a brand colour matched exactly, so the accent is not on the derived ramp and `--accent-ink` is white. Umber is 60/68, Muster 200, HomeLab 160, Tally 255, all derived |
 | Application id | `io.github.spillebulle.brokey`. Binary and package `brokey`, helper `brokey-helper` |
 | Targets | Linux x86-64 and ARM64. Nothing else. **Superseded**: see `docs/superpowers/specs/2026-09-19-windows-support-design.md`, which adds Windows x86-64 and ARM64 |
 | Licence | GPL-3.0-or-later |
@@ -126,7 +126,7 @@ machine with no display.
 ### The page
 
 Desktop scale throughout. Shell per §6.1 of the style guide: menu bar 34 with
-the plum mark and the name, a 240 px `dock` sidebar with nav rows (Search,
+the accent mark and the name, a 240 px `dock` sidebar with nav rows (Search,
 Installed, Updates, Drivers, Settings), a 26 px status bar naming the
 distribution and which sources are live. Content over `window`.
 

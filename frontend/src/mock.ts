@@ -740,7 +740,7 @@ const SELF_PACKAGE: Package = {
   id: "brokey-bin",
   name: "Brokey",
   kind: "app",
-  summary: "One store for every place a Linux machine gets software",
+  summary: "One store for every place a machine gets software",
   description:
     "<p>Search the distribution's repositories, the AUR, Flatpak, Snap and GitHub releases in one place, install through one flow, and keep drivers and firmware up to date.</p>",
   version: "0.2.0-1",

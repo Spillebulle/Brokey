@@ -1,7 +1,7 @@
 {
   "name": "brokey",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,7 +10,7 @@
     "lint": "tsc --noEmit -p tsconfig.json",
     "check:design": "node tools/check-design.mjs",
     "tauri": "tauri",
-    "app:dev": "tauri dev --config crates/brokey/tauri.conf.json",
+    "app:dev": "tauri dev --config crates/brokey/tauri.conf.json -- --no-default-features",
     "app:build": "tauri build --config crates/brokey/tauri.conf.json"
   },
   "dependencies": {

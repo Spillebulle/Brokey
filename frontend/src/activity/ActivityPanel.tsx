@@ -12,6 +12,7 @@ import { ICON, ICON_LG } from "../components/icons";
 import { Panel } from "../components/Panel";
 import { Progress } from "../components/Progress";
 import { toast } from "../components/toastStore";
+import { selectIsWindows, useShell } from "../shell/store";
 import type { PlanStatus } from "../types";
 import { isLive, selectActivePlan, selectLivePlans, useActivity } from "./store";
 
@@ -90,14 +91,20 @@ function firstSentence(text: string): string {
   return at >= 0 ? text.slice(0, at + 1) : text;
 }
 
+/** State shared by {@link heading} and {@link sentence}: whether the plan is being cancelled, and which platform is asking for elevation. */
+interface PanelFlags {
+  cancelling: boolean;
+  windows: boolean;
+}
+
 /** The panel's title: the step in hand, or how it ended. */
-function heading(plan: PlanStatus, snap: Snapshot, cancelling: boolean): string {
-  if (cancelling && isLive(plan.state)) return "Cancelling.";
+function heading(plan: PlanStatus, snap: Snapshot, flags: PanelFlags): string {
+  if (flags.cancelling && isLive(plan.state)) return "Cancelling.";
   switch (plan.state) {
     case "pending":
       return "Starting";
     case "authorising":
-      return "Waiting for your password";
+      return flags.windows ? "Waiting for Administrator" : "Waiting for your password";
     case "running":
       return snap.stepTitle ?? "Starting";
     case "done":
@@ -110,13 +117,13 @@ function heading(plan: PlanStatus, snap: Snapshot, cancelling: boolean): string 
 }
 
 /** The sentence beside the rail. With no known fraction it is the whole report, so there is always one. */
-function sentence(plan: PlanStatus, snap: Snapshot, cancelling: boolean): string | null {
-  if (cancelling && isLive(plan.state)) return snap.message ?? "Waiting for the current step to finish.";
+function sentence(plan: PlanStatus, snap: Snapshot, flags: PanelFlags): string | null {
+  if (flags.cancelling && isLive(plan.state)) return snap.message ?? "Waiting for the current step to finish.";
   switch (plan.state) {
     case "pending":
       return "Starting.";
     case "authorising":
-      return "Enter your password in the system dialog.";
+      return flags.windows ? "Allow the change in the Windows dialog." : "Enter your password in the system dialog.";
     case "running":
       return snap.message ?? (snap.fraction === null ? "No progress has been reported yet." : null);
     case "done":
@@ -156,12 +163,14 @@ export function ActivityPanel() {
   const toggleLog = useActivity((s) => s.toggleLog);
   const markCancelling = useActivity((s) => s.markCancelling);
   const dismiss = useActivity((s) => s.dismiss);
+  const windows = useShell(selectIsWindows);
   if (!plan) return null;
 
   const snap = snapshot(plan);
   const live = isLive(plan.state);
-  const title = heading(plan, snap, cancelling);
-  const line = sentence(plan, snap, cancelling);
+  const flags: PanelFlags = { cancelling, windows };
+  const title = heading(plan, snap, flags);
+  const line = sentence(plan, snap, flags);
   const fraction = plan.state === "done" ? 1 : snap.fraction;
 
   const cancel = async () => {

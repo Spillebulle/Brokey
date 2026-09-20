@@ -123,8 +123,10 @@ The point of this task is that Linux behaviour is provably identical afterwards.
 - Produces:
   - `pub struct Elevated { pub input: Option<Box<dyn std::io::Write + Send>>, pub lines: std::sync::mpsc::Receiver<crate::transaction::runner::Line> }`
   - `pub fn start(helper: &std::path::Path, wrapper: &[String]) -> std::io::Result<Elevated>`
-  - `impl Elevated { pub fn wait(&mut self) -> std::io::Result<Option<i32>>; pub fn kill(&mut self); }`
-- Consumes: `runner::Line`, `runner::stream_lines` and `runner::kill_group`, all currently private and all made reachable by this task.
+  - `impl Elevated { pub fn wait(&mut self) -> std::io::Result<Option<i32>>; }`
+- Consumes: `runner::Line` and `runner::stream_lines`, both currently private and both made reachable by this task.
+
+**There is deliberately no `kill`.** `run_helper` has never killed the elevated child and must not start: it cancels by writing `CANCEL_LINE` down the same stream the plan went down, and waits. `kill_group` at `runner.rs:713` is called from **`run_session`** (line 275) and from nowhere else. The helper's own doc says why: a root child cannot be killed by the user, and killing a package manager mid-transaction is the one thing worse than waiting. Do not give the seam a `kill`; Windows cancels the same way, down the pipe.
 
 - [ ] **Step 1: Read `run_helper` before changing it**
 
@@ -143,8 +145,16 @@ This goes in `crates/brokey-core/tests/transaction.rs`, which is already `#![cfg
 fn the_elevate_seam_carries_a_plan_and_brings_back_lines() {
     // `cat` stands in for the helper: whatever is written to it comes
     // straight back on its output, which is exactly the shape the seam has
-    // to carry. `env` stands in for pkexec, as elsewhere in this file.
-    let mut e = elevate::start(Path::new("/bin/cat"), &["env".to_string()])
+    // to carry.
+    //
+    // It has to be `sh -c cat` rather than `cat` itself. The seam appends
+    // the helper path and `run` to the wrapper, and plain `cat` would read
+    // those as filenames and fail; after `sh -c cat` they land in `$0` and
+    // `$1`, where nothing looks at them, and `cat` reads its standard input
+    // as intended. The helper path is unused for the same reason, so it is
+    // named to say so.
+    let wrapper = ["sh".to_string(), "-c".to_string(), "cat".to_string()];
+    let mut e = elevate::start(Path::new("unused-by-this-wrapper"), &wrapper)
         .expect("the seam starts a process");
     {
         use std::io::Write;
@@ -158,7 +168,7 @@ fn the_elevate_seam_carries_a_plan_and_brings_back_lines() {
 }
 ```
 
-`/bin/cat` is given `run` as an argument by `start` and ignores it, which is what makes it usable as a stand-in.
+Both halves of that fixture were checked at a real shell before being written here: `cat run` fails with "No such file or directory" and exit 1, while `sh -c cat unused run` echoes its standard input and exits 0.
 
 - [ ] **Step 3: Run it and watch it fail**
 
@@ -190,9 +200,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc::Receiver;
 
-#[cfg(unix)]
 mod unix;
-#[cfg(unix)]
 use unix::Inner;
 
 /// One elevated helper run, however the platform started it.
@@ -208,14 +216,14 @@ pub struct Elevated {
 impl Elevated {
     /// Wait for the helper to finish. `None` when the platform reported no
     /// code, which is not by itself a failure.
+    ///
+    /// There is no `kill` beside this on purpose. A running helper is
+    /// stopped by writing `CANCEL_LINE` to `input`, which lets it finish the
+    /// step it is on; killing a package manager part-way through is worse
+    /// than waiting for it, and on Linux the child belongs to root and could
+    /// not be killed from here anyway.
     pub fn wait(&mut self) -> std::io::Result<Option<i32>> {
         self.inner.wait()
-    }
-
-    /// Stop the helper and, where the platform has the notion, anything it
-    /// started.
-    pub fn kill(&mut self) {
-        self.inner.kill();
     }
 }
 
@@ -223,18 +231,15 @@ impl Elevated {
 /// arguments that obtain it, `pkexec` on Linux; it is ignored on a platform
 /// that has its own way.
 pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
-    #[cfg(unix)]
-    {
-        unix::start(helper, wrapper)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (helper, wrapper);
-        Err(std::io::Error::other(
-            "Brokey cannot obtain Administrator on this system.",
-        ))
-    }
+    unix::start(helper, wrapper)
 }
+```
+
+**This whole module is `#[cfg(unix)]` for the length of this task.** It names `runner::Line`, and `runner` is itself still gated until Task 2 ungates it, so an ungated `elevate` does not compile on Windows at all. Task 2 removes this gate at the same moment it removes `runner`'s and `allow`'s, and Task 6 is what gives `start` a second arm. Declaring it in `transaction/mod.rs` as:
+
+```rust
+#[cfg(unix)]
+pub mod elevate;
 ```
 
 `crates/brokey-core/src/transaction/elevate/unix.rs`:
@@ -245,9 +250,8 @@ pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
 //! This is the only place in the workspace that spawns `pkexec`.
 
 use super::Elevated;
-use crate::transaction::runner::{kill_group, stream_lines};
+use crate::transaction::runner::stream_lines;
 use std::io::Write;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
@@ -258,10 +262,6 @@ pub struct Inner {
 impl Inner {
     pub fn wait(&mut self) -> std::io::Result<Option<i32>> {
         self.child.wait().map(|status| status.code())
-    }
-
-    pub fn kill(&mut self) {
-        kill_group(&mut self.child);
     }
 }
 
@@ -278,7 +278,6 @@ pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
         .spawn()?;
     let input: Option<Box<dyn Write + Send>> = child
         .stdin
@@ -293,19 +292,21 @@ pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
 }
 ```
 
-The `.process_group(0)` here is the one `run_helper` already had on its own spawn. `run_session`'s separate `.process_group(0)` at line 229 is a different call and is **not** touched by this task.
+**There is deliberately no `.process_group(0)` on this spawn.** `run_helper`'s spawn never had one — the only `.process_group(0)` in `runner.rs` is at line 229 and belongs to `run_session`, which this task does not touch. Adding one here would change how signals reach the pkexec child, which is a behaviour change on a task whose whole purpose is that there is none. That is also why this file needs no `std::os::unix` import at all.
 
-- [ ] **Step 5: Make `Line`, `stream_lines` and `kill_group` reachable**
+- [ ] **Step 5: Make `Line` and `stream_lines` reachable**
 
-In `runner.rs`: `struct Line` becomes `pub struct Line` with both fields `pub`; `fn stream_lines` becomes `pub(crate) fn stream_lines`; `fn kill_group` becomes `pub(crate) fn kill_group`. Add `pub mod elevate;` to `transaction/mod.rs`, ungated, re-exporting nothing from it.
+In `runner.rs`: `struct Line` becomes `pub struct Line` with both fields `pub`; `fn stream_lines` becomes `pub(crate) fn stream_lines`. **`kill_group` does not change** — it belongs to `run_session` and the seam has no use for it. Declare the module in `transaction/mod.rs` as `#[cfg(unix)] pub mod elevate;`, exactly as Step 4 says, re-exporting nothing from it.
 
 `Line` is `pub` rather than `pub(crate)` because `Elevated::lines` is a public field of a public type, so the type it yields must be nameable from outside the crate. Give `Line` a doc comment saying what it is: one line of the helper's output, and which stream it came from.
 
 - [ ] **Step 6: Use the seam in `run_helper`**
 
-Replace, in `run_helper` only: the `Command::new(...)...spawn()`, the `child.stdin.take()`, the `stream_lines(&mut child)` call, the `child.wait()` and the `kill_group(&mut child)`. Everything else stays exactly as it is — the writer thread, the event loop, the exit-code interpretation at line 486, and every sentence.
+Replace, in `run_helper` only: the `Command::new(...)...spawn()` at lines 335 to 344, the `child.stdin.take()` at 351, the `stream_lines(&mut child)` at 371, and the `child.wait()` at the end. Everything else stays exactly as it is — the writer thread and its comment, the `cancel_tx`/`cancel_rx` channel, the event loop, the exit-code interpretation at line 486, and every sentence.
 
-The writer thread now takes `e.input.take()`; the loop reads `e.lines`; the exit code comes from `e.wait()`; cancellation calls `e.kill()`. `start` returns `io::Result` and `run_helper` returns `Result<(), String>`, so map the error into a sentence that names the wrapper, in the register of the sentences already in that function.
+The writer thread now takes `e.input.take()`; the loop reads `e.lines`; the exit code comes from `e.wait()`. **Cancellation is untouched**: it already goes through `cancel_tx` to the writer thread, which writes `CANCEL_LINE`, and that is the only way the helper is ever stopped.
+
+`start` returns `io::Result` and `run_helper` returns `Result<(), String>`, so map the error into a sentence that names the wrapper, in the register of the sentences already in that function — the one it replaces reads `"Could not start {program}: {e}."`.
 
 - [ ] **Step 7: Build for Windows and reason about Linux**
 
@@ -368,13 +369,35 @@ Read `runs_join_consecutive_root_steps_only` first and match how it inspects a `
 
 Run: `cargo test -p brokey-core --lib transaction::runner`
 
-Expected on Windows: FAIL to compile, because the module is not built there.
+Expected on Windows: **zero tests match and the command reports success.** The module is `#[cfg(unix)]`, so it is absent from the build rather than failing to compile it — there is nothing there for the filter to select. That is the failure, and like the `#![cfg(unix)]` integration file it is a silence rather than a red line. Do not read it as a pass.
 
 - [ ] **Step 3: Ungate the modules**
 
-In `transaction/mod.rs`, remove `#[cfg(unix)]` from `pub mod allow;`, `pub mod runner;`, the `pub use allow::{...}` line and the `pub use runner::{...}` line.
+In `transaction/mod.rs`, remove `#[cfg(unix)]` from `pub mod allow;`, `pub mod runner;`, `pub mod elevate;`, the `pub use allow::{...}` line and the `pub use runner::{...}` line.
+
+`elevate` was gated in Task 1 because it names `runner::Line` and `runner` was gated; ungating them together is the point at which that stops being true. Inside `elevate/mod.rs`, `mod unix;` and `use unix::Inner;` now need `#[cfg(unix)]` on each, and `start` needs its `#[cfg(not(unix))]` arm back:
+
+```rust
+pub fn start(helper: &Path, wrapper: &[String]) -> std::io::Result<Elevated> {
+    #[cfg(unix)]
+    {
+        unix::start(helper, wrapper)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (helper, wrapper);
+        Err(std::io::Error::other(
+            "Brokey cannot obtain Administrator on this system.",
+        ))
+    }
+}
+```
+
+`Elevated`'s `inner: Inner` field is the awkward one: with no `Inner` on Windows the struct does not exist there either. Give Windows a placeholder `Inner` in `elevate/mod.rs` whose `wait` returns the same error sentence, so that `Elevated` is one type on both platforms and Task 6 has only to replace it. Say in your report what you chose.
 
 Then fix the module doc, which is now wrong in three places. Lines 6 to 8 say `allow` is "Linux's shape of it (Windows will get its own in a later plan)"; lines 10 to 11 call `runner` "The only `pkexec` call site"; line 12 says `runner` is "Linux only until a later plan gives Windows its own privilege path". The first and third described this plan. The second moved to `elevate/unix.rs` in Task 1. Replace all three with what is now true.
+
+**`runner.rs` has its own stale header too.** Its module doc at lines 1 to 14 opens "Executes a plan. Root steps go to `brokey-helper` through `pkexec`" and says at line 8 "This is the only place in the workspace that spawns `pkexec`." Neither is true after Task 1: the spawning moved to `elevate/unix.rs`, and root steps reach the helper through whatever `elevate` does on the platform. Fix that header here as well. Task 1 left it deliberately, being out of its scope; it is in yours.
 
 - [ ] **Step 4: Gate only what actually touches Unix, in `runner.rs`**
 
@@ -390,18 +413,31 @@ process.process_group(0);
 
   before `spawn()`.
 
-- `#[cfg(unix)]` on the `unsafe extern "C" { fn kill(...) }` block, on `SIGTERM`, on `SIGKILL` and on `kill_group`. Add beside it:
+- `#[cfg(unix)]` on the `unsafe extern "C" { fn kill(...) }` block, on `SIGTERM`, on `SIGKILL` and on `kill_group`. **A Windows `kill_group` is genuinely needed**, because `run_session` calls it at line 275 and `run_session` is not gated — a cancelled session step on Windows reaches that line:
 
 ```rust
-/// Stop the child. Windows has no process group to signal, so this is the
-/// child itself; `TerminateProcess` does not reach its descendants, and the
-/// package manager under it is left to finish, which is the same promise
-/// `CANCELLING_SESSION` makes on Linux.
+/// Stop the child. Windows has no process group to signal, so this reaches
+/// the child itself and not its descendants: an installer the step started
+/// is left to finish, which is the truthful thing to promise and is what
+/// `CANCELLING_SESSION` says.
 #[cfg(windows)]
-pub(crate) fn kill_group(child: &mut Child) {
+fn kill_group(child: &mut Child) {
     let _ = child.kill();
 }
 ```
+
+  Keep it private, exactly as the Linux one is. Nothing outside `runner.rs` calls it.
+
+- **`CANCELLING_SESSION` is reachable on Windows and its sentence is wrong there.** It is emitted at line 273, inside `run_session`, which now runs on both platforms; it currently reads "Cancelling. A package manager this step started under pkexec finishes first; nothing after it will start." Nothing on Windows goes through pkexec. Split it, the way the rest of this plan splits copy — whole sentences, never one sentence with a word swapped:
+
+```rust
+#[cfg(unix)]
+pub const CANCELLING_SESSION: &str = "Cancelling. A package manager this step started under pkexec finishes first; nothing after it will start.";
+#[cfg(windows)]
+pub const CANCELLING_SESSION: &str = "Cancelling. An installer this step started finishes first; nothing after it will start.";
+```
+
+  `crates/brokey-core/tests/transaction.rs:584` compares an event message against `runner::CANCELLING_SESSION` by name, so it keeps working unchanged on Linux. Check line 910 of `runner.rs`, which also names the constant, and make sure whatever it asserts still holds on both.
 
 - `#[cfg(unix)]` on `HELPER_PATHS` and on the existing `locate_helper`. Read the existing one first, including how it handles `BROKEY_HELPER`, and mirror that behaviour exactly in:
 
@@ -436,8 +472,6 @@ let wrapper = vec!["pkexec".to_string()];
 #[cfg(windows)]
 let wrapper = Vec::new();
 ```
-
-- Leave `CANCELLING_SESSION` alone. It names pkexec, but it is emitted only on the session path and only on Linux; Task 10 revisits copy.
 
 - [ ] **Step 5: Split `allow.rs` by platform**
 
@@ -936,6 +970,8 @@ git commit -m "Elevate: a named pipe this user and Administrators can open"
 
 - [ ] **Step 1: Write the failing tests**
 
+These go **inside the `#[cfg(test)] mod tests` that Task 5 created in `windows.rs`**, beside its four, not in a second module.
+
 ```rust
 /// What the elevated helper is started with. The pipe name has to reach
 /// it: it is the only way back. This is checked without elevating, because
@@ -1020,7 +1056,7 @@ In order, and the order matters:
 5. `let lines = crate::transaction::runner::stream_lines_from(reader);`
 6. Return `Elevated { input: Some(Box::new(stream)), lines, inner: Inner { process } }`.
 
-`Inner::wait` waits with `WaitForSingleObject(handle, INFINITE)` then reads `GetExitCodeProcess`. `Inner::kill` calls `TerminateProcess(handle, 1)`. Same unsafe rules as Task 5. Hold the process handle in an `OwnedHandle`.
+`Inner` has **only** `wait`, matching the Unix `Inner` from Task 1: it waits with `WaitForSingleObject(handle, INFINITE)` then reads `GetExitCodeProcess`. There is no `kill` and no `TerminateProcess` — cancelling writes `CANCEL_LINE` down the pipe, exactly as Linux writes it down stdin, and the helper stops after the step it is on. Same unsafe rules as Task 5. Hold the process handle in an `OwnedHandle`.
 
 - [ ] **Step 5: Add `stream_lines_from` to `runner.rs`**
 
@@ -1028,6 +1064,7 @@ In order, and the order matters:
 /// One reader's lines, for a transport that has a single stream. A named
 /// pipe has no separate error stream, so everything that arrives is
 /// output. `stream_lines` is the two-stream version, for piped stdio.
+#[cfg(windows)]
 pub(crate) fn stream_lines_from(
     reader: impl Read + Send + 'static,
 ) -> mpsc::Receiver<Line> {
@@ -1036,6 +1073,8 @@ pub(crate) fn stream_lines_from(
     rx
 }
 ```
+
+**The `#[cfg(windows)]` is load-bearing.** Only `elevate/windows.rs` calls this, so without the gate it is dead code on Linux, and CI sets `RUSTFLAGS: -D warnings`, which turns that into a failed Linux build rather than a warning nobody reads.
 
 Read `stream_lines` first and match how it spawns and names its threads. `pump` is reused unchanged, which is the whole reason this is three lines.
 
@@ -1195,7 +1234,32 @@ Replace the `geteuid() != 0` check with the Windows equivalent: `GetTokenInforma
 
 Add `windows-sys` to `crates/brokey-helper/Cargo.toml` under `[target."cfg(windows)".dependencies]` with only the features the helper actually calls: `Win32_Foundation`, `Win32_Security`, `Win32_System_Threading`. It creates no pipe and elevates nothing, so it needs none of the rest.
 
-Delete the old Windows `main` that printed "This build of brokey-helper does not run on Windows yet."
+**There is no longer a separate Windows `main` to delete.** Task 7 de-gated `main`, and a binary cannot have two, so the "refuses on Windows" behaviour moved into two `#[cfg]`ed sites inside the shared body: the privilege check and the per-step call site. Read Task 7's report for exactly where they are. You are replacing those refusals, not removing a stub.
+
+- [ ] **Step 4: Decide how a Windows step's program is resolved, because nothing has yet**
+
+Task 7 correctly left this alone, and it is the last unspecified thing in the privilege path. It has to be settled here, because the helper cannot run a step without it, and getting it wrong fails at Task 10 rather than at compile time.
+
+The facts, checked on the development machine:
+
+- `sources/windows/winget/mod.rs`'s `operation_step` sets `program: "winget.exe"`, a **bare name**.
+- `winget_exe()` resolves that through `system::windows::which`, which reads `PATH` **from the calling process's own environment** and finds `%LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe`.
+- That path is a per-user app execution alias — a reparse point — and on this machine it points at `C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.30.140.0_x64__8wekyb3d8bbwe\winget.exe`.
+- **The helper runs elevated, so its `%LOCALAPPDATA%` is the administrator's, not the user's.** A bare-name search inside the helper therefore looks in the wrong profile, and may find nothing or something else.
+
+On Linux this problem is solved by `CHILD_PATH`, a fixed `/usr/bin:/bin:/usr/sbin:/sbin` that the helper searches, so resolution is predictable and cannot be steered. Windows has no equivalent fixed location, and inventing one would be a security decision made in passing.
+
+**The rule, which is stronger than Linux's rather than weaker:** the unelevated side resolves the program to an absolute path while building the plan, and **the helper never searches anything.** Resolution happens where the user's own environment is correct, and the elevated process is handed a concrete path with no ambiguity left in it.
+
+1. Make the plan carry an absolute path for winget steps. Pick the seam yourself: `operation_step` may take the resolved path, or `plan()` may fill it in, whichever fits how that module is already shaped — `available()` already calls `winget_exe()`, so probing the machine there is in keeping. Note `winget/mod.rs`'s test at about line 708 asserts `s.command.program == "winget.exe"` and will need to change with you; change it to assert what is now true rather than deleting it.
+
+2. **Check empirically what you actually get**, rather than reasoning about it. Print what `winget_exe()` returns on this machine, and what `std::fs::canonicalize` makes of it. If canonicalising is needed to get past the per-user alias to the real executable, do it, and strip any `\\?\` prefix that comes back, since that spelling confuses more things than it helps. Put the observed values in your report.
+
+3. In the helper's Windows step-running path, **refuse a program that is not an absolute path**, with a sentence saying so. That is the control that makes the rule true rather than merely intended: it means no elevated child is ever located by a search the user's environment did not determine.
+
+4. The closed list needs no change for this — it already compares `Path::new(&program).file_name()`, so an absolute path to `winget.exe` passes exactly as the bare name did.
+
+5. **Environment.** Linux scrubs the child's environment to a fixed short list. Windows cannot do the same: winget and MSI uninstallers genuinely need a working environment, and an empty one breaks them. Let the child inherit the helper's environment, plus the step's own `env` entries, and **write a comment saying that this is a weaker guarantee than Linux's and why it is accepted** — the controls that carry the weight here are the closed list and absolute-path resolution, not environment scrubbing. Do not quietly leave this undocumented; a future reader comparing the two platforms will otherwise assume it is an oversight.
 
 - [ ] **Step 4: Run and watch them pass**
 
@@ -1208,6 +1272,148 @@ Expected: PASS, clean.
 ```bash
 git add crates/brokey-helper/
 git commit -m "Helper: a Windows body that answers on the pipe"
+```
+
+- [ ] **Step 6: Verify the Add/Remove Programs provenance instead of trusting it**
+
+This closes the weakest point of the Windows closed list, and it is done here because the helper is the thing that enforces the list and the thing that can read the registry.
+
+`allow.rs`'s `check_step` currently admits **any** program with any arguments when `step.source` is `SourceKind::Arp`. `source` is an ordinary field of a `Step`, so against a forged plan that reduces to "label the step `Arp` and run anything as Administrator". The Linux half checks program and arguments for every step regardless of source. The doc comment above that arm already says all of this; your job is to make it stop being true.
+
+The mechanism already exists: `Allowed` is how the closed list receives facts it cannot derive, exactly as `package_dirs` carries the directories a package file may come from.
+
+Everything needed is already public and was checked: `arp::read() -> Vec<RawEntry>`, `arp::removal_step(&RawEntry) -> Option<Step>`, `Hive::needs_elevation()`, and `model::Command` derives `PartialEq` and `Eq`.
+
+1. Give `Allowed` a Windows field:
+
+```rust
+/// The removal commands the registry actually records, for the one kind
+/// of step whose shape cannot be checked. Empty means nothing from
+/// Add/Remove Programs may run, which is the safe direction to fail.
+#[cfg(windows)]
+pub removals: Vec<crate::model::Command>,
+```
+
+  Update every construction of `Allowed` so it still compiles, keeping the Linux ones byte-identical.
+
+2. Add the constructor that fills it, beside `system()` and `for_home`:
+
+```rust
+/// The system list plus the removal commands `HKLM` records. Only those
+/// ever reach the helper: `removal_step` sets `needs_root` from
+/// `Hive::needs_elevation`, which is false for `HKCU`, so a per-user
+/// removal is a session step and is never validated here at all. That is
+/// also why an elevated helper reading `HKLM` sees the right set despite
+/// `HKCU` being the administrator's under elevation.
+#[cfg(windows)]
+pub fn with_registered_removals() -> Allowed {
+    let removals = crate::sources::windows::arp::read()
+        .iter()
+        .filter(|e| e.hive.needs_elevation())
+        .filter_map(crate::sources::windows::arp::removal_step)
+        .map(|step| step.command)
+        .collect();
+    Allowed {
+        removals,
+        ..Allowed::system()
+    }
+}
+```
+
+  Check `arp`'s module path and whether it is `pub` from `sources::windows` before writing that path; use whatever is real.
+
+3. Change the arm in `check_step`:
+
+```rust
+SourceKind::Arp => {
+    if allowed.removals.contains(&step.command) {
+        Ok(())
+    } else {
+        Err(not_allowed(&step.command.program))
+    }
+}
+```
+
+  and delete the `let _ = allowed;` line, which now has a real use.
+
+4. **Call it from both sides.** The helper's `allowed()` uses it, and so must the runner: `execute_inner` validates every root run against `self.allowed` *before* the first prompt, so a runner left with an empty `removals` would refuse every removal before the user was ever asked. Find where the runner's `Allowed` is built and give it the same constructor on Windows.
+
+5. Replace the test `an_add_remove_programs_removal_is_allowed`. It currently passes for any input whatsoever, because the arm was an unconditional `Ok`, so it cannot catch a regression. It becomes two tests:
+
+```rust
+/// A removal the registry records is allowed.
+#[test]
+fn a_registered_removal_is_allowed() {
+    let step = step_from(
+        SourceKind::Arp,
+        r"C:\Program Files\Thing\unins000.exe",
+        &["/SILENT"],
+    );
+    let allowed = Allowed {
+        removals: vec![step.command.clone()],
+        ..Allowed::system()
+    };
+    assert_eq!(validate_with(&plan_of(vec![step]), &allowed), Ok(()));
+}
+
+/// A command the registry does not record is refused, however the step
+/// labels itself. This is the forged-plan case, and before this check
+/// existed it ran as Administrator.
+#[test]
+fn an_unregistered_removal_is_refused_even_when_labelled_arp() {
+    let registered = step_from(
+        SourceKind::Arp,
+        r"C:\Program Files\Thing\unins000.exe",
+        &["/SILENT"],
+    );
+    let forged = step_from(
+        SourceKind::Arp,
+        "powershell.exe",
+        &["-Command", "whoami"],
+    );
+    let allowed = Allowed {
+        removals: vec![registered.command],
+        ..Allowed::system()
+    };
+    let err = validate_with(&plan_of(vec![forged]), &allowed)
+        .expect_err("the registry does not record this command");
+    assert!(err.contains("powershell.exe"), "{err}");
+}
+
+/// Same program, different arguments, is a different command. An
+/// uninstaller that takes a path to delete must not be reachable with a
+/// path of someone else's choosing.
+#[test]
+fn a_registered_program_with_other_arguments_is_refused() {
+    let registered = step_from(
+        SourceKind::Arp,
+        r"C:\Program Files\Thing\unins000.exe",
+        &["/SILENT"],
+    );
+    let twisted = step_from(
+        SourceKind::Arp,
+        r"C:\Program Files\Thing\unins000.exe",
+        &["/SILENT", "C:\\Windows"],
+    );
+    let allowed = Allowed {
+        removals: vec![registered.command],
+        ..Allowed::system()
+    };
+    assert!(validate_with(&plan_of(vec![twisted]), &allowed).is_err());
+}
+```
+
+6. Update the doc comment above the arm: the paragraph beginning "**Today that provenance is trusted, not verified**" describes the state you have just ended. Say what is true now — the command is compared against what the registry records, and an empty list refuses everything — and keep the note about `HKCU` removals never arriving here, which stays true and is not obvious.
+
+- [ ] **Step 7: Run and commit the tightening**
+
+Run: `cargo test --workspace && cargo clippy --workspace --all-targets`
+
+Expected: PASS, clean, with the three new tests passing and the old always-true one gone.
+
+```bash
+git add crates/brokey-core/src/transaction/allow.rs crates/brokey-helper/ crates/brokey-core/src/transaction/runner.rs
+git commit -m "Allow: check that a removal is one the registry records"
 ```
 
 ---

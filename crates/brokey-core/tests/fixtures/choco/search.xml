@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<feed xml:base="https://community.chocolatey.org/api/v2/" xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices" xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata" xmlns="http://www.w3.org/2005/Atom">
+  <title type="text">Search</title>
+  <id>https://community.chocolatey.org/api/v2/Search</id>
+  <updated>2026-09-20T11:13:21Z</updated>
+  <link rel="self" title="Search" href="Search" />
+  <entry>
+    <id>https://community.chocolatey.org/api/v2/Packages(Id='7zip',Version='26.3.0')</id>
+    <title type="text">7zip</title>
+    <summary type="text">7-Zip is a file archiver with a high compression ratio.</summary>
+    <updated>2026-09-05T07:45:30Z</updated>
+    <author>
+      <name>Igor Pavlov</name>
+    </author>
+    <link rel="edit-media" title="V2FeedPackage" href="Packages(Id='7zip',Version='26.3.0')/$value" />
+    <link rel="edit" title="V2FeedPackage" href="Packages(Id='7zip',Version='26.3.0')" />
+    <category term="CCR.Website.V2FeedPackage" scheme="http://schemas.microsoft.com/ado/2007/08/dataservices/scheme" />
+    <content type="application/zip" src="https://community.chocolatey.org/api/v2/package/7zip/26.3.0" />
+    <m:properties xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata" xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices">
+      <d:Version>26.3.0</d:Version>
+      <d:Title>7-Zip</d:Title>
+      <d:Description>7-Zip is a file archiver with a high compression ratio.
+## Features
+- High compression ratio in [7z format](http://www.7-zip.org/7z.html) with **LZMA** and **LZMA2** compression
+- Supported formats:
+- Packing / unpacking: 7z, XZ, BZIP2, GZIP, TAR, ZIP and WIM
+- Unpacking only: AR, ARJ, CAB, CHM, CPIO, CramFS, DMG, EXT, FAT, GPT, HFS, IHEX, ISO, LZH, LZMA, MBR, MSI, NSIS, NTFS, QCOW2, RAR, RPM, SquashFS, UDF, UEFI, VDI, VHD, VMDK, WIM, XAR and Z.
+- For ZIP and GZIP formats, **7-Zip** provides a compression ratio that is 2-10 % better than the ratio provided by PKZip and WinZip
+- Strong AES-256 encryption in 7z and ZIP formats
+- Self-extracting capability for 7z format
+- Integration with Windows Shell
+- Powerful File Manager
+- Powerful command line version
+- Plugin for FAR Manager
+- Localizations for 87 languages
+## Notes
+- The installer for 7-Zip is known to close the Explorer process. This means you may lose current work. If it doesn't automatically restart explorer, type `explorer` on the command shell to restart it.
+- **If the package is out of date please check [Version History](#versionhistory) for the latest submitted version. If you have a question, please ask it in [Chocolatey Community Package Discussions](https://github.com/chocolatey-community/chocolatey-packages/discussions) or raise an issue on the [Chocolatey Community Packages Repository](https://github.com/chocolatey-community/chocolatey-packages/issues) if you have problems with the package. Disqus comments will generally not be responded to.**</d:Description>
+      <d:Tags>7zip zip archiver admin foss</d:Tags>
+      <d:DownloadCount m:type="Edm.Int32">35538182</d:DownloadCount>
+      <d:IconUrl>https://cdn.jsdelivr.net/gh/chocolatey-community/chocolatey-packages@68b91a851cee97e55c748521aa6da6211dd37c98/icons/7zip.svg</d:IconUrl>
+      <d:Published m:type="Edm.DateTime">2026-09-04T12:10:33.917</d:Published>
+      <d:LicenseUrl>http://www.7-zip.org/license.txt</d:LicenseUrl>
+      <d:PackageSize m:type="Edm.Int64">3612</d:PackageSize>
+      <d:ProjectUrl>http://www.7-zip.org/</d:ProjectUrl>
+    </m:properties>
+  </entry>
+<entry>
+    <id>https://community.chocolatey.org/api/v2/Packages(Id='GoogleChrome',Version='154.0.8037.44')</id>
+    <title type="text">GoogleChrome</title>
+    <summary type="text"></summary>
+    <updated>2026-09-20T00:00:27Z</updated>
+    <author>
+      <name>Google LLC.</name>
+    </author>
+    <link rel="edit-media" title="V2FeedPackage" href="Packages(Id='GoogleChrome',Version='154.0.8037.44')/$value" />
+    <link rel="edit" title="V2FeedPackage" href="Packages(Id='GoogleChrome',Version='154.0.8037.44')" />
+    <category term="CCR.Website.V2FeedPackage" scheme="http://schemas.microsoft.com/ado/2007/08/dataservices/scheme" />
+    <content type="application/zip" src="https://community.chocolatey.org/api/v2/package/GoogleChrome/154.0.8037.44" />
+    <m:properties xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata" xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices">
+      <d:Version>154.0.8037.44</d:Version>
+      <d:Title>Google Chrome</d:Title>
+      <d:Description>Chrome is a fast, simple, and secure web browser, built for the modern web.
+### Notes
+- This package uses Chrome's administrative MSI installer and installs the 32-bit on 32-bit OSes and the 64-bit version on 64-bit OSes. If this package is installed on a 64-bit OS and the 32-bit version of Chrome is already installed, the package keeps installing/updating the 32-bit version of Chrome.
+- This package always installs the latest version of Google Chrome, regardless of the version specified in the package. Google does not officially offer older versions of Chrome for download. Because of this you may get checksum mismatch between the time Google releases a new installer, and the package is automatically updated.
+- **If the package is out of date please check [Version History](#versionhistory) for the latest submitted version. If you have a question, please ask it in [Chocolatey Community Package Discussions](https://github.com/chocolatey-community/chocolatey-packages/discussions) or raise an issue on the [Chocolatey Community Packages Repository](https://github.com/chocolatey-community/chocolatey-packages/issues) if you have problems with the package. Disqus comments will generally not be responded to.**</d:Description>
+      <d:Tags>google chrome web internet browser admin</d:Tags>
+      <d:DownloadCount m:type="Edm.Int32">393854922</d:DownloadCount>
+      <d:IconUrl>https://cdn.jsdelivr.net/gh/chocolatey-community/chocolatey-packages@edba4a5849ff756e767cba86641bea97ff5721fe/icons/chrome.svg</d:IconUrl>
+      <d:Published m:type="Edm.DateTime">2026-09-17T00:15:00.447</d:Published>
+      <d:LicenseUrl>https://www.google.it/intl/en/chrome/browser/privacy/eula_text.html</d:LicenseUrl>
+      <d:PackageSize m:type="Edm.Int64">4434</d:PackageSize>
+      <d:ProjectUrl>https://www.google.com/chrome/browser/</d:ProjectUrl>
+    </m:properties>
+  </entry>
+</feed>
