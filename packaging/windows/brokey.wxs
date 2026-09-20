@@ -106,14 +106,39 @@
       `ExitDialog` has a spare checkbox built into it: give it text and it
       appears, and setting the property to 1 is what makes it start ticked.
 
-      `Impersonate="yes"` is the part that matters, and it matters more here
-      than it does in any sibling. Brokey installs per machine, so the installer
-      is elevated. Without this attribute the custom action would start Brokey
-      as the elevated account, and Brokey's first invariant is that its window
-      never runs as Administrator: the window builds plans and `brokey-helper`
-      runs the privileged steps, one prompt per stretch. A window started
-      elevated here would quietly hold the privilege the whole design exists to
-      withhold, and would write its settings into the wrong profile as well.
+      Brokey's first invariant is that its window never runs as Administrator:
+      the window builds plans and `brokey-helper` runs the privileged steps,
+      one prompt per stretch. A window started elevated from here would quietly
+      hold the privilege the whole design exists to withhold, and would write
+      its settings into the wrong profile as well. So it is worth being exact
+      about what does and does not keep that from happening.
+
+      **What actually holds it is the client and server split, not the
+      attribute.** `StartBrokey` is an *immediate* action fired by a control
+      event on the Finish button, so it runs in the msiexec process that is
+      driving the interface. Brokey installs per machine, so the install itself
+      is elevated, but only the server side of msiexec is: the client that
+      shows these dialogs keeps the ordinary token of whoever started it, and a
+      `ShellExecute` from there gives Brokey that same ordinary token.
+
+      **`Impersonate="yes"` stays anyway**, and is not decoration. The
+      attribute's own job is to leave the no impersonate bit clear, which is
+      what would govern this action if it were ever moved into the execute
+      sequence as a deferred action, where the alternative is running as the
+      local system account. Read back out of the built package the CustomAction
+      type is 1; 2049 would mean the bit had been set and that move had gone
+      wrong.
+
+      **The one path this file cannot close.** Started from a console that is
+      already elevated, as in an administrator prompt running
+
+        msiexec /i brokey.msi
+
+      the client is elevated too, and the tickbox then starts Brokey elevated
+      whatever this attribute says. Nothing in a `.wxs` can prevent it. Anyone
+      installing that way should untick the box and start Brokey from the Start
+      menu instead, and anyone testing the invariant should know that an
+      install from an administrator console proves nothing about it.
 
       Deferred to the Finish button rather than run at the end of the install,
       and conditioned on `NOT Installed`, so a repair does not launch the
@@ -155,11 +180,27 @@
       to all running windows or processes, shortcuts, and file associations",
       and setting it on the shortcut is what "allows the taskbar to identify the
       proper shortcut to pin and ensures that windows belonging to the process
-      are appropriately associated with that taskbar button". Without it a
-      window claims an identity nothing installed on the machine owns, so the
-      taskbar button has no shortcut to take its icon, its name or its pinning
-      from. The value is the identifier in `crates/brokey/tauri.conf.json`, and
-      the two have to stay spelt the same.
+      are appropriately associated with that taskbar button". The value is the
+      identifier in `crates/brokey/tauri.conf.json`, and the two have to stay
+      spelt the same.
+
+      **Only half of that pairing exists today, and the half here is the half
+      that is done.** The rule is about two places at once, and nothing in
+      Brokey calls `SetCurrentProcessExplicitAppUserModelID`: not
+      `crates/brokey`, and not Tauri, `tauri-runtime-wry` or `wry` underneath
+      it, which set no application id of their own. So the shortcut claims
+      `io.github.spillebulle.brokey` and the running window claims nothing,
+      which is the failure this property exists to prevent rather than a
+      prevention of it: the taskbar button falls back to a per window identity
+      with no installed shortcut behind it, so it takes its icon and its name
+      from the window rather than from the shortcut, and pinning it pins
+      something that does not match the Start menu entry.
+
+      Fixing that is the application's work and not this file's. It is one call,
+      made before the first window is created, with the same string as above;
+      Umber does it in its `taskbar` module. Until it is made, this property is
+      the half that will already be correct when the other half arrives, and
+      removing it would only mean doing this twice.
 
       The registry value is the price of a non-advertised shortcut: ICE43 is an
       *error* unless the component holding one has an HKCU key as its keypath,

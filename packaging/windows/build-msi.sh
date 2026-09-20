@@ -19,7 +19,10 @@
 # action from a mismatched extension is a binary that may not be there under
 # the name the .wxs asks for.
 #
-# Run from the repository root, since the paths below are relative to it.
+# Runs from anywhere: it moves to the repository root itself, the way
+# `packaging/check.sh` does, so the paths below can all be repository paths.
+# `<bindir>` is the one exception and stays the caller's, which is why it is
+# resolved before that move.
 
 set -eu
 
@@ -30,7 +33,17 @@ fi
 
 version="$1"
 arch="$2"
-bindir="$3"
+
+# `<bindir>` is relative to wherever the caller is standing, not to the
+# repository root, so it is made absolute here while that is still true. This
+# also catches a directory that does not exist, before anything is copied.
+bindir=$(CDPATH= cd -- "$3" 2>/dev/null && pwd) || {
+    echo "no directory at '$3'." >&2
+    exit 1
+}
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root"
 
 for exe in brokey.exe brokey-helper.exe; do
     [ -f "$bindir/$exe" ] || {
@@ -40,11 +53,22 @@ for exe in brokey.exe brokey-helper.exe; do
     }
 done
 
+# The installer's own artwork and the application icon, drawn by
+# `tools/make-art.py` and committed rather than generated here. Checked by name
+# for the same reason the executables above are: a bare `cp` failure under
+# `set -e` says what went wrong and not what to do.
+for asset in packaging/windows/banner.bmp packaging/windows/dialog.bmp assets/icons/brokey.ico; do
+    [ -f "$asset" ] || {
+        echo "no $asset, which is committed and should be in the checkout." >&2
+        echo "Draw the pictures and the icons again with:" >&2
+        echo "  python tools/make-art.py" >&2
+        exit 1
+    }
+done
+
 mkdir -p wixassets dist
 
 cp assets/icons/brokey.ico wixassets/brokey.ico
-# The installer's own artwork, drawn by `tools/make-art.py` and committed
-# beside the .wxs rather than generated here.
 cp packaging/windows/banner.bmp packaging/windows/dialog.bmp wixassets/
 sh packaging/windows/make-licence-rtf.sh LICENSE wixassets/licence.rtf
 
@@ -62,4 +86,4 @@ wix build packaging/windows/brokey.wxs \
     -d AssetDir="wixassets" \
     -o "dist/brokey-${version}-${arch}.msi"
 
-echo "built dist/brokey-${version}-${arch}.msi"
+echo "built $root/dist/brokey-${version}-${arch}.msi"
