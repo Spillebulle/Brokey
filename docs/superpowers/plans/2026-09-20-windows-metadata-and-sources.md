@@ -702,12 +702,25 @@ it through `crate::http::Client` the way the catalogue is cached. A fetch that
 fails leaves the package exactly as the index described it, because a missing
 description is not an error the page should show.
 
-- [ ] **Step 1: Write the fixture**
+- [ ] **Step 1: Put the fixtures in place**
 
-Save the real `GIMP.GIMP` 3.2.4 manifest to
-`tests/fixtures/winget/gimp.locale.yaml`, fetched from the URL above, as it
-comes: its comment line, its eleven tags, and its `ShortDescription` on one
-long line.
+Both were fetched and checked before this plan ran, and are waiting in this
+plan's workspace. Copy them, do not fetch them again:
+
+```bash
+W=.superpowers/sdd/2026-09-20-windows-metadata-and-sources
+mkdir -p crates/brokey-core/tests/fixtures/winget
+cp "$W/gimp.locale.yaml" crates/brokey-core/tests/fixtures/winget/
+cp "$W/blender.locale.yaml" crates/brokey-core/tests/fixtures/winget/
+```
+
+`gimp.locale.yaml` is `GIMP.GIMP` 3.2.4: a comment line, eleven tags, and a
+`ShortDescription` on one long line with no `Description` at all.
+`blender.locale.yaml` is `BlenderFoundation.Blender` 5.0.1, and it is the
+harder of the two: two comment lines, a `Description: |-` block scalar of
+three indented lines, a `Tags:` sequence, and a `Documentations:` key whose
+value is a sequence of mappings. That last one is the shape this reader does
+not handle, and the test below says what it does with it instead.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -716,8 +729,14 @@ long line.
   `24.09`, which begins with a digit.
 - `an_id_that_cannot_be_a_path_gives_nothing` — `""`, `".x"`, an id with no
   dot at all, and one starting with a character that is not alphanumeric.
-- `a_real_manifest_reads` — every field of `Described` against the fixture.
-- `a_block_scalar_keeps_its_line_breaks_and_loses_its_indentation`.
+- `a_real_manifest_reads` — every field of `Described` against
+  `gimp.locale.yaml`, `description` included, which is `None` there.
+- `a_block_scalar_keeps_its_line_breaks_and_loses_its_indentation` — against
+  `blender.locale.yaml`, whose `Description` is three lines. Assert the line
+  count and that no line begins with a space.
+- `a_nested_sequence_this_reader_does_not_handle_is_skipped_whole` — the
+  `Documentations:` block of `blender.locale.yaml` must not leak into `tags`
+  or into any scalar. Assert `tags` is exactly the six Blender tags.
 - `a_manifest_missing_everything_optional_is_not_an_error` — a three-line
   input gives `Described::default()` but for what it does carry.
 - `a_key_this_reader_does_not_know_is_ignored`.
