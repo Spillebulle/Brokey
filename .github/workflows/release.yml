@@ -26,6 +26,8 @@ jobs:
         include:
           - { os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,  arch: amd64, rpm: x86_64  }
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, arch: arm64, rpm: aarch64 }
+          - { os: windows-latest,   target: x86_64-pc-windows-msvc,   arch: x64   }
+          - { os: windows-11-arm,   target: aarch64-pc-windows-msvc,  arch: arm64 }
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -33,6 +35,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Install Linux dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           # xdg-utils: the AppImage bundler shells out to xdg-open and the
@@ -56,12 +59,14 @@ jobs:
       # AppImage with WebKit's libraries inside. The helper is a separate
       # crate, built beside it.
       - name: Build
+        if: runner.os == 'Linux'
         run: |
           set -eu
           npm run app:build -- --bundles appimage
           cargo build --release -p brokey-helper
 
       - name: Stage
+        if: runner.os == 'Linux'
         run: |
           set -eu
           version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
@@ -78,9 +83,59 @@ jobs:
           mv target/release/bundle/appimage/*.AppImage "dist/Brokey-${version}-${{ matrix.rpm }}.AppImage"
 
       - name: Build .deb and .rpm
+        if: runner.os == 'Linux'
         run: |
           packaging/linux/build-packages.sh "$VERSION" \
             target/release/brokey target/release/brokey-helper "${{ matrix.arch }}" dist
+
+      # --- Windows build ------------------------------------------------------
+      #
+      # No Tauri bundler here: Windows is packaged by the two steps below
+      # instead, so this only needs the frontend built and the two binaries
+      # compiled in release, ready for `build-msi.sh` to pick up.
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          npm ci --no-audit --no-fund
+          npm run build
+          cargo build --release -p brokey -p brokey-helper
+
+      # --- Windows installer (WiX 5, per-architecture MSI) --------------------
+      - name: Build MSI
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          dotnet tool install --global wix --version 5.0.2
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          wix extension add -g WixToolset.UI.wixext/5.0.2
+          # Util supplies WixShellExec, which is what the exit dialog's
+          # "Start Brokey" checkbox runs. Pinned to the same version as the
+          # toolset: a custom action from a mismatched extension is a binary
+          # that may not be there under the name the .wxs asks for.
+          wix extension add -g WixToolset.Util.wixext/5.0.2
+          sh packaging/windows/build-msi.sh "$VERSION" "${{ matrix.arch }}" target/release
+
+      # --- Windows setup executable --------------------------------------------
+      #
+      # brokey.exe with the MSI concatenated onto it and a footer saying how
+      # long the package is, so a first install shows Brokey's own window
+      # rather than Windows Installer's. `brokey_lib::setup::payload` has the
+      # format; `make-setup` is the one writer of it and checks its work
+      # twice. After the MSI, obviously: it is the payload.
+      - name: Build setup executable
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          cargo run --release -p brokey --example make-setup -- \
+            "target/release/brokey.exe" \
+            "dist/brokey-${VERSION}-${{ matrix.arch }}.msi" \
+            "dist/brokey-setup-${VERSION}-${{ matrix.arch }}.exe"
 
       - uses: actions/upload-artifact@v4
         with:

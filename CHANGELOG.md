@@ -2,6 +2,13 @@
 
 Newest first. Each section is the release's notes, published verbatim.
 
+## 0.1.5
+
+- Windows joins the platforms Brokey installs, updates and removes software on, through winget and through Add or remove programs. The window never elevates: it builds the plan and a helper runs the privileged steps, costing one prompt per stretch that needs Administrator.
+- There is a Windows installer for the first time: an MSI, and a setup executable that carries it and installs on a double-click. Brokey appears in Add or remove programs and can be removed from there. The `.msi` is published beside the setup executable for anyone deploying Brokey across a fleet.
+- winget's catalogue is downloaded and read by Brokey itself, so search works on a machine that has never had winget installed.
+- Still missing on Windows: applications have no icons or descriptions, an entry whose Add or remove programs name carries its version is listed more than once, and Chocolatey, Scoop and the Microsoft Store are not there yet. Windows self-update is not in this release either: an installed copy is told to update the way it was installed, which for now means running the next setup executable by hand.
+
 ## 0.1.4
 
 - On Debian, Ubuntu and Pop!_OS the Updates page lists what apt will actually install. Before, it listed every newer version in the package lists, including ones apt keeps back because of Pop!_OS's pinned repository, backports or Ubuntu's phased updates, and updating them did nothing.

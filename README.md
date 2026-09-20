@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  One store for every way a Linux machine gets software, built for one thing above all others: <b>one search, one install, every source</b>.
+  One store for every way a machine gets software, built for one thing above all others: <b>one search, one install, every source</b>.
 </p>
 
 <p align="center">
@@ -20,16 +20,17 @@
 
 ## Install
 
-**Brokey 0.1.4.** Take the file for your system, or browse the
+**Brokey 0.1.5.** Take the file for your system, or browse the
 [release itself](https://github.com/Spillebulle/Brokey/releases/latest) for the
 notes and the checksums.
 
 | Your system | x86-64 | ARM64 |
 |---|---|---|
-| Arch, CachyOS, EndeavourOS, Manjaro | [`.pkg.tar.zst`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.4/brokey-bin-0.1.4-1-x86_64.pkg.tar.zst) | not built |
-| Debian, Ubuntu, Mint, Pop!_OS | [`.deb`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.4/brokey_0.1.4_amd64.deb) | [`.deb`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.4/brokey_0.1.4_arm64.deb) |
-| Fedora, RHEL, openSUSE | [`.rpm`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.4/brokey-0.1.4-1.x86_64.rpm) | [`.rpm`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.4/brokey-0.1.4-1.aarch64.rpm) |
-| Any other Linux | [AppImage](https://github.com/Spillebulle/Brokey/releases/download/v0.1.4/Brokey-0.1.4-x86_64.AppImage), one file with nothing to install | [AppImage](https://github.com/Spillebulle/Brokey/releases/download/v0.1.4/Brokey-0.1.4-aarch64.AppImage) |
+| Arch, CachyOS, EndeavourOS, Manjaro | [`.pkg.tar.zst`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.5/brokey-bin-0.1.5-1-x86_64.pkg.tar.zst) | not built |
+| Debian, Ubuntu, Mint, Pop!_OS | [`.deb`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.5/brokey_0.1.5_amd64.deb) | [`.deb`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.5/brokey_0.1.5_arm64.deb) |
+| Fedora, RHEL, openSUSE | [`.rpm`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.5/brokey-0.1.5-1.x86_64.rpm) | [`.rpm`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.5/brokey-0.1.5-1.aarch64.rpm) |
+| Any other Linux | [AppImage](https://github.com/Spillebulle/Brokey/releases/download/v0.1.5/Brokey-0.1.5-x86_64.AppImage), one file with nothing to install | [AppImage](https://github.com/Spillebulle/Brokey/releases/download/v0.1.5/Brokey-0.1.5-aarch64.AppImage) |
+| Windows 11, Windows 10 | [`setup.exe`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.5/brokey-setup-0.1.5-x64.exe) | [`setup.exe`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.5/brokey-setup-0.1.5-arm64.exe) |
 
 The `.deb` and `.rpm` add the [Spillebulle archive](https://spillebulle.github.io/packages/)
 as they install, so `apt upgrade` or your usual system update carries Brokey
@@ -41,6 +42,11 @@ You need WebKitGTK 4.1 and polkit, which every desktop distribution ships and th
 packages pull in. Installing asks for your password through the same prompt your
 desktop uses for everything else, and the confirm step says beforehand how many
 times it will ask.
+
+The setup executable is Brokey with an MSI carried inside it: double-click it
+and it installs Brokey and opens it, the way any Windows installer does. The
+`.msi` it carries is published beside it, for anyone deploying Brokey across a
+fleet with the tools that expect one.
 
 Brokey checks for its own new versions when it starts and shows a notice with
 the release notes. You can turn that off in **Settings**.
@@ -102,7 +108,7 @@ guessing.
 - An application installed by hand, such as a browser unpacked into your home folder, is not listed: no package manager has a record of it.
 - AppImages from GitHub releases are placed in `~/.local/bin` without a menu entry yet.
 - A Flatpak of Brokey itself is not published: a sandboxed store cannot reach the helper.
-- Windows support is being built and is not in a release yet. On Windows, Brokey searches winget's catalogue, which it downloads and reads itself, so search works on a machine that has never had winget. It lists what Add/Remove Programs knows about and works out how each entry would be removed, and where winget itself is installed it matches those entries to winget packages to find what has an update. Installing, updating and removing work: the window never elevates, and each stretch of steps that needs Administrator costs one prompt to allow. There is no installer yet, so Windows is built from source. Applications have no icons or descriptions there, and one whose Add/Remove Programs name carries its version is listed more than once. Chocolatey, Scoop and the Microsoft Store come next.
+- Windows joined the platforms Brokey supports in 0.1.5. Brokey searches winget's catalogue, which it downloads and reads itself, so search works on a machine that has never had winget. It lists what Add/Remove Programs knows about and works out how each entry would be removed, and where winget itself is installed it matches those entries to winget packages to find what has an update. Installing, updating and removing work: the window never elevates, and each stretch of steps that needs Administrator costs one prompt to allow. Take the setup executable, or the `.msi` beside it, from the table above. Applications have no icons or descriptions there, and one whose Add/Remove Programs name carries its version is listed more than once. Chocolatey, Scoop and the Microsoft Store come next.
 
 ## Controls
 
