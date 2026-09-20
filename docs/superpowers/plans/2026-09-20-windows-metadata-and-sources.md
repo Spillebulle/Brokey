@@ -899,7 +899,115 @@ git commit -m "Windows: a winget package describes itself"
 
 ---
 
-### Task 6: The sources join the application
+### Task 6: The closed list learns Chocolatey
+
+**Added after task 3, because task 3 found it.** Without this task, Chocolatey
+appears in the page, searches, lists what is installed, and then refuses every
+install, update and removal.
+
+`transaction/allow.rs:275` dispatches on the step's source and its Windows arm
+knows two: `SourceKind::Winget` and `SourceKind::Arp`. Everything else falls to
+`other => Err(not_allowed(...))`. Every Chocolatey step carries
+`needs_root: true`, because the default install root is under
+`C:\ProgramData`, so every one of them is a root run, and
+`runner.rs:201` validates every root run against the closed list before it
+prompts. So the refusal is early and safe rather than a failure half way
+through an install, and it is still a refusal.
+
+**This widens a security boundary, so it is its own task with its own review.**
+The discipline is not negotiable and `check_winget` already sets it: the closed
+list does not inspect the command it is handed and decide whether it looks
+acceptable. It **rebuilds** what the source would have produced from the
+command's own program and package id, and requires the two to be equal whole.
+A command that is not exactly a command this source builds is refused, and
+there is nothing to argue about at the margin.
+
+**Files:**
+- Modify: `crates/brokey-core/src/transaction/allow.rs`
+- Modify: `crates/brokey-helper/src/main.rs` only if its tests need it
+
+**Interfaces:**
+- Consumes: `choco::{OpKind, operation_step, choco_program}` from Task 3.
+  `operation_step(kind: OpKind, id: &str, program: &str) -> Step` is the same
+  shape as winget's, deliberately.
+
+- [ ] **Step 1: Read `check_winget` before writing anything**
+
+`allow.rs:291` is the model, and this task is that function with three values
+changed. Read it and the doc comment above it in full first. Note especially
+why it refuses an id beginning with a dash: without that, an argument that is
+really an option gets rebuilt into the very command it came from, and the
+comparison agrees with itself. That trap is identical here.
+
+- [ ] **Step 2: Write the failing tests**
+
+In `allow.rs`'s test module, beside the winget ones, and named to say what
+they refuse:
+
+- `a_choco_install_the_source_would_build_is_allowed` — build a step with
+  `choco::operation_step`, check `check_step` accepts it, for all three of
+  `Install`, `Update` and `Remove`.
+- `a_choco_command_with_an_extra_argument_is_refused` — take a real step and
+  push one more argument.
+- `a_choco_command_missing_an_argument_is_refused` — drop `-y`.
+- `an_id_that_is_really_an_option_is_refused` — id `--force`, and id
+  `-y`. This is the trap the winget arm documents.
+- `a_program_that_is_not_choco_exe_is_refused` — `cmd.exe`, and a path whose
+  file name is `choco.exe.exe`.
+- `a_choco_exe_on_a_network_path_is_refused` — `\\somewhere\share\choco.exe`,
+  which `on_a_local_disk` exists to catch.
+- `a_choco_command_carrying_an_environment_is_refused` — a step whose `env`
+  is not empty. `operation_step` never sets one, so an equal comparison
+  catches it, and the test says out loud that it does.
+- `a_verb_choco_does_not_have_is_refused` — `list`, `push`, and the empty
+  verb of a command with no arguments at all.
+
+- [ ] **Step 3: Run them to watch them fail**
+
+Run: `cargo test -p brokey-core --lib transaction::allow`
+Expected: FAIL, with the new arm missing.
+
+- [ ] **Step 4: Write `check_choco` and add its arm**
+
+`SourceKind::Choco => check_choco(&step.command)`. The function mirrors
+`check_winget`: `on_a_local_disk`, then a file name of `choco.exe`, then the
+verb, then the id, then rebuild and compare whole.
+
+**The id is `args[1]` here, not `args[3]`.** `operation_step` builds
+`[verb, id, "-y"]` and appends `--remove-dependencies` for a removal, where
+winget's builds eight arguments with the id fourth. Copying winget's index is
+the mistake this note exists to prevent, and the tests above catch it.
+
+- [ ] **Step 5: Run them**
+
+Run: `cargo test -p brokey-core --lib transaction::allow`
+Expected: PASS.
+
+- [ ] **Step 6: Prove the arm is load-bearing**
+
+Delete the `SourceKind::Choco` arm so it falls through to `other`, run the
+suite, and confirm the accept tests fail. Then restore it, change the rebuild
+to compare only the program rather than the whole command, run again, and
+confirm the extra-argument test fails. Paste both results. A closed list whose
+tests pass with the list open is worth nothing.
+
+- [ ] **Step 7: Check the helper's own tests still hold**
+
+Run: `cargo test -p brokey-helper` and `cargo test --workspace`
+Expected: PASS. `brokey-helper/src/main.rs:859` and `:910` assert things about
+the allowed set; read them before assuming they are unaffected.
+
+- [ ] **Step 8: Gates, then commit**
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+git commit -m "Windows: the closed list learns Chocolatey"
+```
+
+---
+
+### Task 7: The sources join the application
 
 Nothing above is reachable from the window until this task runs.
 
@@ -913,6 +1021,11 @@ Nothing above is reachable from the window until this task runs.
 In interface order: `Arp`, `Winget`, `Choco`, `Scoop`. Update the existing
 test `windows_has_add_remove_programs_and_winget`, its name included, to
 assert all four in that order.
+
+Scoop needs nothing from the closed list and that is not an oversight: every
+step it builds carries `needs_root: false`, so none of them is a root run and
+none reaches the helper at all. Task 4's
+`nothing_scoop_does_ever_needs_administrator` is what keeps that true.
 
 - [ ] **Step 2: Run the whole suite**
 
