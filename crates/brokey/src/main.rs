@@ -23,8 +23,39 @@ fn is_text_mode(args: &[String]) -> bool {
     first != "--" && (!first.starts_with('-') || TEXT_FLAGS.contains(&first.as_str()))
 }
 
+/// Whether this launch is the setup executable installing Brokey.
+///
+/// **The payload decides, and an argument does not.** A setup executable is
+/// downloaded and double-clicked, so it is started with no command line at
+/// all; a rule that waited for `--install` would leave it with no way to reach
+/// its own installer, and it would open Brokey out of a Downloads folder
+/// instead. `setup/payload.rs` states that rule and
+/// `a_file_carrying_a_package_is_recognised_by_its_last_bytes_alone` pins it.
+/// This is where it is acted on.
+///
+/// **Nothing changes for an ordinary copy of Brokey.** A `brokey.exe` from the
+/// MSI, from a build, or from anywhere else carries no package, so this is
+/// false and the window opens as it always has. The cost on that path is a
+/// seek and sixteen bytes, which is what `payload::carried_by` reads.
+///
+/// A separate function, taking the two answers rather than working them out,
+/// so the rule can be tested without a payload-carrying binary to hand.
+#[cfg(windows)]
+fn is_setup_run(has_arguments: bool, carries_a_package: bool) -> bool {
+    !has_arguments && carries_a_package
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(windows)]
+    {
+        let carries_a_package = std::env::current_exe()
+            .map(|path| brokey_lib::setup::payload::carried_by(&path))
+            .unwrap_or(false);
+        if is_setup_run(!args.is_empty(), carries_a_package) {
+            std::process::exit(brokey_lib::setup::install());
+        }
+    }
     if is_text_mode(&args) {
         std::process::exit(brokey_lib::cli::run(&args));
     }
@@ -65,6 +96,35 @@ mod tests {
     #[test]
     fn the_install_flag_is_not_the_window() {
         assert!(is_text_mode(&args(&["--install"])));
+    }
+
+    /// **What makes a binary the installer, at the one place it is decided.**
+    ///
+    /// The setup executable is double-clicked, which means no arguments at
+    /// all, so the package on the end of the file is the only signal there
+    /// is. An ordinary `brokey.exe` carries none, and must still open the
+    /// window however it is started.
+    #[cfg(windows)]
+    #[test]
+    fn a_double_clicked_setup_executable_installs_and_nothing_else_does() {
+        use super::is_setup_run;
+
+        // Double-clicked setup: no arguments, a package on the end.
+        assert!(is_setup_run(false, true));
+
+        // Every ordinary copy of Brokey, however it is started. This is the
+        // half that says no existing user's Brokey changes.
+        assert!(!is_setup_run(false, false), "brokey.exe opens the window");
+        assert!(
+            !is_setup_run(true, false),
+            "brokey search steam is text mode"
+        );
+
+        // A setup executable given a command line is not a double-click, so it
+        // is whatever that command line says: `brokey-setup.exe --version`
+        // prints a version, and `--install` reaches the installer through
+        // `is_text_mode` and `cli::run` rather than through here.
+        assert!(!is_setup_run(true, true));
     }
 
     #[test]
