@@ -14,7 +14,7 @@
 //! `Source::setup` answers `None` here on purpose; see its doc comment.
 
 use crate::http::Client;
-use crate::model::{Command, Op, Package, Picture, SourceKind, SourceStatus, Step};
+use crate::model::{Command, Op, Package, PackageKind, Picture, SourceKind, SourceStatus, Step};
 use crate::{Error, Query, Result, Setup, Source, Update};
 use quick_xml::Reader;
 use quick_xml::escape::resolve_predefined_entity;
@@ -269,12 +269,29 @@ fn split_tags(tags: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// What every package this source builds is drawn as.
+///
+/// Neither a `.nuspec` nor a feed entry says whether it describes an
+/// application: there is no such field in either, so nothing can be read
+/// off the feed to decide it one package at a time. This source takes
+/// winget's position instead, which `winget::to_package` states by setting
+/// the same value: Chocolatey exists to install applications, so its
+/// entries are applications.
+///
+/// Leaving `Package::new`'s `PackageKind::Package` in place is not the
+/// neutral choice it looks like. The Search page starts on its Applications
+/// filter, so a package drawn as `Package` is hidden behind the "hidden by
+/// the Applications filter" line the moment it arrives, and Chocolatey
+/// would be invisible on a default search.
+const KIND: PackageKind = PackageKind::App;
+
 /// An installed package's `Package`, from its `.nuspec`. `installed` is
 /// always `true`: this only ever runs on a `.nuspec` this source found under
 /// `lib`, and there is no other way this source learns about a package.
 pub fn to_package_from_nuspec(n: &Nuspec) -> Package {
     let name = n.title.clone().unwrap_or_else(|| n.id.clone());
     let mut p = Package::new(SourceKind::Choco, n.id.clone(), name);
+    p.kind = KIND;
     p.installed = true;
     p.installed_version = Some(n.version.clone());
     p.version = Some(n.version.clone());
@@ -479,6 +496,7 @@ pub fn to_package_from_entry(e: &SearchEntry) -> Package {
         e.name.clone()
     };
     let mut p = Package::new(SourceKind::Choco, e.id.clone(), name);
+    p.kind = KIND;
     p.summary = e.summary.clone();
     p.description = e.description.clone();
     p.version = e.version.clone();
@@ -906,6 +924,23 @@ mod tests {
             p2.icon, None,
             "no <iconUrl> means no icon, not an empty one"
         );
+    }
+
+    /// Both halves of this source build applications, not bare packages.
+    /// The Search page starts on its Applications filter, so a package
+    /// drawn as `PackageKind::Package` never reaches the user at all: it is
+    /// counted as hidden and nothing else. This asserts the kind on a
+    /// package built from a `.nuspec` and on one built from a feed entry,
+    /// because the two are built by different functions and only one of
+    /// them was ever exercised by the older tests.
+    #[test]
+    fn a_chocolatey_package_is_an_application() {
+        let n = parse_nuspec(&fixture_bytes("choco-vlc-nightly.nuspec")).expect("it parses");
+        assert_eq!(to_package_from_nuspec(&n).kind, PackageKind::App);
+
+        let entries = parse_search(&fixture_bytes("search.xml")).expect("it parses");
+        let from_feed = entries.first().expect("the fixture has entries");
+        assert_eq!(to_package_from_entry(from_feed).kind, PackageKind::App);
     }
 
     #[test]

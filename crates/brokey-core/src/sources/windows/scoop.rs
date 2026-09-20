@@ -28,7 +28,7 @@
 //! `Source::setup` answers `None` here on purpose; see its doc comment.
 
 use crate::http::Client;
-use crate::model::{Command, Op, Package, SourceKind, SourceStatus, Step};
+use crate::model::{Command, Op, Package, PackageKind, SourceKind, SourceStatus, Step};
 use crate::{Error, Query, Result, Setup, Source, Update};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -218,6 +218,21 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest> {
     serde_json::from_slice(bytes).map_err(|e| manifest_json_error(&e))
 }
 
+/// What every package this source builds is drawn as.
+///
+/// A Scoop manifest has no field saying whether it describes an
+/// application, so nothing can be read off a bucket to decide it one
+/// manifest at a time. This source takes winget's position instead, which
+/// `winget::to_package` states by setting the same value: Scoop exists to
+/// install applications, so its manifests are applications.
+///
+/// Leaving `Package::new`'s `PackageKind::Package` in place is not the
+/// neutral choice it looks like. The Search page starts on its Applications
+/// filter, so a package drawn as `Package` is hidden behind the "hidden by
+/// the Applications filter" line the moment it arrives, and Scoop would be
+/// invisible on a default search.
+const KIND: PackageKind = PackageKind::App;
+
 /// One manifest's `Package`, from its id (the manifest's own file name,
 /// without `.json`, which is also the name Scoop and its buckets know it
 /// by) and its parsed fields. `installed` stays `false`; [`to_installed_package`]
@@ -225,6 +240,7 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest> {
 /// `choco::to_package_from_nuspec` and `choco::joined`.
 pub fn to_package(id: &str, m: &Manifest) -> Package {
     let mut p = Package::new(SourceKind::Scoop, id.to_string(), id.to_string());
+    p.kind = KIND;
     p.version = Some(m.version.clone());
     p.description = m.description.clone();
     p.homepage = m.homepage.clone();
@@ -1066,6 +1082,19 @@ mod tests {
         let installed = scoop.installed().unwrap();
         assert_eq!(installed.len(), 1);
         assert_eq!(installed[0].id, "7zip");
+    }
+
+    /// Every package this source builds is an application, not a bare
+    /// package. The Search page starts on its Applications filter, so a
+    /// package drawn as `PackageKind::Package` never reaches the user at
+    /// all: it is counted as hidden and nothing else. Both builders are
+    /// asserted, because `to_installed_package` is what the Installed page
+    /// and the installed half of a search go through.
+    #[test]
+    fn a_scoop_package_is_an_application() {
+        let m = sevenzip();
+        assert_eq!(to_package("7zip", &m).kind, PackageKind::App);
+        assert_eq!(to_installed_package("7zip", &m).kind, PackageKind::App);
     }
 
     /// `count_installed` only has to see that a manifest is present; it must
