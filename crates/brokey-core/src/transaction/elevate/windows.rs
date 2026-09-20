@@ -471,9 +471,23 @@ pub fn start(helper: &Path, wrapper: &[String]) -> io::Result<Elevated> {
         return Err(err);
     }
 
-    // SAFETY: `ShellExecuteExW` succeeded above with `SEE_MASK_NOCLOSEPROCESS`
-    // set, which is documented to fill `hProcess` with a fresh handle this
-    // call now owns exclusively.
+    // SAFETY, AND IT DOES NOT HOLD TODAY. `ShellExecuteExW` succeeded above
+    // with `SEE_MASK_NOCLOSEPROCESS` set, but succeeding is not the same as
+    // starting a process: `hProcess` comes back null when the verb was
+    // handled without one, and nothing above checks for that. `OwnedHandle`'s
+    // niche excludes zero, so on that path this line is undefined behaviour
+    // rather than an error found later. `crates/brokey/src/setup/mod.rs`
+    // makes the same call and tests `hProcess.is_null()` before this step;
+    // that check is the one this wants.
+    //
+    // It is left standing deliberately rather than patched in passing. This
+    // is the privilege path every install, update and removal on Windows goes
+    // through, so it is the first item of the next plan that touches Windows
+    // and it wants a review of its own rather than a fix folded into someone
+    // else's branch. That plan should also add `SEE_MASK_NOASYNC` to the mask
+    // above, which omits it: `ShellExecuteEx` is documented to need that flag
+    // when it is called from a thread with no message pump, and this call is
+    // made from one, the runner's worker thread.
     let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess as RawHandle) };
     // Built immediately so every error path below, not just the success
     // path, owns the process and can wait on it rather than abandoning it.
