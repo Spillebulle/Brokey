@@ -535,11 +535,27 @@ variable is unset, each holding `<id>.nuspec`. That file is XML whose
 `description`, `summary`, `projectUrl`, `licenseUrl`, `iconUrl` and `tags`.
 Parse it with `quick-xml`, which the workspace already has.
 
-**What it searches.** The community feed, OData v2, at
-`https://community.chocolatey.org/api/v2/Search()?$filter=IsLatestVersion&$top=<limit>&searchTerm='<query>'`.
-The reply is Atom XML: each `<entry>` carries `<title>` and `<summary>`, and
-an `<m:properties>` element with `Version`, `Description`, `IconUrl`,
-`ProjectUrl`, `LicenseUrl`, `DownloadCount` and `PackageSize`.
+**What it searches.** The community feed, OData v2. The query was run before
+this plan was written, and it is fussier than the obvious form: leaving off
+`targetFramework` or `includePrerelease` answers 400 with "Error in query
+syntax", not a useful message. Use exactly this, percent-encoding the query:
+
+```
+https://community.chocolatey.org/api/v2/Search()?$filter=IsLatestVersion&$top=<limit>&searchTerm='<query>'&targetFramework=''&includePrerelease=false
+```
+
+The reply is Atom XML, and **the package id is not where you would expect it.
+There is no `d:Id` property at all.** In each `<entry>`:
+
+- `<title type="text">` is the **id**, `7zip`.
+- `<d:Title>` is the **display name**, `7-Zip`. These are different values and
+  the page wants both.
+- `<summary type="text">` is a one-line summary; `<d:Description>` is the long
+  form and carries Markdown, including `##` headings and `-` lists.
+- `<m:properties>` also holds `Version`, `IconUrl`, `ProjectUrl`,
+  `LicenseUrl`, `PackageSize`, `DownloadCount`, `Tags` (space separated, not
+  comma separated) and `Published`.
+- `<id>` is an OData URL, not an id. Do not parse it for one; the title has it.
 
 **Steps.** `choco install <id> -y`, `choco upgrade <id> -y` and
 `choco uninstall <id> -y --remove-dependencies`. Every one needs
@@ -551,14 +567,26 @@ searchable the way winget does, because the feed is HTTP and needs no tool.
 For `setup()`, follow the row for Chocolatey in the spec's table under
 "Setting a manager up from inside Brokey" rather than inventing a command.
 
-- [ ] **Step 1: Write the fixtures**
+- [ ] **Step 1: Put the fixtures in place**
 
-Write `tests/fixtures/choco/googlechrome.nuspec` and
+The search fixture is real, was fetched from the feed above before this plan
+ran, and waits in this plan's workspace. Copy it rather than fetching again:
+
+```bash
+W=.superpowers/sdd/2026-09-20-windows-metadata-and-sources
+mkdir -p crates/brokey-core/tests/fixtures/choco
+cp "$W/choco-search.xml" crates/brokey-core/tests/fixtures/choco/search.xml
+```
+
+It holds two entries, `7zip` and `GoogleChrome`, trimmed to the properties
+this source reads. `7zip`'s `d:Description` carries Markdown headings, and its
+`<title>` and `<d:Title>` differ, which is the case the reader gets wrong if
+it takes the id from the wrong element.
+
+Then write `tests/fixtures/choco/googlechrome.nuspec` and
 `tests/fixtures/choco/7zip.nuspec` by hand, each a short but real-shaped
 `.nuspec`. Give one of them a `<title>` and an `<iconUrl>` and the other
-neither, so the fallbacks below have something to fall back from. Write
-`tests/fixtures/choco/search.xml` as a two-entry Atom reply in the shape
-described above. Do not download any of them.
+neither, so the fallbacks below have something to fall back from.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -567,7 +595,11 @@ All pure, so they run on Linux:
   homepage, and `installed == true`.
 - `a_nuspec_without_a_title_falls_back_to_its_id`.
 - `an_icon_url_becomes_a_url_picture` — `Picture::Url`, never `Picture::File`.
-- `a_search_reply_becomes_packages` — against `search.xml`.
+- `a_search_reply_becomes_packages` — against `search.xml`, asserting both
+  entries.
+- `the_id_comes_from_the_atom_title_and_the_name_from_d_title` — `7zip`
+  against `7-Zip`, by name, because taking either from the other element is
+  the mistake this source is most likely to make.
 - `a_reply_that_is_not_xml_is_an_error_not_a_panic`.
 - `every_operation_needs_administrator` — the exact argument vector of each
   step, and `needs_root == true` on all of them.
