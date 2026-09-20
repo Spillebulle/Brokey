@@ -552,8 +552,16 @@ fn check_choco(command: &Command) -> Result<(), String> {
 /// attacker may write, and being told no. A removable or remote volume is
 /// therefore refused before any of that is asked, by the one rule that a
 /// program which is to run as Administrator sits on a local fixed disk.
-/// `DRIVE_REMOTE` is what a mapped drive and a UNC path both answer, so the
-/// same rule covers the spelling as well as the mapping.
+///
+/// The two spellings of a remote volume are refused by two different lines
+/// here, which is worth saying because the drive type does not do both. A
+/// UNC path names no drive letter, so it never reaches `GetDriveTypeW` at
+/// all: the prefix check above is what refuses it. A mapped drive does
+/// reach it and answers `DRIVE_REMOTE`. Measured on the development
+/// machine, which has four fixed volumes and three mapped ones: `C:\` and
+/// `\\?\C:\` answer 3, `Z:\` answers 4, the UNC root that `X:` is mapped to
+/// answers 4 when it is asked directly, and a drive letter nothing is
+/// mounted on answers 1.
 ///
 /// Every real resolution of winget answers `true` to this: the App
 /// Execution Alias lives under a drive letter in the user's own profile,
@@ -580,10 +588,11 @@ fn on_a_local_disk(path: &Path) -> bool {
 /// letter is spelt back out as `X:\` rather than the path being handed on:
 /// the verbatim form carries its own prefix and the rest of the path is not
 /// the volume. A letter nothing is mounted on answers `DRIVE_NO_ROOT_DIR`,
-/// a mapped network drive and a UNC path answer `DRIVE_REMOTE`, and a
-/// `subst` drive answers whatever its backing volume is, which is the right
-/// answer: its elements are measured on that volume by every other question
-/// the gate puts.
+/// a mapped network drive answers `DRIVE_REMOTE`, and a `subst` drive
+/// answers whatever its backing volume is, which is the right answer: its
+/// elements are measured on that volume by every other question the gate
+/// puts. Nothing without a drive letter is ever asked, so no UNC root
+/// reaches this.
 #[cfg(windows)]
 fn a_fixed_volume(letter: u8) -> bool {
     let root: [u16; 4] = [u16::from(letter), u16::from(b':'), u16::from(b'\\'), 0];
