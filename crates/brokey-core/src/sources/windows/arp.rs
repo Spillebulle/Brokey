@@ -8,13 +8,21 @@
 //!
 //! Everything here is a pure function of [`RawEntry`], and is tested against
 //! a fixture rather than against whatever happens to be installed on the
-//! machine running the tests, with two exceptions: [`read`], which is what
-//! turns the registry into a `RawEntry` in the first place, and
+//! machine running the tests, with three exceptions: [`read`], which is what
+//! turns the registry into a `RawEntry` in the first place;
 //! [`msiexec_program`], which asks the machine for its own system directory
-//! rather than for anything installed on it. `msiexec_program` still has a
-//! machine-dependent test beside its fixture-driven callers, in this same
-//! module, because it is the only test that would catch a mistake in the
-//! syscall behind it.
+//! rather than for anything installed on it; and [`icon`], which is the only
+//! thing in this module that touches the disk at all and the only one that
+//! writes. It hands the entry's `DisplayIcon` value to [`icon::reference`]
+//! to be parsed, which is pure, and then to [`icon::cached`], which reads
+//! the file that value names and writes an `.ico` into the cache directory.
+//! [`to_package`] calls it on every entry, so listing what is installed
+//! reads a file per application and can leave new files behind.
+//! `msiexec_program` still has a machine-dependent test beside its
+//! fixture-driven callers, in this same module, because it is the only test
+//! that would catch a mistake in the syscall behind it; `icon` is covered by
+//! `icon.rs`'s own tests, which write their sources into a temporary
+//! directory.
 
 use super::icon;
 use crate::model::{Command, Op, Package, PackageKind, Picture, SourceKind, Step};

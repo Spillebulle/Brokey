@@ -1066,7 +1066,10 @@ mod tests {
     }
 
     /// A plan for an operation this source has nothing to do with is empty, not
-    /// an error. The store asks every source about every operation.
+    /// an error. The store never asks for one: `transaction::plan`'s `Gatherer`
+    /// looks the operation's own source up and asks that source alone. What
+    /// this pins is the trait's contract, which a caller holding a `dyn Source`
+    /// relies on.
     #[test]
     fn an_operation_for_another_source_plans_nothing() {
         let w = Winget::new(crate::http::Client::shared());

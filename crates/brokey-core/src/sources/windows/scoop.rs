@@ -803,9 +803,12 @@ impl Source for Scoop {
             })
     }
 
-    /// An operation for another source's package plans nothing: the store
-    /// asks every source about every operation, and this is the one that
-    /// belongs to Scoop.
+    /// An operation for another source's package plans nothing rather than
+    /// failing. The store never asks for one: `transaction::plan`'s
+    /// `Gatherer` looks the operation's own source up with `Store::source`
+    /// and asks that source alone. So this arm is a guard on the trait's
+    /// contract, which a caller holding a `dyn Source` relies on, rather
+    /// than the path anything takes in the running application.
     ///
     /// An operation that is Scoop's, on a machine that has no Scoop, is an
     /// error rather than a step. Nothing here elevates, so the cost is not

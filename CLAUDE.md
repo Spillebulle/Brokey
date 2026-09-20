@@ -37,10 +37,12 @@ workspaces with the same release shape, the same updater rules, the same
 packaging scriptlets). When a question here has an answer there, take it.
 
 UI follows `../Design-Principles/STYLE-GUIDE.md` and uses `tokens.css`. The
-accent is `#D42B48`, set as `--accent-fixed` with `--accent-h` at `18`: Brokey
-is the one app that takes the style guide's §2.3 exception for a brand colour
-that must match exactly, so the accent is not derived from the hue and
-`--accent-ink` is white rather than the house near-black. Desktop application,
+accent is `#D42B48`, set as `--accent-fixed` with `--accent-h` at `18` and
+`--accent-ink-fixed` at `#FFFFFF`: Brokey is the one app that takes the style
+guide's §2.3 exception for a brand colour that must match exactly, so the
+accent is not derived from the hue and `--accent-ink` resolves to white
+rather than the house near-black. Those three values are the only thing
+edited in this copy of `tokens.css`. Desktop application,
 so **never** `class="web"` on the root.
 Never a raw hex in a component.
 
@@ -49,7 +51,7 @@ Never a raw hex in a component.
 | | |
 |---|---|
 | Language | Rust 2024 edition, stable toolchain, one workspace; TypeScript for the page |
-| Interface | Tauri 2 + React 19 + Vite. Plain CSS: `frontend/src/tokens.css` (verbatim from Design-Principles) and `frontend/src/app.css` (components). No Tailwind, no CSS-in-JS |
+| Interface | Tauri 2 + React 19 + Vite. Plain CSS: `frontend/src/tokens.css` (copied from Design-Principles, with the three accent values above set here under the style guide's 2.3 exception and nothing else edited) and `frontend/src/app.css` (components). No Tailwind, no CSS-in-JS |
 | Icons | Lucide, through `lucide-react`. Nothing hand-drawn; nothing from a CDN |
 | Font | Archivo, bundled from `assets/fonts/` |
 | Databases | Read directly in pure Rust. No libalpm, no libapt, and on Windows no shelling out to winget/choco/etc to parse their output |
@@ -141,7 +143,8 @@ crates/brokey/icons/icon.ico
 frontend/src/
   main.tsx, App.tsx shell, routing by view state
   api.ts            typed wrappers over invoke(); mock.ts stands in under `vite dev`
-  tokens.css        never edited here; copied from Design-Principles
+  tokens.css        copied from Design-Principles; the only edits here are
+                    --accent-h, --accent-fixed and --accent-ink-fixed
   app.css           components, one block per §7 component, prefixed class names
   components/       Button, Dropdown, MultiSelect, Segmented, Toggle, Field, Badge, Row, Card, Panel, Dialog, Toast, Progress
   pages/            Search, AppDetail, Installed, Updates, Drivers, Settings
@@ -215,7 +218,10 @@ These were decided before the first line and are not re-litigated in a fix:
   because the two sides spelt a tag differently and each tested its own.
 - **CHANGELOG.md is the release notes.** `crates/brokey/tests/release.rs`
   fails if the section for the current version is missing or is not newest.
-- **`frontend/src/tokens.css` is not edited here.** It is a copy; a change
+- **`frontend/src/tokens.css` is a copy, and the only thing edited in it
+  here is the accent.** `--accent-h`, `--accent-fixed` and
+  `--accent-ink-fixed` are set in this copy, under the style guide's 2.3
+  exception for a brand colour that must match exactly. Every other change
   goes to Design-Principles first and is copied back.
 
 ## Things that look like shortcuts and are not
