@@ -16,6 +16,27 @@ crate-type = ["lib", "cdylib", "staticlib"]
 name = "brokey"
 path = "src/main.rs"
 
+# Tauri decides at compile time whether the window loads the frontend compiled
+# into this binary or the Vite dev server, and it decides by this feature:
+# `tauri`'s own documentation calls it "managed by the Tauri CLI" and its
+# `dev` flag is literally `!cfg!(feature = "custom-protocol")`.
+#
+# `tauri build` passes it and a plain `cargo build --release` does not, which is
+# the trap: `packaging/windows/build-msi.sh` builds with cargo directly, because
+# Tauri's own bundler makes an AppImage rather than an MSI. Without this, the
+# release binary is a development build that opens `http://localhost:1420` and
+# shows "localhost refused to connect" on a machine with no dev server. It did,
+# in 0.1.5, in a signed-off installer.
+#
+# So it is a *default* feature rather than one the build command has to
+# remember. Forgetting a flag then costs a developer their hot reload, which
+# they notice at once, instead of shipping an application that cannot draw
+# anything, which nobody noticed for a whole plan. `npm run app:dev` passes
+# `--no-default-features` to opt back out.
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2.6", features = [] }
 
@@ -42,6 +63,12 @@ windows-sys = { workspace = true, features = [
   "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
   "Win32_Security_Cryptography",
+  # `console.rs` needs this one. It builds without it today only by accident:
+  # `env_logger` pulls `anstyle-wincon`, which turns it on for the same
+  # windows-sys 0.61, and Cargo unifies the features. Spelled out here so that
+  # a change to a logging dependency cannot break the text mode's console with
+  # an unresolved import and nothing to point at the cause.
+  "Win32_System_Console",
   "Win32_System_LibraryLoader",
   "Win32_System_Threading",
   "Win32_UI_HiDpi",

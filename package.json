@@ -10,7 +10,7 @@
     "lint": "tsc --noEmit -p tsconfig.json",
     "check:design": "node tools/check-design.mjs",
     "tauri": "tauri",
-    "app:dev": "tauri dev --config crates/brokey/tauri.conf.json",
+    "app:dev": "tauri dev --no-default-features --config crates/brokey/tauri.conf.json",
     "app:build": "tauri build --config crates/brokey/tauri.conf.json"
   },
   "dependencies": {
