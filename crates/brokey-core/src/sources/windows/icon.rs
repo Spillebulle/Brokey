@@ -77,6 +77,54 @@ pub fn reference(display_icon: &str) -> Option<Reference> {
     })
 }
 
+/// The largest file [`cached`] will read an icon out of.
+///
+/// `reference.path` comes from an Add or remove programs `DisplayIcon`
+/// value, which is a string whatever installer wrote that key put there.
+/// Nothing in the registry bounds it, so without a limit a value naming a
+/// very large file makes Brokey allocate that file whole, once per entry,
+/// while the Installed page is listing applications. A pagefile, a virtual
+/// machine disk or an ISO named there would each be read in full.
+///
+/// The figure is 256 MiB, and it is not the "a few megabytes is generous
+/// for an executable" limit it ought to be, because that instinct is wrong
+/// and was measured to be wrong. Over the 132 `DisplayIcon` values in this
+/// machine's three uninstall keys, 131 of which name a file that is
+/// actually there: the median is 1.4 MB, but 53 are over 4 MB, 24 over
+/// 8 MB and 17 over 32 MB. An Electron application's icon carrier is the
+/// application, so `Code - Insiders.exe` at 237 MB and `Vortex.exe` at
+/// 211 MB are ordinary entries, and each carries the icon the page draws
+/// for it. A few megabytes would have taken the icon off two fifths of the
+/// applications on this machine.
+///
+/// So the limit sits above the body of that distribution rather than above
+/// an intuition. One file here exceeds it, `Root.exe` at 616 MB, and loses
+/// its icon and draws the fallback: that is the trade this takes
+/// deliberately, one entry in 131 against a read with no bound at all.
+const MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// A file's bytes, or `None` when it is missing, unreadable, or larger than
+/// `limit`.
+///
+/// The handle is opened first and its own metadata asked, rather than
+/// `std::fs::metadata` on the path, and the read is bounded by `take` as
+/// well: a file that grows between the question and the read is then still
+/// bounded, instead of the size check being advice the read need not
+/// follow. `limit` is an argument rather than [`MAX_SOURCE_BYTES`] read
+/// directly so that a test can put both sides of the rule without writing
+/// a quarter of a gigabyte to disk.
+fn read_within(path: &Path, limit: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    if size > limit {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.take(limit).read_to_end(&mut bytes).ok()?;
+    Some(bytes)
+}
+
 /// A stable file name for a `(path, wanted)` pair, so the same reference
 /// always names the same cache entry and two different ones are
 /// overwhelmingly unlikely to collide (a 64-bit hash can collide; nothing
@@ -106,12 +154,14 @@ fn cache_name(reference: &Reference) -> String {
 }
 
 /// The cached `.ico` for a reference, extracting it the first time. `None`
-/// when the file is gone, unreadable, or carries no icon.
+/// when the file is gone, unreadable, larger than [`MAX_SOURCE_BYTES`], or
+/// carries no icon.
 ///
 /// The cache is named from a hash of the lowercased path together with the
 /// index, under `cache.join("icons")`. When that file is already there it is
 /// returned without touching the source at all. Otherwise the source is
-/// read: four leading bytes of `00 00 01 00` mean it is already an `.ico` and
+/// read, within the limit above: four leading bytes of `00 00 01 00` mean it
+/// is already an `.ico` and
 /// it is copied through untouched; anything else goes to [`pe::icon`]. The
 /// result is written to a temporary name unique to this call, in the same
 /// directory as `dest`, and renamed into place, so a single caller never
@@ -134,7 +184,7 @@ pub fn cached(cache: &Path, reference: &Reference) -> Option<PathBuf> {
         return Some(dest);
     }
 
-    let bytes = std::fs::read(&reference.path).ok()?;
+    let bytes = read_within(&reference.path, MAX_SOURCE_BYTES)?;
     let ico = if bytes.get(0..4) == Some(&ICO_MAGIC[..]) {
         bytes
     } else {
@@ -538,6 +588,52 @@ mod tests {
             wanted: Wanted::Nth(0),
         };
         assert_eq!(cached(&cache, &r), None);
+    }
+
+    /// Both sides of the size limit, put to a file of a known length with
+    /// the limit as an argument, so the rule is tested without writing a
+    /// quarter of a gigabyte to disk. A file exactly at the limit is read,
+    /// because the limit is what is allowed and not what is refused, and
+    /// one byte more is not read at all.
+    #[test]
+    fn a_file_over_the_limit_is_never_read() {
+        let dir = tempdir();
+        let source = dir.path().join("carrier.bin");
+        std::fs::write(&source, vec![0x5Au8; 64]).unwrap();
+
+        assert_eq!(
+            read_within(&source, 64).as_deref().map(<[u8]>::len),
+            Some(64),
+            "a file exactly at the limit is read"
+        );
+        assert_eq!(
+            read_within(&source, 65).as_deref().map(<[u8]>::len),
+            Some(64),
+            "a file under the limit is read"
+        );
+        assert_eq!(
+            read_within(&source, 63),
+            None,
+            "one byte over the limit is not read"
+        );
+        assert_eq!(
+            read_within(&source, 0),
+            None,
+            "a limit of nothing reads nothing"
+        );
+
+        let missing = dir.path().join("nothing-here.bin");
+        assert_eq!(read_within(&missing, 1024), None, "a missing file is None");
+    }
+
+    /// The limit `cached` actually uses, pinned so that changing it is a
+    /// deliberate act with this file's doc comment in front of the person
+    /// changing it. 256 MiB was chosen from the sizes of the 131 resolvable
+    /// `DisplayIcon` files on the development machine, not from an
+    /// intuition about how big an executable is.
+    #[test]
+    fn the_limit_is_the_measured_one() {
+        assert_eq!(MAX_SOURCE_BYTES, 268_435_456);
     }
 
     #[test]
