@@ -31,23 +31,25 @@ use std::ptr;
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, GetLastError, HANDLE, HLOCAL,
-    LocalFree,
+    ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, GetLastError,
+    HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree,
 };
 #[cfg(windows)]
 use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
 #[cfg(windows)]
 use windows_sys::Win32::Security::{
-    AccessCheck, DACL_SECURITY_INFORMATION, DuplicateToken, GENERIC_MAPPING,
-    GROUP_SECURITY_INFORMATION, GetTokenInformation, MapGenericMask, OWNER_SECURITY_INFORMATION,
-    PRIVILEGE_SET, PSECURITY_DESCRIPTOR, SecurityImpersonation, TOKEN_DUPLICATE, TOKEN_ELEVATION,
-    TOKEN_LINKED_TOKEN, TOKEN_QUERY, TokenElevation, TokenLinkedToken,
+    AccessCheck, DACL_SECURITY_INFORMATION, DuplicateTokenEx, GENERIC_MAPPING,
+    GROUP_SECURITY_INFORMATION, GetTokenInformation, ImpersonateLoggedOnUser, MapGenericMask,
+    OWNER_SECURITY_INFORMATION, PRIVILEGE_SET, PSECURITY_DESCRIPTOR, RevertToSelf,
+    SecurityImpersonation, TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_IMPERSONATE, TOKEN_LINKED_TOKEN,
+    TOKEN_QUERY, TokenElevation, TokenImpersonation, TokenLinkedToken,
 };
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA,
-    FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-    FILE_WRITE_DATA, WRITE_DAC, WRITE_OWNER,
+    CreateFileW, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA,
+    FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
+    FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA,
+    OPEN_EXISTING, WRITE_DAC, WRITE_OWNER,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -270,16 +272,20 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 /// and the source does it once, so the source and this list name the same
 /// file by construction and there is no second resolution here.
 ///
-/// That is not the same as winget being admitted, and this comment does not
-/// claim it is. On the development machine every element of the resolved
-/// path answers "this account cannot replace this", but
-/// `GetNamedSecurityInfoW` on `C:\Program Files\WindowsApps` itself fails
-/// with `ERROR_ACCESS_DENIED`: a standard user may traverse that directory
-/// and may not read its security descriptor. A question that cannot be put
-/// is a refusal, so a winget step is refused by [`cannot_be_checked`] and
-/// no longer by [`can_be_replaced`]. Whether a descriptor this account is
-/// denied read access to should count as one it cannot write is a decision
-/// about this gate, and it has not been made.
+/// Resolving the alias was not by itself enough to admit a winget step,
+/// and one more thing had to change before it was.
+/// `GetNamedSecurityInfoW` on `C:\Program Files\WindowsApps` fails with
+/// `ERROR_ACCESS_DENIED`, because reading a security descriptor needs
+/// `READ_CONTROL` and a standard user is granted none on that directory,
+/// so the question could not be put and the step was refused by
+/// [`cannot_be_checked`]. A descriptor this account may not read is not an
+/// answer, so the gate now asks the object instead: it opens that element
+/// for each right that would let this account replace it, which
+/// [`any_right_granted_on`] describes. On the development machine that
+/// directory is the only element of the resolved winget path whose
+/// descriptor is unreadable, and it refuses every one of those opens, so
+/// the step is admitted, and it is admitted on a measurement rather than on
+/// an inference from what could not be read.
 ///
 /// `choco.exe` is admitted by the same rule, through a function of the
 /// same shape.
@@ -391,10 +397,14 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 ///   when it is run, with the error starting a program that is not there
 ///   produces, and not as a refusal here.
 ///
-/// A question that cannot be put is a refusal: an unreadable descriptor, a
-/// path Windows will not name, and an elevated process with no unelevated
-/// token linked to it all end in [`cannot_be_checked`] rather than in
-/// `Ok(())`.
+/// A question that cannot be put is a refusal: a path Windows will not
+/// name, an error that is neither a denial nor a missing name, and an
+/// elevated process with no unelevated token linked to it all end in
+/// [`cannot_be_checked`] rather than in `Ok(())`. A descriptor this account
+/// may not read is not one of those. It is a question put a different way
+/// rather than one that cannot be put: the object is opened for each right
+/// instead, which is what [`any_right_granted_on`] explains and what admits
+/// the winget under `C:\Program Files\WindowsApps`.
 #[cfg(windows)]
 pub fn check_step(step: &Step, allowed: &Allowed) -> Result<(), String> {
     match step.source {
@@ -585,10 +595,10 @@ const FILE_MAPPING: GENERIC_MAPPING = GENERIC_MAPPING {
 /// A security descriptor `GetNamedSecurityInfoW` allocated, freed once when
 /// the value goes out of scope, however the scope is left.
 ///
-/// Every path through [`program_this_process_cannot_replace`] leaves that
-/// scope by returning or by the loop moving on, and both run `drop`; there
-/// is no other constructor, the type is neither `Copy` nor `Clone`, and the
-/// pointer is never handed anywhere that would free it a second time.
+/// It lives no longer than the one call to [`any_right_granted_on`] that
+/// read it, and every path out of that function drops it; there is no other
+/// constructor, the type is neither `Copy` nor `Clone`, and the pointer is
+/// never handed anywhere that would free it a second time.
 #[cfg(windows)]
 struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
 
@@ -607,6 +617,13 @@ impl Drop for SecurityDescriptor {
 /// that says why there is none. A path that is not there answers
 /// `ERROR_FILE_NOT_FOUND` or `ERROR_PATH_NOT_FOUND`, which the caller turns
 /// into a question about the directory above rather than a failure.
+///
+/// A descriptor is metadata this account has to be granted `READ_CONTROL`
+/// to read, and there are directories that grant it none:
+/// `C:\Program Files\WindowsApps`, where winget really lives, answers
+/// `ERROR_ACCESS_DENIED` on this machine, measured with `Get-Acl`
+/// unelevated. That error is not a failure of the walk either.
+/// [`any_right_granted_on`] puts the question to the object instead.
 #[cfg(windows)]
 fn descriptor_of(path: &Path) -> Result<SecurityDescriptor, u32> {
     let wide: Vec<u16> = path
@@ -702,18 +719,162 @@ fn any_right_granted(
     Ok(false)
 }
 
+/// Whether this account is granted any one of `rights` on `path`, or the
+/// Win32 error that says the question could not be put. This is the one
+/// question the walk asks of a path, and it has two instruments behind it.
+///
+/// The primary one is `AccessCheck` on the path's own security descriptor.
+/// It reads metadata, opens no handle, and so cannot trip over a file
+/// somebody else has open or over a share mode.
+///
+/// The fallback is for one answer only: a descriptor this account may not
+/// read. Reading one needs `READ_CONTROL`, and
+/// `C:\Program Files\WindowsApps` grants this account none, so
+/// `GetNamedSecurityInfoW` there answers `ERROR_ACCESS_DENIED` and the
+/// primary instrument has nothing to check against. A descriptor that
+/// cannot be read is not an answer, so the object itself is asked instead,
+/// by [`any_right_opened_on`]. That is a direct measurement and not the
+/// cheaper inference that a descriptor this account cannot read describes
+/// an object this account cannot write: an entry can grant `WRITE_DAC`
+/// without granting `READ_CONTROL`, and this gate is the one place in
+/// Brokey where that case is worth the code to rule out.
+///
+/// `ERROR_FILE_NOT_FOUND` and `ERROR_PATH_NOT_FOUND` are passed on
+/// unchanged, because [`program_this_process_cannot_replace`] matches on
+/// them to find the first element that is not on the disk and put
+/// [`CREATE_A_NAME`] to the directory above it.
+#[cfg(windows)]
+fn any_right_granted_on(path: &Path, token: &OwnedHandle, rights: &[u32]) -> Result<bool, u32> {
+    match descriptor_of(path) {
+        Ok(descriptor) => any_right_granted(&descriptor, token, rights),
+        Err(ERROR_ACCESS_DENIED) => any_right_opened_on(path, token, rights),
+        Err(other) => Err(other),
+    }
+}
+
+/// Whether `token` can open `path` for any one of `rights`, asked of the
+/// object rather than of its descriptor. An open that succeeds proves the
+/// right is granted; an open refused with `ERROR_ACCESS_DENIED` proves it
+/// is not; anything else is a question that could not be put and comes back
+/// as `Err`, `ERROR_SHARING_VIOLATION` included.
+///
+/// Nothing is created, written or deleted. `OPEN_EXISTING` brings no file
+/// into being, and a handle opened for `DELETE` access deletes nothing: the
+/// deletion is a separate call that is never made here, and the handle is
+/// closed on the line after it is opened. `FILE_FLAG_BACKUP_SEMANTICS` is
+/// what lets a directory be opened at all, and every element above the
+/// program is one. The share mode is the widest there is, so a file another
+/// process holds open is still answered rather than refused for a reason
+/// that has nothing to do with permissions.
+///
+/// The opens are made under [`ImpersonateLoggedOnUser`], because a
+/// `CreateFileW` from the elevated helper's own thread would be answered
+/// for Administrator and would refuse every program on the machine. The
+/// guard reverts the thread on every path out of here, a panic included.
+#[cfg(windows)]
+fn any_right_opened_on(path: &Path, token: &OwnedHandle, rights: &[u32]) -> Result<bool, u32> {
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let _impersonating = Impersonating::begin(token)?;
+    for right in rights {
+        // SAFETY: `wide` is a null-terminated wide string that outlives the
+        // call; a null security-attributes pointer is the documented way to
+        // ask for the default; and `OPEN_EXISTING` requires the template
+        // handle to be null, which it is.
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                *right,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                ptr::null_mut(),
+            )
+        };
+        if handle != INVALID_HANDLE_VALUE {
+            // SAFETY: `handle` is the one the successful call above
+            // returned and nothing else has taken ownership of it, so this
+            // closes it exactly once, here and now.
+            drop(unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) });
+            return Ok(true);
+        }
+        // SAFETY: `GetLastError` takes no arguments and reads this thread's
+        // own last error code, which the failed call above has just set.
+        let error = unsafe { GetLastError() };
+        if error != ERROR_ACCESS_DENIED {
+            return Err(error);
+        }
+    }
+    Ok(false)
+}
+
+/// The thread impersonating a token, reverted when the value goes out of
+/// scope, however the scope is left.
+///
+/// A thread left impersonating is not a leak that shows up as one: every
+/// later call on it would be answered for the wrong account. So the revert
+/// is a `Drop` rather than a line at the end of the function, which a `?`
+/// or a panic would step over.
+#[cfg(windows)]
+struct Impersonating;
+
+#[cfg(windows)]
+impl Impersonating {
+    /// The thread impersonates `token` until the value returned is dropped.
+    /// `token` has to carry `TOKEN_IMPERSONATE`, which is why
+    /// [`impersonation_of`] asks for it by name.
+    fn begin(token: &OwnedHandle) -> Result<Impersonating, u32> {
+        // SAFETY: `token` is an open impersonation token that is alive for
+        // the call, and the call takes nothing else.
+        let began = unsafe { ImpersonateLoggedOnUser(token.as_raw_handle() as HANDLE) };
+        if began == 0 {
+            // SAFETY: `GetLastError` takes no arguments and reads this
+            // thread's own last error code.
+            return Err(unsafe { GetLastError() });
+        }
+        Ok(Impersonating)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Impersonating {
+    fn drop(&mut self) {
+        // SAFETY: `RevertToSelf` takes no arguments and acts on the calling
+        // thread, which `begin` put into impersonation and which nothing
+        // between then and now has reverted.
+        unsafe { RevertToSelf() };
+    }
+}
+
 /// `token` again as an impersonation token, which is the only kind
-/// `AccessCheck` takes.
+/// `AccessCheck` takes, and with `TOKEN_IMPERSONATE` on the handle, which
+/// is the only kind `ImpersonateLoggedOnUser` takes.
+///
+/// `DuplicateTokenEx` rather than `DuplicateToken` for that second reason
+/// alone. `DuplicateToken` asks for the same access the source handle has,
+/// and the process token is opened with `TOKEN_QUERY | TOKEN_DUPLICATE`, so
+/// the probe would fail to impersonate and the step would be refused for a
+/// reason that has nothing to do with its permissions. The rights asked for
+/// here are the three the two instruments between them need and no more.
 #[cfg(windows)]
 fn impersonation_of(token: &OwnedHandle) -> Result<OwnedHandle, u32> {
     let mut raw: HANDLE = ptr::null_mut();
     // SAFETY: `token` is open with `TOKEN_DUPLICATE` and alive for the
-    // call, and `raw` is a writable out-parameter which the call sets, on
-    // success only, to a handle this process owns alone.
+    // call; a null security-attributes pointer is the documented way to ask
+    // for the default; and `raw` is a writable out-parameter which the call
+    // sets, on success only, to a handle this process owns alone.
     let duplicated = unsafe {
-        DuplicateToken(
+        DuplicateTokenEx(
             token.as_raw_handle() as HANDLE,
+            TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE,
+            ptr::null(),
             SecurityImpersonation,
+            TokenImpersonation,
             &mut raw,
         )
     };
@@ -812,6 +973,11 @@ fn an_unelevated_impersonation_token() -> Result<OwnedHandle, u32> {
     let linked = unsafe { OwnedHandle::from_raw_handle(link.LinkedToken as RawHandle) };
     // A linked token is already an impersonation token, so when it cannot
     // be duplicated it is used as it stands rather than the step refused.
+    // The duplicate is what carries `TOKEN_IMPERSONATE`, and `AccessCheck`
+    // does not need it, so the fallback still answers every path whose
+    // descriptor can be read and only loses the probe. That is the elevated
+    // helper's second check of a plan the unelevated end has already
+    // admitted, so what it costs is a refusal, never an admission.
     Ok(impersonation_of(&linked).unwrap_or(linked))
 }
 
@@ -827,6 +993,10 @@ fn an_unelevated_impersonation_token() -> Result<OwnedHandle, u32> {
 /// may, the whole chain below is the attacker's to build, which is the
 /// planted case; if it may not, nothing can appear there without
 /// Administrator and the program is admitted although it is not there.
+///
+/// Each of those questions goes to [`any_right_granted_on`], which reads
+/// the element's descriptor where it can and opens the element itself where
+/// it cannot.
 #[cfg(windows)]
 fn program_this_process_cannot_replace(program: &str) -> Result<(), String> {
     let token = an_unelevated_impersonation_token().map_err(|_| cannot_be_checked(program))?;
@@ -834,35 +1004,32 @@ fn program_this_process_cannot_replace(program: &str) -> Result<(), String> {
     let mut chain: Vec<&Path> = Path::new(program).ancestors().collect();
     chain.reverse();
 
-    let mut above: Option<SecurityDescriptor> = None;
-    for (index, element) in chain.iter().enumerate() {
+    // The element before this one, which is the directory that would have
+    // to grant the name when the walk runs off the end of the disk. A
+    // `&Path` rather than the descriptor it used to be, because the
+    // descriptor is now one instrument of two and belongs inside
+    // [`any_right_granted_on`] rather than in the loop state.
+    let mut above: Option<&Path> = None;
+    for (index, element) in chain.iter().copied().enumerate() {
         let leaf = index + 1 == chain.len();
-        match descriptor_of(element) {
-            Ok(descriptor) => {
-                let rights: &[u32] = if leaf {
-                    &REPLACE_A_FILE
-                } else {
-                    &REPLACE_A_DIRECTORY
-                };
-                if any_right_granted(&descriptor, &token, rights)
-                    .map_err(|_| cannot_be_checked(program))?
-                {
-                    return Err(can_be_replaced(program));
-                }
-                above = Some(descriptor);
-            }
+        let rights: &[u32] = if leaf {
+            &REPLACE_A_FILE
+        } else {
+            &REPLACE_A_DIRECTORY
+        };
+        match any_right_granted_on(element, &token, rights) {
+            Ok(true) => return Err(can_be_replaced(program)),
+            Ok(false) => above = Some(element),
             Err(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) => {
-                let Some(above) = above.as_ref() else {
+                let Some(above) = above else {
                     // Not even the drive answered, so there is nothing left
                     // to put the question to.
                     return Err(cannot_be_checked(program));
                 };
-                return if any_right_granted(above, &token, &CREATE_A_NAME)
-                    .map_err(|_| cannot_be_checked(program))?
-                {
-                    Err(can_be_replaced(program))
-                } else {
-                    Ok(())
+                return match any_right_granted_on(above, &token, &CREATE_A_NAME) {
+                    Ok(true) => Err(can_be_replaced(program)),
+                    Ok(false) => Ok(()),
+                    Err(_) => Err(cannot_be_checked(program)),
                 };
             }
             Err(_) => return Err(cannot_be_checked(program)),
@@ -2683,35 +2850,101 @@ mod windows_tests {
         }
     }
 
-    /// The end-to-end question this change was made to answer, and the part
-    /// of it the change does not settle. A live-machine test, skipped with a
-    /// reason where winget is not installed rather than failed.
+    /// The case the fallback exists for, put to the two functions directly
+    /// rather than through a step, so that a later change which quietly
+    /// stopped reaching the probe would be caught here.
     ///
-    /// Before the alias was resolved, `winget_program` answered the alias in
-    /// `%LOCALAPPDATA%\Microsoft\WindowsApps`: a zero-length reparse point
-    /// in a folder the invoking user has full control of, so the gate
-    /// refused it with [`can_be_replaced`], the sentence about a program
-    /// this account can put different bytes at. It now answers the
-    /// executable `CreateProcess` really starts, under
-    /// `C:\Program Files\WindowsApps`, and that refusal is gone: every
-    /// element of the resolved path answers "this account cannot replace
-    /// this", measured element by element on the development machine.
+    /// `C:\Program Files\WindowsApps` grants this account no `READ_CONTROL`,
+    /// so its descriptor cannot be read and `descriptor_of` says so with
+    /// `ERROR_ACCESS_DENIED`; asked the same question about the same
+    /// directory, [`any_right_granted_on`] opens it for each right instead
+    /// and answers that none of them is granted. Skipped where that
+    /// directory is not on the machine. It assumes the suite is run
+    /// unelevated, which is a rule of this arm anyway: an administrator can
+    /// read that descriptor, and then there is nothing to fall back from.
+    #[test]
+    fn a_descriptor_that_cannot_be_read_is_asked_of_the_object_instead() {
+        let windows_apps =
+            Path::new(&std::env::var("ProgramFiles").expect("Windows sets ProgramFiles"))
+                .join("WindowsApps");
+        if !windows_apps.exists() {
+            eprintln!("skipped: this machine has no {}", windows_apps.display());
+            return;
+        }
+        assert_eq!(
+            descriptor_of(&windows_apps).err(),
+            Some(ERROR_ACCESS_DENIED),
+            "a standard user may traverse {} and may not read its security",
+            windows_apps.display()
+        );
+        let token = an_unelevated_impersonation_token()
+            .expect("this process has a token that stands for it without Administrator");
+        assert_eq!(
+            any_right_granted_on(&windows_apps, &token, &REPLACE_A_DIRECTORY),
+            Ok(false),
+            "the probe answers the directory the descriptor could not"
+        );
+    }
+
+    /// The probe discriminates rather than always saying no, which is the
+    /// failure that would look exactly like the gate working. A directory
+    /// this process has just made is one it can delete, and the probe is
+    /// called directly so that the answer cannot come from the descriptor
+    /// road by accident: this one's descriptor reads perfectly well, so
+    /// through [`any_right_granted_on`] it would never reach the probe at
+    /// all.
     ///
-    /// The step is still not admitted here, for a reason this change did not
-    /// touch, and this test says so rather than claiming a pass.
-    /// `GetNamedSecurityInfoW` on `C:\Program Files\WindowsApps` itself
-    /// fails with `ERROR_ACCESS_DENIED` (5): a standard user may traverse
-    /// that directory but may not read its security descriptor, and
-    /// [`check_step`] refuses a path it cannot put its question to. Whether
-    /// a descriptor this account is denied even read access to should count
-    /// as "cannot replace" is a decision about the gate, not about
-    /// resolution, and it is not made here.
+    /// It is also the test that proves the token carries
+    /// `TOKEN_IMPERSONATE`. Without it `ImpersonateLoggedOnUser` fails, the
+    /// probe answers `Err`, and every path whose descriptor cannot be read
+    /// is refused again, which is the outcome this change exists to stop.
+    #[test]
+    fn the_probe_says_yes_to_a_directory_this_account_can_replace() {
+        let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
+        let token = an_unelevated_impersonation_token()
+            .expect("this process has a token that stands for it without Administrator");
+        assert_eq!(
+            any_right_opened_on(dir.path(), &token, &REPLACE_A_DIRECTORY),
+            Ok(true),
+            "a directory this process made is one it can delete"
+        );
+        assert!(
+            dir.path().is_dir(),
+            "the probe opens and closes handles and changes nothing"
+        );
+    }
+
+    /// The end-to-end question this whole arm was built to answer: a winget
+    /// step naming the winget this machine really runs is admitted. A
+    /// live-machine test, skipped with a reason where winget is not
+    /// installed rather than failed.
     ///
-    /// So the assertion is the one that is true either way: the resolved
-    /// program is never refused for being replaceable. `Ok(())` passes, and
-    /// so does the sentence about a permission that could not be read. The
-    /// day the gate learns to answer that directory, this test passes
-    /// unchanged and the step is admitted.
+    /// It took three changes to get here, and the two refusals it passed
+    /// through are why the assertion is `Ok(())` and not something softer.
+    /// `winget_program` used to answer the alias in
+    /// `%LOCALAPPDATA%\Microsoft\WindowsApps`, a zero-length reparse point
+    /// in a folder the invoking user has full control of, and the gate
+    /// refused it with [`can_be_replaced`]. Resolving the alias moved the
+    /// refusal rather than ending it: `GetNamedSecurityInfoW` on
+    /// `C:\Program Files\WindowsApps` fails with `ERROR_ACCESS_DENIED`,
+    /// because reading a descriptor needs `READ_CONTROL` and that directory
+    /// grants this account none, so the step was refused by
+    /// [`cannot_be_checked`] instead. The gate now asks the object when it
+    /// cannot read the descriptor, and every element of the resolved path
+    /// answers that this account cannot replace it. Measured unelevated on
+    /// the development machine: that one directory is the only element
+    /// whose descriptor `Get-Acl` cannot read, the four others answer
+    /// through `AccessCheck` as before, and `CreateFileW` for
+    /// `FILE_ADD_FILE`, `FILE_DELETE_CHILD`, `DELETE`, `WRITE_DAC` and
+    /// `WRITE_OWNER` is refused with error 5 on `C:\`, on
+    /// `C:\Program Files` and on `C:\Program Files\WindowsApps`, while the
+    /// alias folder in `%LOCALAPPDATA%` grants all five, which is what says
+    /// the instrument discriminates rather than always saying no.
+    ///
+    /// A failure here on a machine where winget is installed is not a flaky
+    /// test. It means either that the resolution stopped working or that
+    /// one element of that path is one this account can write, and the
+    /// second would be worth knowing about.
     #[test]
     fn the_resolved_winget_is_not_a_program_this_account_can_replace() {
         use crate::sources::windows::winget::{winget_exe, winget_program};
@@ -2733,17 +2966,11 @@ mod windows_tests {
         );
 
         let step = operation_step(OpKind::Install, "Valve.Steam", &program);
-        match check_step(&step, &Allowed::system()) {
-            Ok(()) => eprintln!("admitted: {program}"),
-            Err(refusal) => {
-                assert_eq!(
-                    refusal,
-                    cannot_be_checked(&program),
-                    "the only refusal left is the unreadable descriptor of \
-                     C:\\Program Files\\WindowsApps"
-                );
-                eprintln!("not admitted, and not for being replaceable: {refusal}");
-            }
-        }
+        assert_eq!(
+            check_step(&step, &Allowed::system()),
+            Ok(()),
+            "the winget this machine really runs is one only an administrator can replace"
+        );
+        eprintln!("admitted: {program}");
     }
 }
