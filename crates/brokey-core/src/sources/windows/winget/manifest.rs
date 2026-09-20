@@ -34,12 +34,15 @@
 //! fails: [`parse`] always answers a [`Described`], filling what it
 //! recognised and leaving the rest empty. In particular it does **not**
 //! handle a nested mapping or a sequence of mappings (`Documentations:` is
-//! one, and is skipped whole rather than half read), flow style (`[a, b]`,
-//! `{a: b}`), anchors, aliases, tags, `---` document markers, or a plain
-//! scalar continued on a second line. Two smaller departures from YAML are
-//! deliberate: a `#` after a value on the same line is part of the value, so
-//! that a URL keeps its fragment, and a folded scalar does not implement the
-//! rule that a more-indented line keeps its own breaks.
+//! one, and is skipped whole rather than half read), anchors, aliases, tags,
+//! `---` document markers, or a plain scalar continued on a second line.
+//! Flow style is not parsed either, and under a key this reader reads it is
+//! kept as the text it is rather than ignored: a `PackageUrl: [a, b]` would
+//! become that whole string. No manifest `wingetcreate` writes takes that
+//! shape. Two smaller departures from YAML are deliberate: a `#` after a
+//! value on the same line is part of the value, so that a URL keeps its
+//! fragment, and a folded scalar does not implement the rule that a
+//! more-indented line keeps its own breaks.
 //!
 //! Where it is used: [`super::Winget`]'s `details` only, never its `search`.
 //! It is one HTTP fetch per package, and a search page of twenty results
@@ -181,7 +184,11 @@ fn block_style(rest: &str) -> Option<Block> {
 }
 
 /// The indented lines under a block scalar, with the indentation of the first
-/// of them taken off all of them, and trailing blank lines dropped. The
+/// of them taken off each line that has that much to give, and trailing blank
+/// lines dropped. A line indented less than the first loses only its own
+/// indentation rather than part of its text. In YAML such a line would have
+/// ended the block, so this never arises in a manifest; it is written this
+/// way because losing text is the worse of the two ways to be wrong. The
 /// chomping and indentation indicators are accepted and then ignored: the
 /// indentation comes from the first line rather than from a `|2`, and a value
 /// that ends in blank lines is not something a description wants.

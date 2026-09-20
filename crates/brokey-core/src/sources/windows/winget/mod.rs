@@ -22,9 +22,10 @@ use std::sync::Arc;
 /// rather than being guessed at, which is what `Package` already expects of a
 /// source that does not know them. This is what a search result is, and a
 /// search never fetches anything per package. [`Source::details`] asks for
-/// one package and can afford one request, so it fills the description, the
-/// homepage, the licence and the publisher from the locale manifest through
-/// [`manifest::describe`]. Icons arrive with a later plan.
+/// one package and can afford one request, so it fills the summary, the
+/// description, the homepage, the licence, the publisher and the categories
+/// from the locale manifest through [`manifest::describe`], which also
+/// appends two rows to the facts column. Icons arrive with a later plan.
 pub fn to_package(row: &query::Row) -> crate::model::Package {
     let mut facts = Vec::new();
     facts.push(("Package id".to_string(), row.id.clone()));
