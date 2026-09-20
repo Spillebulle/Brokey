@@ -641,15 +641,34 @@ git commit -m "Windows: Chocolatey is a source"
 **What it reads.** `%SCOOP%`, or `~\scoop` when that is unset. Installed
 applications are directories under `apps\<name>`, each with a `current`
 junction holding `manifest.json`. Buckets are under
-`buckets\<bucket>\bucket\*.json`. A manifest is JSON carrying `version`,
-`description`, `homepage`, `license` and `bin`. Parse with `serde_json`,
-which the workspace already has.
+`buckets\<bucket>\bucket\*.json`. Parse with `serde_json`, which the
+workspace already has.
+
+**A manifest's fields do not have one shape each,** which the two real
+manifests in the fixtures show. `license` is a plain string in `nodejs.json`
+(`"MIT"`) and an object in `7zip.json` (`{"identifier": ..., "url": ...}`);
+read both, taking the identifier out of the object. `bin` is a list in
+`7zip.json`, absent altogether in `nodejs.json`, and documented as also being
+a plain string or a list of lists (`[["path", "alias"]]`). A reader that
+assumes one shape works until it meets the other, so handle every shape or
+ignore the field, and never `unwrap` on its type.
 
 **What it searches.** The buckets on disk when scoop is installed. When it is
-not, the main bucket from GitHub, at
-`https://raw.githubusercontent.com/ScoopInstaller/Main/master/bucket/<name>.json`
-for one named package. Cache whatever is fetched through
-`crate::http::Client`, the way the winget catalogue is cached.
+not, the main bucket from GitHub. Two requests, both run before this plan was
+written:
+
+- The list of manifest names, once, from the bucket's git tree:
+  `https://api.github.com/repos/ScoopInstaller/Main/git/trees/<sha of bucket>`,
+  where that sha comes from
+  `https://api.github.com/repos/ScoopInstaller/Main/git/trees/master`. It
+  answers 1,654 names in one 465 KB reply, untruncated, and matching then
+  happens locally against it.
+- Then one manifest per match, from
+  `https://raw.githubusercontent.com/ScoopInstaller/Main/master/bucket/<name>.json`.
+
+Cache both through `crate::http::Client`, the way the winget catalogue is
+cached. A name that is not in Main answers 404 with an HTML body, so a failed
+parse there means "not in this bucket", not "the source is broken".
 
 **Steps.** `scoop install <name>`, `scoop update <name>` and
 `scoop uninstall <name>`. **`needs_root` is false on every one of them, and a
@@ -657,10 +676,23 @@ test says so by name.** The spec's line is that Scoop never elevates, ever;
 that is the whole point of Scoop, and a step of this source asking for
 Administrator would be a defect rather than a setting.
 
-- [ ] **Step 1: Write the fixtures and the failing tests**
+- [ ] **Step 1: Put the fixtures in place, then write the failing tests**
+
+Both manifests are real, were fetched before this plan ran, and wait in this
+plan's workspace. Copy them rather than fetching again:
+
+```bash
+W=.superpowers/sdd/2026-09-20-windows-metadata-and-sources
+mkdir -p crates/brokey-core/tests/fixtures/scoop
+cp "$W/scoop-7zip.json" crates/brokey-core/tests/fixtures/scoop/7zip.json
+cp "$W/scoop-nodejs.json" crates/brokey-core/tests/fixtures/scoop/nodejs.json
+```
 
 Tests, including by name:
-- `a_manifest_becomes_a_package`.
+- `a_manifest_becomes_a_package` — against `7zip.json`.
+- `a_licence_is_read_whether_it_is_a_string_or_an_object` — `nodejs.json`
+  gives `MIT` and `7zip.json` gives its identifier, down the same code path.
+- `a_manifest_without_a_bin_is_not_an_error` — `nodejs.json` has none.
 - `an_installed_app_reads_its_version_from_the_current_manifest`.
 - `nothing_scoop_does_ever_needs_administrator` — every step of every
   operation, with the reason in the test's doc comment.
