@@ -19,9 +19,38 @@
 #[cfg(windows)]
 use crate::model::SourceKind;
 use crate::model::{Command, Plan, Step};
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 #[cfg(unix)]
 use std::path::Component;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::ptr;
+
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, GetLastError, HANDLE, HLOCAL,
+    LocalFree,
+};
+#[cfg(windows)]
+use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+#[cfg(windows)]
+use windows_sys::Win32::Security::{
+    AccessCheck, DACL_SECURITY_INFORMATION, DuplicateToken, GENERIC_MAPPING,
+    GROUP_SECURITY_INFORMATION, GetTokenInformation, MapGenericMask, OWNER_SECURITY_INFORMATION,
+    PRIVILEGE_SET, PSECURITY_DESCRIPTOR, SecurityImpersonation, TOKEN_DUPLICATE, TOKEN_ELEVATION,
+    TOKEN_LINKED_TOKEN, TOKEN_QUERY, TokenElevation, TokenLinkedToken,
+};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA,
+    FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_WRITE_DATA, WRITE_DAC, WRITE_OWNER,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 /// The facts the closed list cannot derive for itself, handed to it by the
 /// caller: the directories a package file (`pacman -U`, `dpkg -i`, `rpm -U`,
@@ -190,6 +219,12 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 /// program it names; a removal from Add/Remove Programs is admitted only
 /// if its whole command is one the registry itself records.
 ///
+/// There is a second question, put to all three and described on
+/// [`check_step`]: whether this process could put different bytes at the
+/// program's own path. Provenance is about the command and says nothing
+/// about the file, and a file an unprivileged process can replace is one
+/// elevating grants nothing by.
+///
 /// `winget.exe` is a fixed program with a fixed set of commands, and
 /// [`operation_step`](crate::sources::windows::winget::operation_step) and
 /// [`update_all_step`](crate::sources::windows::winget::update_all_step)
@@ -217,14 +252,24 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 /// as `\\somewhere\share\winget.exe`, which answers `true` to
 /// `Path::is_absolute` on Windows and would be started over the network.
 ///
-/// What is left unaddressed, and cannot be addressed by a rule about the
-/// path: `winget_program` resolves to an app execution alias under the
-/// invoking user's own profile, which that user can replace with anything
-/// at any time. Elevating a program the user can overwrite is inherent to
-/// running winget as Administrator at all, on every machine, and is not a
-/// gap this check introduces or could close by naming a "real" path more
-/// precisely; there is no path to winget that is not, in the end, somewhere
-/// the user who is about to be granted Administrator can write.
+/// What this arm leaves open, and what now closes it: `winget_program`
+/// resolves to an app execution alias under the invoking user's own
+/// profile, which that user can replace with anything at any time, so
+/// arguments of the right shape around a file the user owns would still
+/// have been elevated. No rule about the *path* can close that, because
+/// there is no path to winget that is not, in the end, somewhere the user
+/// who is about to be granted Administrator can write. A rule about the
+/// *file* does, and it is not in this arm but after it, in
+/// [`check_step`]: a program this process can replace is refused whatever
+/// source asked for it.
+///
+/// That has a consequence worth saying out loud rather than discovering.
+/// On a machine where winget is reached through that alias, which is every
+/// machine this crate has been run on, the gate refuses it, so nothing
+/// installs through winget as Administrator any more. It is the rule
+/// working: elevating a file the invoking user can overwrite grants
+/// Administrator to whoever overwrote it. A winget on a path only an
+/// administrator can write would pass unchanged.
 ///
 /// `choco.exe` is admitted by the same rule, through a function of the
 /// same shape.
@@ -289,20 +334,70 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether one step may run as Administrator, and why not when it may not.
+///
+/// Two questions, both of which a step has to answer. The first is the
+/// source's own and is about the command: the arms below rebuild what the
+/// source would have produced and compare it whole, or, for a removal,
+/// compare the command against the ones the registry records.
+///
+/// The second is [`program_this_process_cannot_replace`] and is about the
+/// file, and it is asked of every program this list admits, whatever
+/// source asked for it, so that a source added later inherits it rather
+/// than having to remember it. It refuses a program this process could put
+/// different bytes at, because elevating such a program hands
+/// Administrator to whoever put them there, which is no privilege boundary
+/// at all. The file itself is asked, and so is every directory above it up
+/// to the drive, and a path nothing can be read from is refused rather than
+/// admitted.
+///
+/// What the second question does not settle, and nothing here claims it
+/// does:
+///
+/// - **That the program is what it says it is.** It asks who may write the
+///   file, never what is in it. A `choco.exe` under `C:\ProgramData` that
+///   only an administrator can write passes whether or not Chocolatey put
+///   it there, and no signature, hash or publisher is looked at.
+/// - **That the file will still be that file when it starts.** The answer
+///   is true of the moment it is given. Between this check and
+///   `ShellExecuteEx` a permission can change, and on a path where nothing
+///   unprivileged can write, only an administrator could make that happen.
+/// - **A junction or a symbolic link in the middle of the path.** Each
+///   element is asked about by name, and Windows answers for what the name
+///   leads to, so a link this account could repoint is measured by its
+///   target's permissions and not by its own.
+/// - **What an elevated program then does.** A directory on the DLL search
+///   path that this account can write is not this check's question; a
+///   working directory is, and it is the whole-command comparison above
+///   that refuses one.
+/// - **Anyone but this account.** `AccessCheck` is put one token: this
+///   process's, or the unelevated token linked to it when the process is
+///   the elevated helper. Another user, a service or an administrator who
+///   can write the file is not what is being asked about, because none of
+///   them gains anything from Brokey elevating it.
+/// - **That the program is installed at all.** A path that is not on the
+///   disk is admitted when nothing unprivileged could create it, because
+///   nothing can appear there without Administrator. Such a step fails
+///   when it is run, with the error starting a program that is not there
+///   produces, and not as a refusal here.
+///
+/// A question that cannot be put is a refusal: an unreadable descriptor, a
+/// path Windows will not name, and an elevated process with no unelevated
+/// token linked to it all end in [`cannot_be_checked`] rather than in
+/// `Ok(())`.
 #[cfg(windows)]
 pub fn check_step(step: &Step, allowed: &Allowed) -> Result<(), String> {
     match step.source {
-        SourceKind::Winget => check_winget(&step.command),
-        SourceKind::Choco => check_choco(&step.command),
+        SourceKind::Winget => check_winget(&step.command)?,
+        SourceKind::Choco => check_choco(&step.command)?,
         SourceKind::Arp => {
-            if allowed.removals.contains(&step.command) {
-                Ok(())
-            } else {
-                Err(not_allowed(&step.command.program))
+            if !allowed.removals.contains(&step.command) {
+                return Err(not_allowed(&step.command.program));
             }
         }
-        other => Err(not_allowed(&format!("{other:?}"))),
+        other => return Err(not_allowed(&format!("{other:?}"))),
     }
+    program_this_process_cannot_replace(&step.command.program)
 }
 
 /// Whether `command` is one the winget source would have built, rebuilt
@@ -420,6 +515,373 @@ fn on_a_local_disk(path: &Path) -> bool {
             Some(Component::Prefix(prefix))
                 if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
         )
+}
+
+/// The rights that would let this process put its own bytes at the
+/// program's own path: overwrite it, append to it, delete it so that a new
+/// file can take the name, or rewrite its security descriptor so that it
+/// could do any of those. Any one of them is enough, which is why they are
+/// asked one at a time and the first yes ends the question.
+///
+/// `WRITE_DAC` and `WRITE_OWNER` are here because a descriptor grants them
+/// to the object's owner whether or not an entry says so, so a file this
+/// account created is one this account can always re-permit.
+#[cfg(windows)]
+const REPLACE_A_FILE: [u32; 5] = [
+    FILE_WRITE_DATA,
+    FILE_APPEND_DATA,
+    DELETE,
+    WRITE_DAC,
+    WRITE_OWNER,
+];
+
+/// The rights that would let this process swap out a directory on the way
+/// to the program: delete or rename the directory itself, delete what is
+/// inside it, or rewrite its security descriptor so that it could.
+///
+/// `FILE_DELETE_CHILD` is asked of the directory rather than left to the
+/// child, because that right removes a child whose own descriptor refuses
+/// `DELETE`, and nothing in the child's descriptor says so.
+///
+/// `FILE_ADD_FILE` and `FILE_ADD_SUBDIRECTORY` are deliberately not here.
+/// Being allowed to add a name to a directory is not being allowed to take
+/// a name that is already taken, and a stock Windows grants exactly that on
+/// `C:\ProgramData` to `BUILTIN\Users`, so asking for it would refuse every
+/// program under `C:\ProgramData`, including a properly installed
+/// Chocolatey. They are asked of the directory above a name that is *not*
+/// taken instead, by [`CREATE_A_NAME`].
+#[cfg(windows)]
+const REPLACE_A_DIRECTORY: [u32; 4] = [DELETE, FILE_DELETE_CHILD, WRITE_DAC, WRITE_OWNER];
+
+/// The rights that would let this process bring the missing part of a path
+/// into being. This is the planted case itself: `C:\ProgramData\chocolatey`
+/// does not exist on a machine without Chocolatey, `C:\ProgramData` lets
+/// any user create a directory, so an unprivileged process makes the folder
+/// and puts its own `choco.exe` at the end of it.
+#[cfg(windows)]
+const CREATE_A_NAME: [u32; 2] = [FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY];
+
+/// How `AccessCheck` is to read a right that a stored descriptor still
+/// spells generically. These are the file system's own four mappings.
+#[cfg(windows)]
+const FILE_MAPPING: GENERIC_MAPPING = GENERIC_MAPPING {
+    GenericRead: FILE_GENERIC_READ,
+    GenericWrite: FILE_GENERIC_WRITE,
+    GenericExecute: FILE_GENERIC_EXECUTE,
+    GenericAll: FILE_ALL_ACCESS,
+};
+
+/// A security descriptor `GetNamedSecurityInfoW` allocated, freed once when
+/// the value goes out of scope, however the scope is left.
+///
+/// Every path through [`program_this_process_cannot_replace`] leaves that
+/// scope by returning or by the loop moving on, and both run `drop`; there
+/// is no other constructor, the type is neither `Copy` nor `Clone`, and the
+/// pointer is never handed anywhere that would free it a second time.
+#[cfg(windows)]
+struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
+
+#[cfg(windows)]
+impl Drop for SecurityDescriptor {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is the pointer a successful
+        // `GetNamedSecurityInfoW` handed back, which is documented to be
+        // released with `LocalFree`, and this is the only place that
+        // releases it.
+        unsafe { LocalFree(self.0 as HLOCAL) };
+    }
+}
+
+/// The security descriptor of one file or directory, or the Win32 error
+/// that says why there is none. A path that is not there answers
+/// `ERROR_FILE_NOT_FOUND` or `ERROR_PATH_NOT_FOUND`, which the caller turns
+/// into a question about the directory above rather than a failure.
+#[cfg(windows)]
+fn descriptor_of(path: &Path) -> Result<SecurityDescriptor, u32> {
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: `wide` is a null-terminated wide string that outlives the
+    // call; the four SID and ACL out-parameters are null, which is the
+    // documented way of asking for none of them; and `descriptor` is a
+    // writable out-parameter which the call sets, on success only, to
+    // memory it has allocated and this process owns.
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        // Nothing is allocated on a failure, so there is nothing to free.
+        return Err(status);
+    }
+    // SAFETY: the call above succeeded, so `descriptor` is the one pointer
+    // it allocated and nothing else owns it.
+    Ok(SecurityDescriptor(descriptor))
+}
+
+/// Whether `token` is granted any one of `rights` on the object
+/// `descriptor` describes, or the Win32 error that says the question could
+/// not be put.
+///
+/// One `AccessCheck` per right, because `AccessCheck` answers "all of
+/// these" and the question here is "any of these": a program that can only
+/// be deleted is as replaceable as one that can be overwritten.
+#[cfg(windows)]
+fn any_right_granted(
+    descriptor: &SecurityDescriptor,
+    token: &OwnedHandle,
+    rights: &[u32],
+) -> Result<bool, u32> {
+    for right in rights {
+        let mut desired = *right;
+        // SAFETY: `desired` is a writable `u32` local and `FILE_MAPPING` is
+        // a fully initialised `GENERIC_MAPPING` that outlives the call. It
+        // only rewrites generic bits, of which these rights have none, and
+        // is called because `AccessCheck` is documented to be given a mask
+        // with no generic bits left in it.
+        unsafe { MapGenericMask(&mut desired, &FILE_MAPPING) };
+
+        // `AccessCheck` writes the privileges it used here. A file check
+        // uses none, but the call insists on somewhere to put them. Sixty
+        // four `u32`s is far more than a `PRIVILEGE_SET` of a few entries
+        // needs, and an array of `u32` is aligned for one, whose fields are
+        // all four bytes wide.
+        let mut privileges = [0u32; 64];
+        let mut privileges_len = std::mem::size_of_val(&privileges) as u32;
+        let mut granted: u32 = 0;
+        let mut allowed: windows_sys::core::BOOL = 0;
+        // SAFETY: `descriptor.0` is a descriptor this process owns and
+        // `token` an open impersonation token, both alive for the whole
+        // call; `FILE_MAPPING` is fully initialised; `privileges` is a
+        // writable buffer whose true byte length is in `privileges_len`;
+        // and the remaining out-parameters are writable locals of the types
+        // the signature names.
+        let asked = unsafe {
+            AccessCheck(
+                descriptor.0,
+                token.as_raw_handle() as HANDLE,
+                desired,
+                &FILE_MAPPING,
+                privileges.as_mut_ptr().cast::<PRIVILEGE_SET>(),
+                &mut privileges_len,
+                &mut granted,
+                &mut allowed,
+            )
+        };
+        if asked == 0 {
+            // SAFETY: `GetLastError` takes no arguments and reads this
+            // thread's own last error code.
+            return Err(unsafe { GetLastError() });
+        }
+        if allowed != 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `token` again as an impersonation token, which is the only kind
+/// `AccessCheck` takes.
+#[cfg(windows)]
+fn impersonation_of(token: &OwnedHandle) -> Result<OwnedHandle, u32> {
+    let mut raw: HANDLE = ptr::null_mut();
+    // SAFETY: `token` is open with `TOKEN_DUPLICATE` and alive for the
+    // call, and `raw` is a writable out-parameter which the call sets, on
+    // success only, to a handle this process owns alone.
+    let duplicated = unsafe {
+        DuplicateToken(
+            token.as_raw_handle() as HANDLE,
+            SecurityImpersonation,
+            &mut raw,
+        )
+    };
+    if duplicated == 0 {
+        // SAFETY: `GetLastError` takes no arguments and reads this thread's
+        // own last error code.
+        return Err(unsafe { GetLastError() });
+    }
+    // SAFETY: `raw` was set by the successful call above to a fresh handle
+    // nothing else owns, so `OwnedHandle` may take it and close it once.
+    Ok(unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) })
+}
+
+/// An impersonation token that stands for this process without
+/// Administrator: its own token when the process is not elevated, and the
+/// filtered token linked to it when it is.
+///
+/// The elevated case is not a nicety. The helper runs this same check while
+/// it is Administrator, and Administrators are granted write on most of the
+/// machine, so asking the elevated token would refuse every program there
+/// is and nothing would ever install. `TokenLinkedToken` is the standard
+/// user token UAC filtered out of the elevated one, which is the token the
+/// window itself holds, so both ends of the seam put the same question and
+/// get the same answer.
+///
+/// What that does not give is the *invoking* user's token when somebody
+/// else's administrator credentials answered the prompt: the linked token
+/// is then that administrator's, not the user's. The unelevated end asked
+/// first, before anyone was prompted, and that is the end that matters.
+#[cfg(windows)]
+fn an_unelevated_impersonation_token() -> Result<OwnedHandle, u32> {
+    // SAFETY: `GetCurrentProcess` takes no arguments and returns a pseudo
+    // handle that is always valid and never needs closing.
+    let process = unsafe { GetCurrentProcess() };
+
+    let mut raw: HANDLE = ptr::null_mut();
+    // SAFETY: `process` is that pseudo handle and `raw` is a writable
+    // out-parameter which the call sets, on success only, to a handle this
+    // process owns alone.
+    let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY | TOKEN_DUPLICATE, &mut raw) };
+    if opened == 0 {
+        // SAFETY: `GetLastError` takes no arguments and reads this thread's
+        // own last error code.
+        return Err(unsafe { GetLastError() });
+    }
+    // SAFETY: `raw` was set by the successful call above to a fresh handle
+    // nothing else owns, so `OwnedHandle` may take it and close it once.
+    let process_token = unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) };
+
+    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut written: u32 = 0;
+    // SAFETY: `process_token` is open with `TOKEN_QUERY` and alive for the
+    // call; the buffer is one fully initialised `TOKEN_ELEVATION` and the
+    // length given is its own `size_of`; `written` is a writable local.
+    let read = unsafe {
+        GetTokenInformation(
+            process_token.as_raw_handle() as HANDLE,
+            TokenElevation,
+            ptr::from_mut(&mut elevation).cast(),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut written,
+        )
+    };
+    if read == 0 {
+        // SAFETY: `GetLastError` takes no arguments and reads this thread's
+        // own last error code.
+        return Err(unsafe { GetLastError() });
+    }
+    if elevation.TokenIsElevated == 0 {
+        return impersonation_of(&process_token);
+    }
+
+    let mut link = TOKEN_LINKED_TOKEN {
+        LinkedToken: ptr::null_mut(),
+    };
+    // SAFETY: the same open token, a buffer of one fully initialised
+    // `TOKEN_LINKED_TOKEN` whose own `size_of` is the length given, and a
+    // writable local for the length written. On success the call sets
+    // `LinkedToken` to a handle this process owns alone.
+    let read = unsafe {
+        GetTokenInformation(
+            process_token.as_raw_handle() as HANDLE,
+            TokenLinkedToken,
+            ptr::from_mut(&mut link).cast(),
+            std::mem::size_of::<TOKEN_LINKED_TOKEN>() as u32,
+            &mut written,
+        )
+    };
+    if read == 0 {
+        // SAFETY: `GetLastError` takes no arguments and reads this thread's
+        // own last error code.
+        return Err(unsafe { GetLastError() });
+    }
+    // SAFETY: the call above succeeded, so `link.LinkedToken` is a handle
+    // this process owns alone and nothing else will close.
+    let linked = unsafe { OwnedHandle::from_raw_handle(link.LinkedToken as RawHandle) };
+    // A linked token is already an impersonation token, so when it cannot
+    // be duplicated it is used as it stands rather than the step refused.
+    Ok(impersonation_of(&linked).unwrap_or(linked))
+}
+
+/// `Ok(())` when nothing this process may do would put a different program
+/// at `program`, and the sentence to show otherwise.
+///
+/// The path is walked from the drive down to the file. Every directory on
+/// the way is asked whether this process may delete it, delete what is
+/// inside it, or rewrite its security; the file at the end is asked whether
+/// this process may write it, delete it, or rewrite its security. The first
+/// element that is not on the disk ends the walk with one more question,
+/// put to the directory above it: may this process create that name? If it
+/// may, the whole chain below is the attacker's to build, which is the
+/// planted case; if it may not, nothing can appear there without
+/// Administrator and the program is admitted although it is not there.
+#[cfg(windows)]
+fn program_this_process_cannot_replace(program: &str) -> Result<(), String> {
+    let token = an_unelevated_impersonation_token().map_err(|_| cannot_be_checked(program))?;
+
+    let mut chain: Vec<&Path> = Path::new(program).ancestors().collect();
+    chain.reverse();
+
+    let mut above: Option<SecurityDescriptor> = None;
+    for (index, element) in chain.iter().enumerate() {
+        let leaf = index + 1 == chain.len();
+        match descriptor_of(element) {
+            Ok(descriptor) => {
+                let rights: &[u32] = if leaf {
+                    &REPLACE_A_FILE
+                } else {
+                    &REPLACE_A_DIRECTORY
+                };
+                if any_right_granted(&descriptor, &token, rights)
+                    .map_err(|_| cannot_be_checked(program))?
+                {
+                    return Err(can_be_replaced(program));
+                }
+                above = Some(descriptor);
+            }
+            Err(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) => {
+                let Some(above) = above.as_ref() else {
+                    // Not even the drive answered, so there is nothing left
+                    // to put the question to.
+                    return Err(cannot_be_checked(program));
+                };
+                return if any_right_granted(above, &token, &CREATE_A_NAME)
+                    .map_err(|_| cannot_be_checked(program))?
+                {
+                    Err(can_be_replaced(program))
+                } else {
+                    Ok(())
+                };
+            }
+            Err(_) => return Err(cannot_be_checked(program)),
+        }
+    }
+    Ok(())
+}
+
+/// The sentence a program this account could replace produces. It names
+/// the program and what to do, and nothing of the permissions themselves:
+/// an access control list in an error message is nothing a reader can act
+/// on, and it tells anyone reading over their shoulder where to aim.
+#[cfg(windows)]
+fn can_be_replaced(program: &str) -> String {
+    format!(
+        "The helper refused a program this account can replace: {program}. Starting it as \
+         Administrator would hand Administrator to whoever replaced it, so Brokey will not. \
+         Install it somewhere only an administrator can write, under Program Files or \
+         ProgramData, and try again."
+    )
+}
+
+/// The sentence a program whose permissions could not be read produces.
+/// Not being able to ask is never a reason to admit something.
+#[cfg(windows)]
+fn cannot_be_checked(program: &str) -> String {
+    format!(
+        "The helper could not read the permissions of {program}, so it refused to start it as \
+         Administrator. Check that the path is one this account may read, then try again."
+    )
 }
 
 /// The sentence a winget step Brokey did not build produces. It names the
@@ -1636,18 +2098,38 @@ mod windows_tests {
         choco::operation_step(kind, id, CHOCO)
     }
 
+    /// A `choco.exe` where no unprivileged process can put one, which on
+    /// any Windows is `%SystemRoot%\System32`. No such file is there and
+    /// none needs to be: nothing unprivileged can create the name either,
+    /// which is the question the gate puts to a path that is not on the
+    /// disk.
+    ///
+    /// `CHOCO` cannot serve for a test that expects `Ok(())` any more.
+    /// Whether the real default path is admitted depends on whether
+    /// Chocolatey is installed on the machine running the test, because
+    /// `C:\ProgramData` lets any user create `chocolatey` when it is not,
+    /// and that difference is the whole point of the gate.
+    fn choco_somewhere_unwritable() -> String {
+        Path::new(&std::env::var("SystemRoot").expect("Windows sets SystemRoot"))
+            .join("System32")
+            .join("choco.exe")
+            .to_string_lossy()
+            .into_owned()
+    }
+
     /// The three things Chocolatey is asked to do, exactly as the source
     /// builds them. Every Chocolatey step needs Administrator, because the
     /// default install root is under `C:\ProgramData`, so until this arm
     /// existed all three were refused before the user was ever asked.
     #[test]
     fn a_choco_install_the_source_would_build_is_allowed() {
+        let program = choco_somewhere_unwritable();
         for kind in [
             choco::OpKind::Install,
             choco::OpKind::Update,
             choco::OpKind::Remove,
         ] {
-            let plan = plan_of(vec![choco_step(kind, "7zip")]);
+            let plan = plan_of(vec![choco::operation_step(kind, "7zip", &program)]);
             assert_eq!(validate(&plan), Ok(()), "{kind:?} should be allowed");
         }
     }
@@ -1852,6 +2334,30 @@ mod windows_tests {
         );
     }
 
+    /// The hole this gate exists to close. `C:\ProgramData` lets any user
+    /// create a directory in it, so on a machine without Chocolatey an
+    /// unprivileged process can make `chocolatey\bin\choco.exe` itself,
+    /// and `choco_exe` then resolves that file, the arm admits it and
+    /// `ShellExecuteEx` starts it as Administrator. A directory this test
+    /// has just made stands in for that folder: it is one this process can
+    /// write by construction, which is the whole question.
+    #[test]
+    fn a_planted_chocolatey_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
+        let planted = dir.path().join("choco.exe");
+        std::fs::write(&planted, b"not really Chocolatey").expect("this process can write here");
+        let step =
+            choco::operation_step(choco::OpKind::Install, "7zip", &planted.to_string_lossy());
+        let err = validate(&plan_of(vec![step]))
+            .expect_err("a choco.exe this process can overwrite must not run as Administrator");
+        assert!(
+            err.contains("choco.exe"),
+            "the refusal names the program: {err}"
+        );
+        assert!(err.ends_with('.'), "the reason is a sentence: {err}");
+        assert!(!err.contains('\u{2014}'), "no em dashes: {err}");
+    }
+
     /// A removal the registry records is allowed.
     #[test]
     fn a_registered_removal_is_allowed() {
@@ -1964,5 +2470,197 @@ mod windows_tests {
             ),
         ]);
         assert!(validate(&plan).is_err());
+    }
+
+    /// The two directions of the gate, measured rather than assumed, on
+    /// two paths every Windows machine has.
+    ///
+    /// A directory this test has just made is one this process can write by
+    /// construction, so the file in it must be refused; `cmd.exe` under
+    /// `%SystemRoot%\System32` is the case a standard user cannot write, so
+    /// it must be admitted. Neither needs Administrator to set up and
+    /// neither writes anywhere protected, which is what lets the whole rule
+    /// be checked without elevating anything.
+    #[test]
+    fn a_file_this_process_can_write_is_refused_and_one_it_cannot_is_admitted() {
+        let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
+        let mine = dir.path().join("anything.exe");
+        std::fs::write(&mine, b"mine").expect("this process can write here");
+        let refusal = program_this_process_cannot_replace(&mine.to_string_lossy())
+            .expect_err("a file this process just wrote is one it can replace");
+        assert!(
+            refusal.contains("anything.exe"),
+            "the refusal names the program: {refusal}"
+        );
+
+        let theirs = Path::new(&std::env::var("SystemRoot").expect("Windows sets SystemRoot"))
+            .join("System32")
+            .join("cmd.exe");
+        assert!(theirs.is_file(), "every Windows has {theirs:?}");
+        assert_eq!(
+            program_this_process_cannot_replace(&theirs.to_string_lossy()),
+            Ok(()),
+            "a standard user cannot write System32"
+        );
+    }
+
+    /// A directory above the program counts too. The file here is written
+    /// once and then left alone, and it is the folder around it that this
+    /// process owns, which is enough: a directory this account can rename
+    /// or empty is a program this account can swap.
+    #[test]
+    fn a_directory_above_the_program_is_asked_about_as_well() {
+        let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
+        let below = dir.path().join("bin");
+        std::fs::create_dir(&below).expect("this process can create directories here");
+        let program = below.join("thing.exe");
+        std::fs::write(&program, b"mine").expect("this process can write here");
+        assert!(
+            program_this_process_cannot_replace(&program.to_string_lossy()).is_err(),
+            "the folders above the file are this account's own"
+        );
+    }
+
+    /// A path that is not on the disk is answered by the directory above
+    /// it, and the answer is what the hole was made of. `C:\ProgramData`
+    /// grants `BUILTIN\Users` the right to create a directory on a stock
+    /// Windows, so a `choco.exe` under a folder of `C:\ProgramData` that
+    /// does not exist yet is one an unprivileged process can put there
+    /// before the prompt, and it is refused although there is nothing at
+    /// the path to read.
+    ///
+    /// The name below is not a real product and never will be, so the test
+    /// creates nothing and cleans nothing up.
+    #[test]
+    fn a_name_this_process_could_still_create_is_refused() {
+        let program = Path::new(&std::env::var("ProgramData").expect("Windows sets ProgramData"))
+            .join("brokey-no-such-package-manager")
+            .join("bin")
+            .join("choco.exe");
+        assert!(!program.exists(), "the test invents a name nothing uses");
+        let refusal = program_this_process_cannot_replace(&program.to_string_lossy())
+            .expect_err("any user may create a directory in C:\\ProgramData");
+        assert!(
+            refusal.contains("choco.exe"),
+            "the refusal names the program: {refusal}"
+        );
+    }
+
+    /// The other half of the same question. A path that is not on the disk
+    /// under a directory nothing unprivileged can add to is admitted: no
+    /// file can appear there without Administrator, so elevating the name
+    /// hands nobody anything. This is what keeps a step whose program is
+    /// simply not installed from being reported as a security refusal, and
+    /// it is what lets the plan tests in the sources use paths under
+    /// `C:\Program Files` that no machine really has.
+    #[test]
+    fn a_name_nothing_unprivileged_can_create_is_admitted() {
+        let program = Path::new(&std::env::var("ProgramFiles").expect("Windows sets ProgramFiles"))
+            .join("Brokey No Such Application")
+            .join("unins000.exe");
+        assert!(!program.exists(), "the test invents a name nothing uses");
+        assert_eq!(
+            program_this_process_cannot_replace(&program.to_string_lossy()),
+            Ok(()),
+            "a standard user cannot create a directory in Program Files"
+        );
+    }
+
+    /// A path the gate cannot put its question to at all is refused, not
+    /// admitted. A bare name has no directory to ask about and an empty one
+    /// has nothing at all, and both come back as a refusal.
+    #[test]
+    fn a_path_that_cannot_be_interrogated_is_refused() {
+        for program in ["", "choco.exe"] {
+            let refusal = program_this_process_cannot_replace(program)
+                .expect_err("failure is a refusal here");
+            assert!(
+                refusal.ends_with('.'),
+                "the reason is a sentence: {refusal}"
+            );
+        }
+    }
+
+    /// The gate is in `check_step` rather than in one arm, so a winget step
+    /// answers to it as well: the same file under a directory this test has
+    /// just made is refused although its arguments are exactly the ones
+    /// `operation_step` builds. A source added to the match later inherits
+    /// the gate the same way.
+    ///
+    /// This is not a hypothetical case for winget. `winget_program`
+    /// resolves to the app execution alias in
+    /// `%LOCALAPPDATA%\Microsoft\WindowsApps`, which the invoking user owns
+    /// and can replace, so the gate refuses the real winget on a real
+    /// machine too. That is the rule working rather than a mistake in it,
+    /// and it is recorded here because it is the one behaviour change a
+    /// reader will not expect.
+    #[test]
+    fn the_gate_covers_every_source_the_list_admits_not_only_chocolatey() {
+        let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
+        let planted = dir.path().join("winget.exe");
+        std::fs::write(&planted, b"not really winget").expect("this process can write here");
+        let step = operation_step(OpKind::Install, "Valve.Steam", &planted.to_string_lossy());
+        let err = validate(&plan_of(vec![step]))
+            .expect_err("a winget.exe this process can overwrite is not one to elevate");
+        assert!(
+            err.contains("winget.exe"),
+            "the refusal names the program: {err}"
+        );
+    }
+
+    /// A removal Windows recorded is checked the same way, so the closed
+    /// list cannot be walked around by labelling a planted program as one
+    /// the registry names. An uninstaller this process can overwrite is
+    /// refused even when its whole command is on the list.
+    #[test]
+    fn a_registered_removal_this_process_can_replace_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
+        let uninstaller = dir.path().join("unins000.exe");
+        std::fs::write(&uninstaller, b"mine").expect("this process can write here");
+        let step = step_from(
+            SourceKind::Arp,
+            &uninstaller.to_string_lossy(),
+            &["/SILENT"],
+        );
+        let allowed = Allowed {
+            removals: vec![step.command.clone()],
+            ..Allowed::system()
+        };
+        let err = validate_with(&plan_of(vec![step]), &allowed)
+            .expect_err("the registry recording it does not make it safe to elevate");
+        assert!(
+            err.contains("unins000.exe"),
+            "the refusal names the program: {err}"
+        );
+    }
+
+    /// Both of the gate's sentences follow the copy rules and neither
+    /// carries any part of an access control list into the interface: a
+    /// reader is told which program and what to do, and nothing that would
+    /// tell somebody else where the machine is soft.
+    #[test]
+    fn the_gates_refusals_say_what_to_do_and_leak_no_permissions() {
+        let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
+        let mine = dir.path().join("thing.exe");
+        std::fs::write(&mine, b"mine").expect("this process can write here");
+        let sentences = [
+            program_this_process_cannot_replace(&mine.to_string_lossy())
+                .expect_err("a file this process wrote"),
+            program_this_process_cannot_replace("").expect_err("a path with nothing in it"),
+        ];
+        for sentence in sentences {
+            assert!(sentence.ends_with('.'), "a sentence: {sentence}");
+            assert!(!sentence.contains('\u{2014}'), "no em dashes: {sentence}");
+            assert!(
+                sentence.contains("try again"),
+                "it says what to do: {sentence}"
+            );
+            for leaked in ["BUILTIN", "S-1-5", "FILE_", "ACL", "DACL", "Allow "] {
+                assert!(
+                    !sentence.contains(leaked),
+                    "no permissions in the interface: {sentence}"
+                );
+            }
+        }
     }
 }
