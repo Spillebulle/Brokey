@@ -2,8 +2,16 @@
 //!
 //! An `.ico` file and a PE's icon resources are the same directory in two
 //! widths. Turning one into the other copies image bytes untouched: nothing
-//! here decodes an image, so the whole module is a pure function of the
-//! bytes it is given and is tested on Linux as readily as on Windows.
+//! here decodes an image, so the reader is a pure function of the bytes it
+//! is given and runs on Linux as readily as on Windows.
+//!
+//! **Known limit.** A group named by a string rather than an integer id is
+//! not reachable through [`Wanted`]: the brief asks for integer ids only,
+//! and this reader looks at nothing else. Measured against Windows' own
+//! `ExtractIconExW` over every `.exe` in `System32` and `SysWOW64` (976
+//! files), that loses the icon on 28 of them, `cmd.exe`, `calc.exe` and
+//! `conhost.exe` among them. Resolving a string-named group is a change of
+//! interface and is left to a follow-up task.
 
 /// Which icon group to take out of a PE.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,6 +29,7 @@ pub enum Wanted {
 struct Section {
     virtual_address: u32,
     virtual_size: u32,
+    raw_size: u32,
     raw_pointer: u32,
 }
 
@@ -45,10 +54,14 @@ fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
 }
 
 /// An RVA becomes a file offset by finding the section containing it and
-/// adding the difference to that section's raw pointer.
+/// adding the difference to that section's raw pointer. A section is
+/// spanned by the larger of its virtual size and its raw size: some linkers
+/// write a virtual size of zero, and spanning by virtual size alone would
+/// then make every RVA in that section unresolvable.
 fn rva_to_file_offset(sections: &[Section], rva: u32) -> Option<usize> {
     for section in sections {
-        let Some(end) = section.virtual_address.checked_add(section.virtual_size) else {
+        let span = section.virtual_size.max(section.raw_size);
+        let Some(end) = section.virtual_address.checked_add(span) else {
             continue;
         };
         if rva >= section.virtual_address && rva < end {
@@ -98,6 +111,7 @@ impl Header {
             sections.push(Section {
                 virtual_size: u32_at(bytes, base.checked_add(8)?)?,
                 virtual_address: u32_at(bytes, base.checked_add(12)?)?,
+                raw_size: u32_at(bytes, base.checked_add(16)?)?,
                 raw_pointer: u32_at(bytes, base.checked_add(20)?)?,
             });
         }
@@ -150,7 +164,13 @@ fn list_ids(bytes: &[u8], base: usize) -> Option<Vec<(u16, u32)>> {
             continue;
         }
         let offset = u32_at(bytes, entry.checked_add(4)?)?;
-        out.push((name as u16, offset));
+        // A well-formed integer id never sets a bit above 15; a crafted one
+        // that does is skipped rather than silently truncated, so this
+        // agrees with find_id, which compares the untruncated value.
+        let Ok(id) = u16::try_from(name) else {
+            continue;
+        };
+        out.push((id, offset));
     }
     Some(out)
 }
@@ -241,8 +261,16 @@ pub fn icon(bytes: &[u8], wanted: Wanted) -> Option<Vec<u8>> {
     let group_data = data_entry(header.resource_base, first_entry(bytes, group_lang_dir)?)?;
     let group_bytes = data_bytes(bytes, &header, group_data)?;
 
+    // The same RT_ICON id can be named by every entry a group lists, so the
+    // output size has no relation to the input file's own size. No real
+    // icon group comes anywhere near this cap: the largest one measured
+    // here, GIMP's, is 164 KB across ten images. A group whose named images
+    // total more than this is malformed, not merely unusual.
+    const MAX_TOTAL_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
     let count = u16_at(&group_bytes, 4)? as usize;
     let mut images = Vec::new();
+    let mut total = 0usize;
     for i in 0..count {
         let entry = 6usize.checked_add(i.checked_mul(14)?)?;
         let record = group_bytes.get(entry..entry.checked_add(14)?)?;
@@ -251,6 +279,10 @@ pub fn icon(bytes: &[u8], wanted: Wanted) -> Option<Vec<u8>> {
             // Named but not carried: keep the images the file does have.
             continue;
         };
+        total = total.checked_add(image_bytes.len())?;
+        if total > MAX_TOTAL_IMAGE_BYTES {
+            return None;
+        }
         images.push(Image {
             width: record[0],
             height: record[1],
@@ -577,10 +609,9 @@ mod tests {
                 .group(1, &[(48, 1)])
                 .build()
         };
-        assert_eq!(
-            icon(&make(false), Wanted::Nth(0)),
-            icon(&make(true), Wanted::Nth(0))
-        );
+        let thirty_two =
+            icon(&make(false), Wanted::Nth(0)).expect("the 32-bit build carries the icon");
+        assert_eq!(Some(thirty_two), icon(&make(true), Wanted::Nth(0)));
     }
 
     /// A group naming an icon the file does not carry is not a reason to
@@ -592,6 +623,19 @@ mod tests {
             .group(1, &[(16, 1), (32, 404)])
             .build();
         assert_eq!(sizes(&icon(&pe, Wanted::Nth(0)).unwrap()), vec![16]);
+    }
+
+    /// A group can name the same real, present icon more than once. Nothing
+    /// about that is malformed on its own, but the total it claims can still
+    /// run past what any real icon carries, and that is refused rather than
+    /// allocated.
+    #[test]
+    fn a_group_claiming_more_than_the_cap_is_refused() {
+        let pe = Builder::new(true)
+            .add(RT_ICON, 1, vec![0xAA; 5 * 1024 * 1024])
+            .group(1, &[(16, 1), (32, 1)])
+            .build();
+        assert_eq!(icon(&pe, Wanted::Nth(0)), None);
     }
 
     #[test]
