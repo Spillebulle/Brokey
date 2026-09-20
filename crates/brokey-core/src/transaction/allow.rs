@@ -32,7 +32,8 @@ use std::ptr;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_NO_SUCH_LOGON_SESSION, ERROR_PATH_NOT_FOUND,
-    ERROR_SUCCESS, GetLastError, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree,
+    ERROR_SHARING_VIOLATION, ERROR_SUCCESS, GetLastError, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
+    LocalFree,
 };
 #[cfg(windows)]
 use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
@@ -757,18 +758,36 @@ fn any_right_granted_on(path: &Path, token: &OwnedHandle, rights: &[u32]) -> Res
 
 /// Whether `token` can open `path` for any one of `rights`, asked of the
 /// object rather than of its descriptor. An open that succeeds proves the
-/// right is granted; an open refused with `ERROR_ACCESS_DENIED` proves it
-/// is not; anything else is a question that could not be put and comes back
-/// as `Err`, `ERROR_SHARING_VIOLATION` included.
+/// right is granted; an open refused with `ERROR_SHARING_VIOLATION` proves
+/// it is granted as well, for the reason two paragraphs down; an open
+/// refused with `ERROR_ACCESS_DENIED` proves it is not; anything else is a
+/// question that could not be put and comes back as `Err`.
 ///
 /// Nothing is created, written or deleted. `OPEN_EXISTING` brings no file
 /// into being, and a handle opened for `DELETE` access deletes nothing: the
 /// deletion is a separate call that is never made here, and the handle is
 /// closed on the line after it is opened. `FILE_FLAG_BACKUP_SEMANTICS` is
 /// what lets a directory be opened at all, and every element above the
-/// program is one. The share mode is the widest there is, so a file another
-/// process holds open is still answered rather than refused for a reason
-/// that has nothing to do with permissions.
+/// program is one.
+///
+/// The share mode passed here is the widest there is, but that declares
+/// only what this open permits others. It does not exempt this open from
+/// the share mode an existing opener already declared, which the comment
+/// here used to imply it did. Windows maps an executable image with
+/// `FILE_SHARE_READ | FILE_SHARE_DELETE` and no `FILE_SHARE_WRITE`, so
+/// opening a running `winget.exe` for `FILE_WRITE_DATA` is refused with
+/// `ERROR_SHARING_VIOLATION` however wide a share mode this asks for.
+///
+/// That refusal proves the opposite of a denial, which is why it answers
+/// `Ok(true)` and the program is refused with [`can_be_replaced`]. Windows
+/// evaluates the DACL before it evaluates share modes, so a sharing
+/// violation is returned only after access was granted, and the right is
+/// therefore held. Measured unelevated on the development machine:
+/// `C:\Windows\System32\kernel32.dll`, which every process on the machine
+/// holds mapped without `FILE_SHARE_WRITE` and which this account may not
+/// write, is refused `FILE_WRITE_DATA` with error 5 and not 32, while a
+/// file this account owns and holds open with `FILE_SHARE_READ` alone is
+/// refused with 32.
 ///
 /// The opens are made under [`ImpersonateLoggedOnUser`], because a
 /// `CreateFileW` from the elevated helper's own thread would be answered
@@ -809,6 +828,12 @@ fn any_right_opened_on(path: &Path, token: &OwnedHandle, rights: &[u32]) -> Resu
         // SAFETY: `GetLastError` takes no arguments and reads this thread's
         // own last error code, which the failed call above has just set.
         let error = unsafe { GetLastError() };
+        // An access this account does not hold is refused before the share
+        // mode is ever consulted, so a sharing violation says the access
+        // was granted and somebody else's handle is in the way.
+        if error == ERROR_SHARING_VIOLATION {
+            return Ok(true);
+        }
         if error != ERROR_ACCESS_DENIED {
             return Err(error);
         }
@@ -3083,6 +3108,49 @@ mod windows_tests {
             dir.path().is_dir(),
             "the probe opens and closes handles and changes nothing"
         );
+    }
+
+    /// A file somebody else holds open is answered, not refused for a
+    /// reason that has nothing to do with permissions.
+    ///
+    /// The share mode this probe passes declares what it permits others; it
+    /// does not exempt it from the share mode an existing opener declared,
+    /// so a file held open without `FILE_SHARE_WRITE` answers
+    /// `ERROR_SHARING_VIOLATION` to an open for `FILE_WRITE_DATA`. Windows
+    /// evaluates the DACL first, so that error is returned only after the
+    /// access was granted, and the right is held. The file below is one
+    /// this process wrote, so `Ok(true)` is also the right answer on the
+    /// merits, which is what makes the two roads to it comparable: the same
+    /// file with nobody holding it answers `Ok(true)` through a plain
+    /// successful open.
+    #[test]
+    fn a_file_another_handle_holds_open_is_still_answered() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let Some(token) = an_account_that_is_not_administrator("a file held open elsewhere") else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
+        let program = dir.path().join("held.exe");
+        std::fs::write(&program, b"mine").expect("this process can write here");
+        assert_eq!(
+            any_right_opened_on(&program, &token, &REPLACE_A_FILE),
+            Ok(true),
+            "a file this process wrote, with nobody holding it"
+        );
+
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&program)
+            .expect("this process can open the file it just wrote");
+        assert_eq!(
+            any_right_opened_on(&program, &token, &REPLACE_A_FILE),
+            Ok(true),
+            "a sharing violation is not a denial"
+        );
+        drop(held);
     }
 
     /// The end-to-end question this whole arm was built to answer: a winget
