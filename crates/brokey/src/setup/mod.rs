@@ -8,6 +8,9 @@
 pub mod payload;
 
 #[cfg(windows)]
+mod window;
+
+#[cfg(windows)]
 use std::path::{Path, PathBuf};
 
 /// What a run of `--install` came to: the sentence to show, and the exit code
@@ -45,13 +48,41 @@ impl Outcome {
 /// file in front of the user is the one they should be told about.
 #[cfg(windows)]
 pub fn install() -> i32 {
-    let outcome = match std::env::current_exe() {
-        Ok(path) => unpack_and_install(&path),
-        Err(e) => Outcome::failed(format!(
-            "Brokey could not find its own file, so it has nothing to unpack: {e}. \
-             Run the setup executable from a folder you can read."
-        )),
+    let executable = std::env::current_exe();
+    let version = match &executable {
+        Ok(path) => version_in(path),
+        // The version is only a label, so a machine that will not say where
+        // its own executable is gets the one this was built as rather than a
+        // window with a gap in its title. The install below reports the real
+        // failure a moment later.
+        Err(_) => env!("CARGO_PKG_VERSION").to_string(),
     };
+    let title = format!("Install Brokey {version}");
+
+    let outcome = match executable {
+        Err(e) => window::report(
+            &title,
+            Outcome::failed(format!(
+                "Brokey could not find its own file, so it has nothing to unpack: {e}. \
+                 Run the setup executable from a folder you can read."
+            )),
+        ),
+        // A copy carrying no package has nothing to offer, so it says so from
+        // the moment the window opens rather than after a button press.
+        // `carried_by` reads the last sixteen bytes and nothing else, and the
+        // file it reads is this process's own running image, so the only way
+        // it answers `false` is that the package really is not there.
+        Ok(path) if !payload::carried_by(&path) => {
+            window::report(&title, Outcome::failed(NO_PACKAGE.to_string()))
+        }
+        Ok(path) => window::show(&title, Box::new(move || unpack_and_install(&path))),
+    };
+
+    // Said twice on purpose. `brokey.exe` is a console application, which is
+    // what makes `brokey search` work, so a run from a terminal has a console
+    // that should be told what happened as well as a window. A double-click
+    // from Explorer has a console nobody reads, and the window is the answer
+    // there.
     if outcome.code == 0 {
         println!("{}", outcome.sentence);
     } else {
