@@ -1,7 +1,10 @@
 //! Scoop: installed applications read from `apps\<name>\current\manifest.json`
 //! under `%SCOOP%` (or `~\scoop` when that is unset), and search against the
-//! main bucket, on disk when Scoop is installed and from GitHub when it is
-//! not.
+//! buckets under `buckets\<bucket>\bucket` when any manifest is there, and
+//! against the main bucket on GitHub when none is. The choice is the
+//! presence of a bucket on disk, not the presence of Scoop: an installed
+//! Scoop that has fetched no bucket still searches, and a bucket left behind
+//! by a Scoop that has gone is still read.
 //!
 //! A manifest's fields do not have one shape each: `license` is a plain
 //! string in one real manifest and an object carrying `identifier` in
@@ -305,8 +308,29 @@ pub fn bucket_tree_url(sha: &str) -> String {
     format!("https://api.github.com/repos/ScoopInstaller/Main/git/trees/{sha}")
 }
 
+/// One manifest's address in Main. `name` is written into the path as it
+/// stands, with no encoding, so only a name `is_safe_name` accepts may reach
+/// it. `fetch_manifest` is the only caller outside the tests and it makes
+/// that check.
 pub fn manifest_url(name: &str) -> String {
     format!("https://raw.githubusercontent.com/ScoopInstaller/Main/master/bucket/{name}.json")
+}
+
+/// Whether a name is one plain path segment, which every manifest name in a
+/// bucket is by construction: ASCII letters and digits, `-`, `_` and `.`,
+/// not empty, and never `..` in any part of it. `Scoop::details` takes its
+/// id from its caller rather than from a bucket listing, and the address
+/// above is built by interpolation, so without this a `..` would climb out
+/// of the `bucket/` segment and fetch some other file from the same
+/// repository to be parsed as a manifest. A name outside this set is
+/// refused rather than fetched, and reads as a name the bucket does not
+/// have.
+fn is_safe_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// How long a cached answer (the bucket's name list, or one manifest) is
@@ -364,8 +388,12 @@ fn main_bucket_names(http: &dyn Http) -> Result<Vec<String>> {
 /// One manifest, fetched (and cached) by name. `None` on any failure: a name
 /// that is not in Main answers 404 with an HTML body, which is neither valid
 /// JSON nor a reason to fail the whole search, so it is skipped the same way
-/// a network error or an unreadable local file is.
+/// a network error or an unreadable local file is. A name [`is_safe_name`]
+/// refuses is `None` before any request is made at all.
 fn fetch_manifest(http: &dyn Http, name: &str) -> Option<Manifest> {
+    if !is_safe_name(name) {
+        return None;
+    }
     let text = http.text(&manifest_url(name)).ok()?;
     parse_manifest(text.as_bytes()).ok()
 }
@@ -469,7 +497,8 @@ fn local_manifest(paths: &[(String, PathBuf)], id: &str) -> Option<(String, Mani
 /// 200, which would be 200 round trips before anything appears. The matches
 /// past the cap are dropped rather than answered as bare names: 25 rows
 /// carrying a version is a better thing to look at than 25 rows followed by
-/// 175 empty ones. The local path reads files and is not capped.
+/// 175 empty ones. The local path is capped by `query.limit` alone and not
+/// by this: it reads files rather than making a request for each match.
 const NETWORK_DETAIL_LIMIT: usize = 25;
 
 /// Matching manifests from the main bucket on GitHub, fetched one at a time
@@ -1710,6 +1739,57 @@ mod tests {
             fetch_manifest(&http, "unreachable"),
             None,
             "a request that fails outright"
+        );
+    }
+
+    /// A manifest's address is built by interpolation, and `details` takes
+    /// its id from its caller rather than from a bucket listing, so anything
+    /// that is not one plain path segment is refused before a URL exists. A
+    /// `..` would otherwise climb out of the `bucket/` segment and fetch
+    /// another file from the same repository.
+    #[test]
+    fn an_id_that_is_not_a_plain_name_is_never_fetched() {
+        let http = FakeHttp::answering(vec![(manifest_url("7zip"), fixture_text("7zip.json"))]);
+        for id in [
+            "..",
+            "../../README",
+            "a/../..",
+            "bucket/7zip",
+            r"bucket\7zip",
+            "",
+            "7zip?raw=1",
+            "7 zip",
+        ] {
+            assert_eq!(fetch_manifest(&http, id), None, "{id:?} must be refused");
+        }
+        assert!(
+            http.asked().is_empty(),
+            "no address was built for any of them: {:?}",
+            http.asked()
+        );
+
+        assert!(
+            fetch_manifest(&http, "7zip").is_some(),
+            "a real name is still fetched"
+        );
+        assert_eq!(http.asked(), vec![manifest_url("7zip")]);
+    }
+
+    /// The same guard where the caller's string actually arrives: `details`
+    /// on a machine with no bucket on disk.
+    #[test]
+    fn details_never_builds_an_address_out_of_an_id_that_is_not_a_name() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let http = Arc::new(FakeHttp::answering(Vec::new()));
+        let scoop = Scoop::with_root(http.clone(), root.path().to_path_buf(), None);
+
+        for id in ["..", "../../README.md", r"..\..\README.md"] {
+            assert!(scoop.details(id).is_err(), "{id:?} must not answer");
+        }
+        assert!(
+            http.asked().is_empty(),
+            "nothing was requested: {:?}",
+            http.asked()
         );
     }
 
