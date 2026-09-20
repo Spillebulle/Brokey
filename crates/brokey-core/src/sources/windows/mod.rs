@@ -4,4 +4,5 @@
 //! between this module and `linux` at runtime.
 
 pub mod arp;
+pub mod pe;
 pub mod winget;
