@@ -4,7 +4,7 @@ Newest first. Each section is the release's notes, published verbatim.
 
 ## 0.1.5
 
-- Windows joins the platforms Brokey installs, updates and removes software on, through winget and through Add or remove programs. The window never elevates: it builds the plan and a helper runs the privileged steps, costing one prompt per stretch that needs Administrator.
+- Windows joins the platforms Brokey installs, updates and removes software on, through winget, Add or remove programs, Chocolatey and Scoop. The window never elevates: it builds the plan and a helper runs the privileged steps, costing one prompt per stretch that needs Administrator.
 - There is a Windows installer for the first time: an MSI, and a setup executable that carries it and installs on a double-click. Brokey appears in Add or remove programs and can be removed from there. The `.msi` is published beside the setup executable for anyone deploying Brokey across a fleet.
 - winget's catalogue is downloaded and read by Brokey itself, so search works on a machine that has never had winget installed.
 - An installed application on Windows shows its own icon, read out of the file its Add or remove programs entry points at and cached as a picture the page can draw, and a winget package's detail page shows the description from its manifest.

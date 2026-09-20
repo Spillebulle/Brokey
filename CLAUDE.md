@@ -22,7 +22,7 @@ are marked untested until they have run on a real Debian and Fedora. Windows
 has four sources, in the order the page draws them: Add/Remove Programs
 (`sources/windows/arp.rs`), winget (`sources/windows/winget/`), Chocolatey
 (`sources/windows/choco.rs`) and Scoop (`sources/windows/scoop.rs`). None of
-them shells out: winget's catalogue is downloaded and read by Brokey
+them shells out to read anything: winget's catalogue is downloaded and read by Brokey
 itself, which is why search works without winget installed, and its installed
 list is the registry joined to that catalogue; Chocolatey searches the
 community feed over HTTP and reads its own `lib` directory; Scoop reads the

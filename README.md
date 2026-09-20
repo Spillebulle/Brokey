@@ -10,13 +10,13 @@
 </p>
 
 <p align="center">
-  Searches pacman, the AUR, Flatpak, Snap, apt, dnf, winget and GitHub releases · installs through one flow ·
+  Searches pacman, the AUR, Flatpak, Snap, apt, dnf, winget, Chocolatey, Scoop and GitHub releases · installs through one flow ·
   updates everything from one page · drivers and firmware · keeps itself current
 </p>
 
 ![The Brokey window: a search for "steam" with the pacman, AUR and Flatpak editions grouped as one row, the sidebar and the status bar](docs/images/window.png)
 
-> **Early days.** Searching, installing, removing and updating work on Arch and its derivatives, with Flatpak and Snap wherever they are installed, and on Windows through winget and Add or remove programs. apt and dnf are written but have not yet run on a real Debian or Fedora. [What is not there yet](#what-is-not-there-yet) is honest about the rest.
+> **Early days.** Searching, installing, removing and updating work on Arch and its derivatives, with Flatpak and Snap wherever they are installed, and on Windows through winget, Add or remove programs, Chocolatey and Scoop. apt and dnf are written but have not yet run on a real Debian or Fedora. [What is not there yet](#what-is-not-there-yet) is honest about the rest.
 
 ## Install
 
