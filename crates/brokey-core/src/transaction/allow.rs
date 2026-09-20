@@ -31,8 +31,8 @@ use std::ptr;
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, GetLastError,
-    HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree,
+    ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_NO_SUCH_LOGON_SESSION, ERROR_PATH_NOT_FOUND,
+    ERROR_SUCCESS, GetLastError, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree,
 };
 #[cfg(windows)]
 use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
@@ -398,9 +398,12 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 ///   produces, and not as a refusal here.
 ///
 /// A question that cannot be put is a refusal: a path Windows will not
-/// name, an error that is neither a denial nor a missing name, and an
-/// elevated process with no unelevated token linked to it all end in
-/// [`cannot_be_checked`] rather than in `Ok(())`. A descriptor this account
+/// name, an error that is neither a denial nor a missing name, and a token
+/// road that fails for any reason but one all end in [`cannot_be_checked`]
+/// rather than in `Ok(())`. The one exception is an elevated process whose
+/// token has no filtered sibling: there is then no unprivileged account for
+/// the question to be about, and the answer is `Ok(())`, which
+/// [`an_unelevated_impersonation_token`] argues. A descriptor this account
 /// may not read is not one of those. It is a question put a different way
 /// rather than one that cannot be put: the object is opened for each right
 /// instead, which is what [`any_right_granted_on`] explains and what admits
@@ -888,6 +891,19 @@ fn impersonation_of(token: &OwnedHandle) -> Result<OwnedHandle, u32> {
     Ok(unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) })
 }
 
+/// What the gate can put its questions to: a token that stands for this
+/// process without Administrator, or the finding that there is no
+/// unprivileged account on this machine for the questions to be about.
+#[cfg(windows)]
+enum Unprivileged {
+    /// An impersonation token for this account without Administrator.
+    Token(OwnedHandle),
+    /// This process is elevated and Windows answers that no filtered token
+    /// is linked to its own, so this account has no unprivileged sibling.
+    /// [`an_unelevated_impersonation_token`] says what rests on that.
+    NoSuchAccount,
+}
+
 /// An impersonation token that stands for this process without
 /// Administrator: its own token when the process is not elevated, and the
 /// filtered token linked to it when it is.
@@ -904,8 +920,36 @@ fn impersonation_of(token: &OwnedHandle) -> Result<OwnedHandle, u32> {
 /// else's administrator credentials answered the prompt: the linked token
 /// is then that administrator's, not the user's. The unelevated end asked
 /// first, before anyone was prompted, and that is the end that matters.
+///
+/// One failure of `TokenLinkedToken` is not a failure of the question.
+/// `ERROR_NO_SUCH_LOGON_SESSION` there says this elevated token has no
+/// filtered token behind it, which is what a built-in Administrator
+/// session, a machine with UAC turned off and a domain administrator's
+/// console all answer. That is [`Unprivileged::NoSuchAccount`], and
+/// [`program_this_process_cannot_replace`] admits the program rather than
+/// refusing it.
+///
+/// What the carve-out rests on, written out so that the next reader can
+/// attack the reasoning rather than the code. The gate's premise is that
+/// some process which is not already Administrator could put different
+/// bytes at the program's path and then have Brokey elevate them. That
+/// premise needs an unprivileged account to be the attacker. Where the
+/// token has no filtered sibling, every process this user starts is
+/// Administrator already, so replacing the file wins nobody anything
+/// Brokey is handing out: there is no privilege boundary for the replaced
+/// program to cross, and the question is vacuous rather than unanswered.
+/// Refusing instead was measured on CI run 35532208191, where the runner
+/// is the built-in Administrator and the gate refused every program on the
+/// machine, `C:\Windows\System32\cmd.exe` included, after telling the
+/// user to check a path that was perfectly readable.
+///
+/// It is keyed on that one error and on `TokenIsElevated` being set. Never
+/// on "elevated" alone and never on any other error from this road: every
+/// other failure here is still a question that could not be put, and is
+/// still a refusal. The unelevated branch keeps refusing on error too,
+/// because there the boundary is real.
 #[cfg(windows)]
-fn an_unelevated_impersonation_token() -> Result<OwnedHandle, u32> {
+fn an_unelevated_impersonation_token() -> Result<Unprivileged, u32> {
     // SAFETY: `GetCurrentProcess` takes no arguments and returns a pseudo
     // handle that is always valid and never needs closing.
     let process = unsafe { GetCurrentProcess() };
@@ -944,7 +988,7 @@ fn an_unelevated_impersonation_token() -> Result<OwnedHandle, u32> {
         return Err(unsafe { GetLastError() });
     }
     if elevation.TokenIsElevated == 0 {
-        return impersonation_of(&process_token);
+        return impersonation_of(&process_token).map(Unprivileged::Token);
     }
 
     let mut link = TOKEN_LINKED_TOKEN {
@@ -966,7 +1010,13 @@ fn an_unelevated_impersonation_token() -> Result<OwnedHandle, u32> {
     if read == 0 {
         // SAFETY: `GetLastError` takes no arguments and reads this thread's
         // own last error code.
-        return Err(unsafe { GetLastError() });
+        let error = unsafe { GetLastError() };
+        // The one error on this road that answers the question rather than
+        // failing to put it. The doc comment above argues why.
+        if error == ERROR_NO_SUCH_LOGON_SESSION {
+            return Ok(Unprivileged::NoSuchAccount);
+        }
+        return Err(error);
     }
     // SAFETY: the call above succeeded, so `link.LinkedToken` is a handle
     // this process owns alone and nothing else will close.
@@ -978,7 +1028,9 @@ fn an_unelevated_impersonation_token() -> Result<OwnedHandle, u32> {
     // descriptor can be read and only loses the probe. That is the elevated
     // helper's second check of a plan the unelevated end has already
     // admitted, so what it costs is a refusal, never an admission.
-    Ok(impersonation_of(&linked).unwrap_or(linked))
+    Ok(Unprivileged::Token(
+        impersonation_of(&linked).unwrap_or(linked),
+    ))
 }
 
 /// `Ok(())` when nothing this process may do would put a different program
@@ -997,9 +1049,18 @@ fn an_unelevated_impersonation_token() -> Result<OwnedHandle, u32> {
 /// Each of those questions goes to [`any_right_granted_on`], which reads
 /// the element's descriptor where it can and opens the element itself where
 /// it cannot.
+///
+/// There is one machine where no question is asked at all: one whose token
+/// has no unprivileged sibling, which is [`Unprivileged::NoSuchAccount`]
+/// and is answered `Ok(())`. That carve-out, and what it rests on, are set
+/// out at [`an_unelevated_impersonation_token`].
 #[cfg(windows)]
 fn program_this_process_cannot_replace(program: &str) -> Result<(), String> {
-    let token = an_unelevated_impersonation_token().map_err(|_| cannot_be_checked(program))?;
+    let token = match an_unelevated_impersonation_token() {
+        Ok(Unprivileged::Token(token)) => token,
+        Ok(Unprivileged::NoSuchAccount) => return Ok(()),
+        Err(_) => return Err(cannot_be_checked(program)),
+    };
 
     let mut chain: Vec<&Path> = Path::new(program).ancestors().collect();
     chain.reverse();
@@ -2102,6 +2163,35 @@ mod windows_tests {
         }
     }
 
+    /// The token the gate puts its questions to, or `None` where this
+    /// machine has no unprivileged account for them to be about.
+    ///
+    /// A process that is elevated and has no filtered token linked to it is
+    /// the built-in Administrator, a machine with UAC turned off, or a
+    /// domain administrator's console; CI's own Windows runner is the first
+    /// of those. There the gate admits every program, deliberately, so every
+    /// test about a refusal is a test of a property the machine does not
+    /// have. Such a test says which environment it is in and what was
+    /// therefore not tested, and stops. It is not `#[ignore]`, which would
+    /// hide it from the run, and the assertion it would have made is not
+    /// weakened.
+    fn an_account_that_is_not_administrator(untested: &str) -> Option<OwnedHandle> {
+        match an_unelevated_impersonation_token() {
+            Ok(Unprivileged::Token(token)) => Some(token),
+            Ok(Unprivileged::NoSuchAccount) => {
+                eprintln!(
+                    "skipped: this process is elevated and no filtered token is linked to its \
+                     own, so this machine has no unprivileged account and {untested} was not \
+                     tested."
+                );
+                None
+            }
+            Err(error) => {
+                panic!("this process has a token that stands for it without Administrator: {error}")
+            }
+        }
+    }
+
     /// A full path ending in `winget.exe`, which is all this arm's tests
     /// need: they are about the arguments, and the file itself is asked
     /// about by the gate after the arm rather than inside it.
@@ -2528,6 +2618,9 @@ mod windows_tests {
     /// write by construction, which is the whole question.
     #[test]
     fn a_planted_chocolatey_is_refused() {
+        if an_account_that_is_not_administrator("a planted Chocolatey").is_none() {
+            return;
+        }
         let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
         let planted = dir.path().join("choco.exe");
         std::fs::write(&planted, b"not really Chocolatey").expect("this process can write here");
@@ -2668,6 +2761,9 @@ mod windows_tests {
     /// be checked without elevating anything.
     #[test]
     fn a_file_this_process_can_write_is_refused_and_one_it_cannot_is_admitted() {
+        if an_account_that_is_not_administrator("a file this process can write").is_none() {
+            return;
+        }
         let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
         let mine = dir.path().join("anything.exe");
         std::fs::write(&mine, b"mine").expect("this process can write here");
@@ -2695,6 +2791,9 @@ mod windows_tests {
     /// or empty is a program this account can swap.
     #[test]
     fn a_directory_above_the_program_is_asked_about_as_well() {
+        if an_account_that_is_not_administrator("a directory above the program").is_none() {
+            return;
+        }
         let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
         let below = dir.path().join("bin");
         std::fs::create_dir(&below).expect("this process can create directories here");
@@ -2718,6 +2817,10 @@ mod windows_tests {
     /// creates nothing and cleans nothing up.
     #[test]
     fn a_name_this_process_could_still_create_is_refused() {
+        if an_account_that_is_not_administrator("a name this process could still create").is_none()
+        {
+            return;
+        }
         let program = Path::new(&std::env::var("ProgramData").expect("Windows sets ProgramData"))
             .join("brokey-no-such-package-manager")
             .join("bin")
@@ -2756,6 +2859,9 @@ mod windows_tests {
     /// has nothing at all, and both come back as a refusal.
     #[test]
     fn a_path_that_cannot_be_interrogated_is_refused() {
+        if an_account_that_is_not_administrator("a path the gate cannot interrogate").is_none() {
+            return;
+        }
         for program in ["", "choco.exe"] {
             let refusal = program_this_process_cannot_replace(program)
                 .expect_err("failure is a refusal here");
@@ -2782,6 +2888,9 @@ mod windows_tests {
     /// trip it.
     #[test]
     fn the_gate_covers_every_source_the_list_admits_not_only_chocolatey() {
+        if an_account_that_is_not_administrator("a planted winget").is_none() {
+            return;
+        }
         let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
         let planted = dir.path().join("winget.exe");
         std::fs::write(&planted, b"not really winget").expect("this process can write here");
@@ -2800,6 +2909,11 @@ mod windows_tests {
     /// refused even when its whole command is on the list.
     #[test]
     fn a_registered_removal_this_process_can_replace_is_refused() {
+        if an_account_that_is_not_administrator("a registered removal this process can replace")
+            .is_none()
+        {
+            return;
+        }
         let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
         let uninstaller = dir.path().join("unins000.exe");
         std::fs::write(&uninstaller, b"mine").expect("this process can write here");
@@ -2826,6 +2940,9 @@ mod windows_tests {
     /// tell somebody else where the machine is soft.
     #[test]
     fn the_gates_refusals_say_what_to_do_and_leak_no_permissions() {
+        if an_account_that_is_not_administrator("the gate's two refusal sentences").is_none() {
+            return;
+        }
         let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
         let mine = dir.path().join("thing.exe");
         std::fs::write(&mine, b"mine").expect("this process can write here");
@@ -2868,7 +2985,20 @@ mod windows_tests {
             Path::new(&std::env::var("ProgramFiles").expect("Windows sets ProgramFiles"))
                 .join("WindowsApps");
         if !windows_apps.exists() {
-            eprintln!("skipped: this machine has no {}", windows_apps.display());
+            eprintln!("skipped: this machine has no {}.", windows_apps.display());
+            return;
+        }
+        if descriptor_of(&windows_apps).is_ok() {
+            // Measured on CI run 35532208191, where this answered `None`
+            // against the `Some(5)` this machine gives: an administrator may
+            // read that descriptor, and then there is nothing to fall back
+            // from. The test is worth keeping for every ordinary user's
+            // machine, where the premise holds.
+            eprintln!(
+                "skipped: this account may read the security of {}, so the fallback to the \
+                 object was not tested.",
+                windows_apps.display()
+            );
             return;
         }
         assert_eq!(
@@ -2877,8 +3007,10 @@ mod windows_tests {
             "a standard user may traverse {} and may not read its security",
             windows_apps.display()
         );
-        let token = an_unelevated_impersonation_token()
-            .expect("this process has a token that stands for it without Administrator");
+        let Some(token) = an_account_that_is_not_administrator("the fallback to the object itself")
+        else {
+            return;
+        };
         assert_eq!(
             any_right_granted_on(&windows_apps, &token, &REPLACE_A_DIRECTORY),
             Ok(false),
@@ -2900,9 +3032,10 @@ mod windows_tests {
     /// is refused again, which is the outcome this change exists to stop.
     #[test]
     fn the_probe_says_yes_to_a_directory_this_account_can_replace() {
+        let Some(token) = an_account_that_is_not_administrator("the probe's two answers") else {
+            return;
+        };
         let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
-        let token = an_unelevated_impersonation_token()
-            .expect("this process has a token that stands for it without Administrator");
         assert_eq!(
             any_right_opened_on(dir.path(), &token, &REPLACE_A_DIRECTORY),
             Ok(true),
