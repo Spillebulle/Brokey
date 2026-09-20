@@ -327,7 +327,8 @@ pub fn winget_exe() -> Option<std::path::PathBuf> {
     crate::system::windows::which("winget")
 }
 
-/// The program a winget step names: the full path to `winget.exe`.
+/// The program a winget step names: the full path to the `winget.exe` that
+/// will really run.
 ///
 /// Resolution happens here, in the unelevated process, and never in the
 /// helper. `which` reads `PATH` from the calling process's own environment,
@@ -340,14 +341,19 @@ pub fn winget_exe() -> Option<std::path::PathBuf> {
 /// this is the end that does the looking, because this is the end whose
 /// environment is the user's.
 ///
-/// The alias is handed over as it stands, not canonicalised. It is a
-/// reparse point Windows resolves when the process starts, and opening it
-/// to read its target is refused: `std::fs::canonicalize` on it fails with
-/// "the file cannot be accessed by the system" (error 1920), checked on the
-/// development machine. The real executable it leads to lives under
-/// `C:\Program Files\WindowsApps`, which is not readable either. So the
-/// alias path is the most concrete thing there is, and it is already
-/// absolute, which is what the rule asks for.
+/// What `which` finds is the alias and not the program. The alias is a
+/// zero-length reparse point in a folder the invoking user has full control
+/// of, and `CreateProcess` follows it to an executable under
+/// `C:\Program Files\WindowsApps`, so the file a step should name is the
+/// target and not the alias:
+/// [`resolve_app_execution_alias`](crate::system::windows::resolve_app_execution_alias)
+/// is what turns one into the other. Elevating the alias would elevate
+/// whatever the user last put there, which is why the closed list refuses
+/// it; elevating the target is the thing that was meant all along. When the
+/// path is not an alias, or the alias cannot be read, what `which` found is
+/// handed over unchanged and the closed list judges that instead.
+///
+/// The path is otherwise passed on as it stands and is not canonicalised.
 ///
 /// When winget is not installed there is nothing to resolve and the bare
 /// name stands in. `status()` already reports the source unavailable in
@@ -356,7 +362,11 @@ pub fn winget_exe() -> Option<std::path::PathBuf> {
 #[cfg(windows)]
 pub fn winget_program() -> String {
     winget_exe()
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| {
+            crate::system::windows::resolve_app_execution_alias(&path)
+                .to_string_lossy()
+                .into_owned()
+        })
         .unwrap_or_else(|| "winget.exe".to_string())
 }
 
@@ -805,8 +815,11 @@ mod tests {
         assert!(!is_sha256("aa' -and $false -and 'bb"));
     }
 
-    /// A full path to winget, as the caller now resolves it. The shape is
-    /// the real one: an app execution alias under the user's own profile.
+    /// A full path to winget, of the shape the caller hands over. It is not
+    /// what `winget_program` answers on a real machine any more: that is
+    /// the executable the App Execution Alias names, under
+    /// `C:\Program Files\WindowsApps`. Nothing below reads the disk, so the
+    /// shape is all these tests need.
     const WINGET: &str = r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\winget.EXE";
 
     /// Every operation is non-interactive, because the helper has no terminal
@@ -1094,11 +1107,12 @@ mod tests {
     /// the real path.
     ///
     /// `plan_with` takes the program as a parameter for exactly this: `plan`
-    /// itself resolves `winget.exe` by searching the machine, which would
-    /// make this test depend on winget being installed. The fixed path
-    /// below is the shape `winget_program` really returns, an app execution
-    /// alias under a user's profile, but no such file needs to exist for
-    /// this test: `plan_with` never touches the disk.
+    /// itself resolves `winget.exe` by searching the machine and then
+    /// resolving the App Execution Alias it finds, which would make this
+    /// test depend on winget being installed. The fixed path below is only
+    /// the shape of a resolved program, and no such file needs to exist for
+    /// this test: `plan_with` never touches the disk, and the gate admits a
+    /// name under `C:\Users` that nothing unprivileged could create.
     #[cfg(windows)]
     #[test]
     fn every_step_plan_with_returns_passes_the_closed_list() {

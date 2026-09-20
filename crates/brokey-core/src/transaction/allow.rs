@@ -252,24 +252,34 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 /// as `\\somewhere\share\winget.exe`, which answers `true` to
 /// `Path::is_absolute` on Windows and would be started over the network.
 ///
-/// What this arm leaves open, and what now closes it: `winget_program`
-/// resolves to an app execution alias under the invoking user's own
-/// profile, which that user can replace with anything at any time, so
-/// arguments of the right shape around a file the user owns would still
-/// have been elevated. No rule about the *path* can close that, because
-/// there is no path to winget that is not, in the end, somewhere the user
-/// who is about to be granted Administrator can write. A rule about the
-/// *file* does, and it is not in this arm but after it, in
-/// [`check_step`]: a program this process can replace is refused whatever
-/// source asked for it.
+/// What this arm leaves open, and what closes it: this arm asks nothing
+/// about the file, so arguments of the right shape around a program the
+/// invoking user can replace would be elevated on its word alone. The rule
+/// that closes it is not in this arm but after it, in [`check_step`]: a
+/// program this process can replace is refused whatever source asked for
+/// it.
 ///
-/// That has a consequence worth saying out loud rather than discovering.
-/// On a machine where winget is reached through that alias, which is every
-/// machine this crate has been run on, the gate refuses it, so nothing
-/// installs through winget as Administrator any more. It is the rule
-/// working: elevating a file the invoking user can overwrite grants
-/// Administrator to whoever overwrote it. A winget on a path only an
-/// administrator can write would pass unchanged.
+/// For winget that rule meant a flat refusal on every machine, because
+/// `winget_program` answered the App Execution Alias in
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps`, a zero-length reparse point in a
+/// folder the invoking user has full control of. It no longer answers that.
+/// The alias is resolved to the executable `CreateProcess` would really
+/// start, under `C:\Program Files\WindowsApps`, which no unprivileged
+/// process can replace. The resolution is
+/// [`resolve_app_execution_alias`](crate::system::windows::resolve_app_execution_alias),
+/// and the source does it once, so the source and this list name the same
+/// file by construction and there is no second resolution here.
+///
+/// That is not the same as winget being admitted, and this comment does not
+/// claim it is. On the development machine every element of the resolved
+/// path answers "this account cannot replace this", but
+/// `GetNamedSecurityInfoW` on `C:\Program Files\WindowsApps` itself fails
+/// with `ERROR_ACCESS_DENIED`: a standard user may traverse that directory
+/// and may not read its security descriptor. A question that cannot be put
+/// is a refusal, so a winget step is refused by [`cannot_be_checked`] and
+/// no longer by [`can_be_replaced`]. Whether a descriptor this account is
+/// denied read access to should count as one it cannot write is a decision
+/// about this gate, and it has not been made.
 ///
 /// `choco.exe` is admitted by the same rule, through a function of the
 /// same shape.
@@ -504,8 +514,9 @@ fn check_choco(command: &Command) -> Result<(), String> {
 /// matters here: a UNC path such as `\\somewhere\share\winget.exe` is
 /// absolute too, and `Command::new` would start it over the network, so
 /// `Path::is_absolute` alone is not enough to ask. Every real resolution of
-/// winget answers `true` to this, because the app execution alias lives
-/// under a drive letter in the user's own profile.
+/// winget answers `true` to this: the App Execution Alias lives under a
+/// drive letter in the user's own profile, and so does the executable it is
+/// resolved to, under `C:\Program Files\WindowsApps`.
 #[cfg(windows)]
 fn on_a_local_disk(path: &Path) -> bool {
     use std::path::{Component, Prefix};
@@ -1924,8 +1935,15 @@ mod windows_tests {
         }
     }
 
-    /// The path a winget step really carries: the app execution alias under
-    /// the user's own profile, which is what `winget_program` resolves to.
+    /// A full path ending in `winget.exe`, which is all this arm's tests
+    /// need: they are about the arguments, and the file itself is asked
+    /// about by the gate after the arm rather than inside it.
+    ///
+    /// It is no longer the path `winget_program` answers on a real machine.
+    /// That one is the executable the App Execution Alias names, under
+    /// `C:\Program Files\WindowsApps`, and
+    /// `the_resolved_winget_is_not_a_program_this_account_can_replace` is
+    /// the test that puts the real one to the real gate.
     const WINGET: &str = r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\winget.exe";
 
     /// The three things winget is asked to do, exactly as the source
@@ -2587,13 +2605,14 @@ mod windows_tests {
     /// `operation_step` builds. A source added to the match later inherits
     /// the gate the same way.
     ///
-    /// This is not a hypothetical case for winget. `winget_program`
-    /// resolves to the app execution alias in
+    /// This was not a hypothetical case for winget. `winget_program` used
+    /// to answer the App Execution Alias in
     /// `%LOCALAPPDATA%\Microsoft\WindowsApps`, which the invoking user owns
-    /// and can replace, so the gate refuses the real winget on a real
-    /// machine too. That is the rule working rather than a mistake in it,
-    /// and it is recorded here because it is the one behaviour change a
-    /// reader will not expect.
+    /// and can replace, so the gate refused the real winget on a real
+    /// machine. It now answers the executable that alias names, which that
+    /// user cannot replace, and the planted file below is what keeps the
+    /// rule itself under test rather than the accident that winget used to
+    /// trip it.
     #[test]
     fn the_gate_covers_every_source_the_list_admits_not_only_chocolatey() {
         let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
@@ -2660,6 +2679,70 @@ mod windows_tests {
                     !sentence.contains(leaked),
                     "no permissions in the interface: {sentence}"
                 );
+            }
+        }
+    }
+
+    /// The end-to-end question this change was made to answer, and the part
+    /// of it the change does not settle. A live-machine test, skipped with a
+    /// reason where winget is not installed rather than failed.
+    ///
+    /// Before the alias was resolved, `winget_program` answered the alias in
+    /// `%LOCALAPPDATA%\Microsoft\WindowsApps`: a zero-length reparse point
+    /// in a folder the invoking user has full control of, so the gate
+    /// refused it with [`can_be_replaced`], the sentence about a program
+    /// this account can put different bytes at. It now answers the
+    /// executable `CreateProcess` really starts, under
+    /// `C:\Program Files\WindowsApps`, and that refusal is gone: every
+    /// element of the resolved path answers "this account cannot replace
+    /// this", measured element by element on the development machine.
+    ///
+    /// The step is still not admitted here, for a reason this change did not
+    /// touch, and this test says so rather than claiming a pass.
+    /// `GetNamedSecurityInfoW` on `C:\Program Files\WindowsApps` itself
+    /// fails with `ERROR_ACCESS_DENIED` (5): a standard user may traverse
+    /// that directory but may not read its security descriptor, and
+    /// [`check_step`] refuses a path it cannot put its question to. Whether
+    /// a descriptor this account is denied even read access to should count
+    /// as "cannot replace" is a decision about the gate, not about
+    /// resolution, and it is not made here.
+    ///
+    /// So the assertion is the one that is true either way: the resolved
+    /// program is never refused for being replaceable. `Ok(())` passes, and
+    /// so does the sentence about a permission that could not be read. The
+    /// day the gate learns to answer that directory, this test passes
+    /// unchanged and the step is admitted.
+    #[test]
+    fn the_resolved_winget_is_not_a_program_this_account_can_replace() {
+        use crate::sources::windows::winget::{winget_exe, winget_program};
+
+        let Some(found) = winget_exe() else {
+            eprintln!("skipped: winget is not on this machine, so there is nothing to resolve");
+            return;
+        };
+        let program = winget_program();
+        assert_ne!(
+            Path::new(&program),
+            found,
+            "the alias at {} is not the program that runs",
+            found.display()
+        );
+        assert!(
+            Path::new(&program).is_file(),
+            "{program} is what was resolved, so it is on the disk"
+        );
+
+        let step = operation_step(OpKind::Install, "Valve.Steam", &program);
+        match check_step(&step, &Allowed::system()) {
+            Ok(()) => eprintln!("admitted: {program}"),
+            Err(refusal) => {
+                assert_eq!(
+                    refusal,
+                    cannot_be_checked(&program),
+                    "the only refusal left is the unreadable descriptor of \
+                     C:\\Program Files\\WindowsApps"
+                );
+                eprintln!("not admitted, and not for being replaceable: {refusal}");
             }
         }
     }
