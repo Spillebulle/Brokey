@@ -986,8 +986,22 @@ enum Unprivileged {
 /// machine, so asking the elevated token would refuse every program there
 /// is and nothing would ever install. `TokenLinkedToken` is the standard
 /// user token UAC filtered out of the elevated one, which is the token the
-/// window itself holds, so both ends of the seam put the same question and
-/// get the same answer.
+/// window itself holds, so both ends of the seam ask about the same
+/// account.
+///
+/// They do not always reach the answer by the same road, and this comment
+/// used to claim that they did. [`descriptor_of`] is not one of the calls
+/// made under impersonation, so the elevated helper reads a descriptor with
+/// its own elevated token: on `C:\Program Files\WindowsApps` it reads it
+/// and never enters the probe, while the unelevated window is refused it
+/// and the probe is where the window's answer comes from. CI run
+/// 35532208191 measured exactly that, `descriptor_of` answering no error
+/// on the runner against `ERROR_ACCESS_DENIED` on an ordinary user's
+/// machine. The two instruments are built to agree and on every path
+/// measured so far they do, but they are not the same question, and the
+/// seam's value is that the second check is a re-check of the first. Any
+/// divergence shows up as a plan admitted before the prompt and refused
+/// after it.
 ///
 /// What that does not give is the *invoking* user's token when somebody
 /// else's administrator credentials answered the prompt: the linked token

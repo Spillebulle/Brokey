@@ -172,11 +172,20 @@ pub fn which_in(name: &str, path: &str, pathext: &str) -> Option<PathBuf> {
 /// point that cannot be opened or read, a tag that is not
 /// `IO_REPARSE_TAG_APPEXECLINK`, a buffer that claims more than it carries
 /// or holds fewer than three strings, a third string that is not absolute
-/// under a drive letter, and a target that is not a file. That is the safe
-/// direction rather than a convenience: what comes back goes on to the
-/// closed list, which refuses a program this process could replace, so an
-/// alias that was not resolved is refused instead of elevated. No path is
-/// ever returned that was not found on the disk.
+/// under a drive letter, and a target that is not a file. No path is ever
+/// returned that was not found on the disk.
+///
+/// Whether handing back an unresolved path is the safe direction is not a
+/// property of this function, and this comment used to present it as one.
+/// It is safe because of where the alias sits.
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps` grants the invoking user full
+/// control, so the closed list refuses the alias as a program this account
+/// can replace, and the failure ends there. Point this at an alias
+/// somewhere an unprivileged process cannot write, a machine-wide one or a
+/// future layout change, and the same failure hands on a path the closed
+/// list will admit, after which `CreateProcess` follows reparse data
+/// nothing examined. The day the alias moves, that stops being true, and
+/// nothing in the code will notice.
 ///
 /// What this does not do, and does not try to. It does not ask what is in
 /// the target, who put it there or whether it is signed; that is the closed
