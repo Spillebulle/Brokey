@@ -1656,19 +1656,56 @@ mod windows_tests {
     /// own installer, which is arbitrary elevated execution through a
     /// genuine `choco.exe`. The source never builds it, and comparing the
     /// whole command rather than the verb alone is what refuses it.
+    ///
+    /// It arrives twice: appended, which changes the number of arguments,
+    /// and written over `-y`, which does not. The second is the one that
+    /// says the *content* of every argument is compared. A comparison that
+    /// counted the arguments and read all but the last would pass the first
+    /// and admit the second.
     #[test]
     fn a_choco_command_with_an_extra_argument_is_refused() {
+        const SMUGGLED: &str = r"--install-arguments=/D=C:\Windows";
+
+        let mut appended = choco_step(choco::OpKind::Install, "7zip");
+        appended.command.args.push(SMUGGLED.to_string());
+
+        let mut in_place = choco_step(choco::OpKind::Install, "7zip");
+        let last = in_place.command.args.len() - 1;
+        assert_eq!(in_place.command.args[last], "-y", "the last argument");
+        in_place.command.args[last] = SMUGGLED.to_string();
+
+        for step in [appended, in_place] {
+            let args = step.command.args.clone();
+            let err =
+                validate(&plan_of(vec![step])).expect_err("the source builds no such argument");
+            assert!(
+                err.contains(SMUGGLED),
+                "the refusal names it: {err} for {args:?}"
+            );
+            assert!(
+                err.contains("did not build"),
+                "the arguments are what was refused: {err}"
+            );
+            assert!(err.ends_with('.'), "the reason is a sentence: {err}");
+            assert!(!err.contains('\u{2014}'), "no em dashes: {err}");
+        }
+    }
+
+    /// A working directory is not something the source sets either, and it
+    /// is part of the same comparison. It is not cosmetic: the current
+    /// directory sits in the DLL search order, so a working directory
+    /// somebody else can write to is a way into an elevated `choco.exe`.
+    #[test]
+    fn a_choco_step_with_a_working_directory_is_refused() {
         let mut step = choco_step(choco::OpKind::Install, "7zip");
-        step.command
-            .args
-            .push(r"--install-arguments=/D=C:\Windows".to_string());
-        let err = validate(&plan_of(vec![step])).expect_err("the source builds no such argument");
+        step.command.cwd = Some(std::path::PathBuf::from(r"C:\Users\me\Downloads"));
+        let err = validate(&plan_of(vec![step]))
+            .expect_err("the source sets no working directory, so an equal comparison refuses one");
         assert!(
-            err.contains("--install-arguments"),
-            "the refusal names it: {err}"
+            err.contains("did not build"),
+            "the command is what was refused: {err}"
         );
         assert!(err.ends_with('.'), "the reason is a sentence: {err}");
-        assert!(!err.contains('\u{2014}'), "no em dashes: {err}");
     }
 
     /// A command one argument short is not the command the source builds
@@ -1728,19 +1765,31 @@ mod windows_tests {
         }
     }
 
-    /// `choco.exe` on a network share is not this machine's Chocolatey. A
-    /// UNC path is absolute too, so absolute is not the question; a drive
-    /// letter is, and `on_a_local_disk` is what asks it.
+    /// `choco.exe` on a network share is not this machine's Chocolatey. The
+    /// path is a real UNC path, with both leading backslashes, because that
+    /// is the one this arm has to refuse for itself: a UNC path answers
+    /// `true` to `Path::is_absolute`, so absolute is not the question;
+    /// a drive letter is, and `on_a_local_disk` is the only thing that asks
+    /// it. With one backslash the path is rooted but not absolute, and the
+    /// `Prefix::Disk` half of `on_a_local_disk` would never run.
     #[test]
     fn a_choco_exe_on_a_network_path_is_refused() {
         let step = choco::operation_step(
             choco::OpKind::Install,
             "7zip",
-            r"\somewhere\share\choco.exe",
+            r"\\somewhere\share\choco.exe",
         );
         let err =
             validate(&plan_of(vec![step])).expect_err("a share is not a disk of this machine");
-        assert!(err.contains("choco.exe"), "{err}");
+        assert!(
+            err.contains(r"\\somewhere\share\choco.exe"),
+            "the refusal names the program: {err}"
+        );
+        assert!(
+            err.contains("does not allow") && !err.contains("did not build"),
+            "the program is what was refused, before any argument was read: {err}"
+        );
+        assert!(err.ends_with('.'), "the reason is a sentence: {err}");
     }
 
     /// A Chocolatey step carries no environment, because `operation_step`
@@ -1755,10 +1804,14 @@ mod windows_tests {
             "ChocolateyInstall".to_string(),
             r"C:\Users\me\somewhere-else".to_string(),
         ));
+        let err = validate(&plan_of(vec![step]))
+            .expect_err("the source sets no environment, so an equal comparison refuses one");
         assert!(
-            validate(&plan_of(vec![step])).is_err(),
-            "the source sets no environment, so an equal comparison refuses one"
+            err.contains("did not build"),
+            "the command is what was refused, not the program: {err}"
         );
+        assert!(err.contains(CHOCO), "the refusal names the command: {err}");
+        assert!(err.ends_with('.'), "the reason is a sentence: {err}");
     }
 
     /// A verb the source does not build is refused even from a real
