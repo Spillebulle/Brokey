@@ -878,8 +878,16 @@ not handle, and the test below says what it does with it instead.
 - [ ] **Step 2: Write the failing tests**
 
 - `the_path_comes_from_the_id_and_the_version` — `GIMP.GIMP` at `3.2.4`,
-  `Microsoft.VisualStudio.2022.Community` at `17.0`, and `7zip.7zip` at
+  `Microsoft.VisualStudio.2022.Community` at `17.10.0`, and `7zip.7zip` at
   `24.09`, which begins with a digit.
+
+  **All four path shapes were fetched and checked before dispatch**, so the
+  expected strings in this test are not derived from the rule, they are
+  strings that answer 200. `7zip.7zip` lands under `manifests/7/...`, and the
+  four-part id really does become four directories,
+  `manifests/m/Microsoft/VisualStudio/2022/Community/17.10.0/`. The version in
+  this case was `17.0` in an earlier draft of this plan, which does not exist;
+  a reader who curls a plan's example should not get a 404.
 - `an_id_that_cannot_be_a_path_gives_nothing` — `""`, `".x"`, an id with no
   dot at all, and one starting with a character that is not alphanumeric.
 - `a_real_manifest_reads` — every field of `Described` against
