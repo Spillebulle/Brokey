@@ -11,7 +11,8 @@ stands between the user and every package manager the machine has.
 `docs/architecture.md` is the design document and is where the shape was
 settled; read it before changing the shape. `brokey-core` is one library for
 both platforms, split by `#[cfg]` where the machine actually differs
-(`system/`, `sources/{linux,windows}/`, `launch.rs`, `transaction/runner.rs`);
+(`system/`, `sources/{linux,windows}/`, `launch.rs`, `transaction/runner.rs`,
+`transaction/elevate/`);
 see `docs/superpowers/specs/2026-09-19-windows-support-design.md` for the
 Windows side of that split and what it supersedes in `architecture.md`.
 
@@ -22,8 +23,9 @@ now has two sources, Add/Remove Programs (`sources/windows/arp.rs`) and winget
 (`sources/windows/winget/`): winget's catalogue is downloaded and read by
 Brokey rather than shelled out to, which is why search works without winget
 installed, and its installed list is the registry joined to that catalogue.
-`brokey-helper` still has no Windows implementation, so nothing is actually
-installed or removed there yet. `README.md`'s "What is not there yet" is the
+`brokey-helper` runs on Windows too, elevated through `ShellExecuteEx` and
+answering on a pair of named pipes, so installing, updating and removing
+work there. `README.md`'s "What is not there yet" is the
 user-facing list and is kept honest.
 
 The house reference for conventions is `../Muster` and `../Umber` (Rust
@@ -43,7 +45,7 @@ Never a raw hex in a component.
 | Icons | Lucide, through `lucide-react`. Nothing hand-drawn; nothing from a CDN |
 | Font | Archivo, bundled from `assets/fonts/` |
 | Databases | Read directly in pure Rust. No libalpm, no libapt, and on Windows no shelling out to winget/choco/etc to parse their output |
-| Privilege | Linux: `brokey-helper` via `pkexec` with a closed list of operations. Windows: elevates through `ShellExecuteEx`/`runas` (helper still a stub). The window never runs as root or Administrator |
+| Privilege | Linux: `brokey-helper` via `pkexec` with a closed list of operations. Windows: `ShellExecuteEx` with `runas`, the plan and the events carried on two named pipes whose DACL admits only this user and Administrators, and a closed list of its own. The window never runs as root or Administrator |
 | Targets | Linux x86-64 and ARM64, and Windows x86-64 and ARM64. See `docs/superpowers/specs/2026-09-19-windows-support-design.md`, which supersedes the "Targets" row of `docs/architecture.md` |
 
 ## Commands
@@ -58,13 +60,16 @@ cargo run -p brokey -- search steam        # text mode: exercises the sources wi
 cargo run -p brokey -- sources             # which sources this machine has and why not
 cargo run -p brokey -- updates
 
-# Frontend (Node is in ~/.local/bin on the development machine)
-cd frontend && npm install && npm run build   # tsc + vite build into frontend/dist
-cd frontend && npm run dev                    # vite dev server on :1420 with the mock backend
+# Frontend. package.json and node_modules are at the repository root, not in
+# frontend/, so these run from the root (Node is in ~/.local/bin on the Linux
+# development machine)
+npm install && npm run build   # tsc + vite build into frontend/dist
+npm run dev                    # vite dev server on :1420 with the mock backend
 
-# The window
-cd frontend && npm run tauri dev              # needs webkit2gtk-4.1 installed on the machine
-cd frontend && npm run tauri build
+# The window. The scripts are app:dev and app:build; there is no `tauri dev`
+# script, and `npm run tauri dev` would start the window with no page built
+npm run app:dev                # Linux needs webkit2gtk-4.1 installed on the machine
+npm run app:build
 
 # Packaging sanity, no tools needed
 sh packaging/check.sh
@@ -100,6 +105,9 @@ crates/brokey-core/src/
   appstream/        catalogue XML parser, icon resolution, index
   group.rs          packages -> apps. Pure. Fixture-tested
   transaction/      Plan building and the Runner (spawns the helper and user-session steps)
+    elevate/        the one place that obtains privilege: unix.rs is pkexec with
+                    piped stdio, windows.rs is ShellExecuteEx with runas and the
+                    two named pipes the plan and the events travel on
   updates.rs        merged update list
   selfupdate/       install detection (Muster's install.rs shape), release check, remedy
   system/           mod.rs, linux.rs, windows.rs: which OS this is, which tools exist, paths
@@ -130,7 +138,8 @@ These were decided before the first line and are not re-litigated in a fix:
 
 - **The window has no root.** A privileged operation is an entry in
   `brokey-helper`'s closed list, with a test that the helper refuses anything
-  else. Never a `pkexec` call site outside `transaction/runner.rs`.
+  else. Never an elevation call site, `pkexec` or `ShellExecuteEx`, outside
+  `transaction/elevate/`.
 - **A source never runs anything.** `Source::plan` returns steps; the Runner
   runs them. This is what makes every source testable with fixtures.
 - **Opening an installed application is the one process started outside the

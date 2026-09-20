@@ -102,7 +102,7 @@ guessing.
 - An application installed by hand, such as a browser unpacked into your home folder, is not listed: no package manager has a record of it.
 - AppImages from GitHub releases are placed in `~/.local/bin` without a menu entry yet.
 - A Flatpak of Brokey itself is not published: a sandboxed store cannot reach the helper.
-- Windows support is being built and is not in a release yet. On Windows, Brokey searches winget's catalogue, which it downloads and reads itself, so search works on a machine that has never had winget. It lists what Add/Remove Programs knows about and works out how each entry would be removed, and where winget itself is installed it matches those entries to winget packages to find what has an update. Nothing runs yet: the helper is a stub on Windows, so a plan is built and nothing carries it out. Chocolatey, Scoop and the Microsoft Store come next.
+- Windows support is being built and is not in a release yet. On Windows, Brokey searches winget's catalogue, which it downloads and reads itself, so search works on a machine that has never had winget. It lists what Add/Remove Programs knows about and works out how each entry would be removed, and where winget itself is installed it matches those entries to winget packages to find what has an update. Installing, updating and removing work: the window never elevates, and each stretch of steps that needs Administrator costs one prompt to allow. There is no installer yet, so Windows is built from source. Applications have no icons or descriptions there, and one whose Add/Remove Programs name carries its version is listed more than once. Chocolatey, Scoop and the Microsoft Store come next.
 
 ## Controls
 
