@@ -139,7 +139,17 @@ These were decided before the first line and are not re-litigated in a fix:
 - **The window has no root.** A privileged operation is an entry in
   `brokey-helper`'s closed list, with a test that the helper refuses anything
   else. Never an elevation call site, `pkexec` or `ShellExecuteEx`, outside
-  `transaction/elevate/`.
+  `transaction/elevate/`. **There is one exception and it is the setup
+  executable**, `crates/brokey/src/setup/mod.rs`'s `run_installer`, which
+  elevates `msiexec` on the MSI it has just lifted out of its own file. It
+  cannot go through the helper: `brokey-helper.exe` is one of the files that
+  MSI installs, so there is none on the machine yet. It is held narrow in code
+  rather than in this sentence. `run_installer` takes a `Staged`, which only
+  `stage` can make and only out of this process's own payload, and
+  `still_the_package` checks the file byte for byte immediately before the
+  prompt, so a file that has changed is refused and nothing is elevated. The
+  window it draws is never elevated itself, and neither is the Brokey the
+  install leaves behind.
 - **A source never runs anything.** `Source::plan` returns steps; the Runner
   runs them. This is what makes every source testable with fixtures.
 - **Opening an installed application is the one process started outside the
