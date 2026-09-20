@@ -6,6 +6,7 @@
 //! tracks the tool and `searchable` tracks the catalogue.
 
 pub mod index;
+pub mod manifest;
 pub mod query;
 pub mod version;
 
@@ -17,10 +18,13 @@ use std::sync::Arc;
 /// A catalogue row as the page's `Package`.
 ///
 /// The index is a search index: it has an id, a name, a moniker, a version
-/// and a publisher, and nothing else. Every other field stays `None` rather
-/// than being guessed at, which is what `Package` already expects of a source
-/// that does not know them. Descriptions, homepages and icons arrive with the
-/// metadata ladder in a later plan.
+/// and a publisher key, and nothing else. Every other field stays `None`
+/// rather than being guessed at, which is what `Package` already expects of a
+/// source that does not know them. This is what a search result is, and a
+/// search never fetches anything per package. [`Source::details`] asks for
+/// one package and can afford one request, so it fills the description, the
+/// homepage, the licence and the publisher from the locale manifest through
+/// [`manifest::describe`]. Icons arrive with a later plan.
 pub fn to_package(row: &query::Row) -> crate::model::Package {
     let mut facts = Vec::new();
     facts.push(("Package id".to_string(), row.id.clone()));
@@ -43,11 +47,13 @@ pub fn to_package(row: &query::Row) -> crate::model::Package {
         licence: None,
         homepage: None,
         // The index stores only `norm_publishers2`, which is a join key and not
-        // a name: `igorpavlov`, `pythonsoftwarefoundation`. There is no column
-        // holding the publisher as a person would recognise it, so this stays
-        // empty rather than showing a fact nobody wrote. When Add/Remove
-        // Programs knows the same application, its edition carries the real
-        // name and the grouped app shows that.
+        // a name: `igorpavlov`, `pythonsoftwarefoundation`. It has no column
+        // holding the publisher as a person would recognise it, so a row from
+        // the index leaves this empty rather than showing a fact nobody wrote.
+        // `details` fills it from the locale manifest, which carries
+        // `Publisher: The GIMP Team` in plain text. When Add/Remove Programs
+        // knows the same application, its edition carries the real name too
+        // and the grouped app shows that.
         developer: None,
         updated: None,
         download_size: None,
@@ -62,6 +68,37 @@ pub fn to_package(row: &query::Row) -> crate::model::Package {
         sandboxed: false,
         facts,
     }
+}
+
+/// How long a locale manifest is trusted before it is fetched again. The
+/// same length as [`index::MAX_AGE`], for the same reason: this is Brokey's
+/// own snapshot of somebody else's catalogue, not a live query, and a
+/// description does not change between two openings of a detail page.
+pub const MANIFEST_MAX_AGE: std::time::Duration = index::MAX_AGE;
+
+/// A catalogue row as the detail page's `Package`: [`to_package`], and then
+/// whatever the locale manifest adds to it.
+///
+/// `fetch` is how the manifest is read. [`Source::details`] passes the cached
+/// HTTP client; a test passes a closure, which is what lets the failing path
+/// below be exercised without a network.
+///
+/// A fetch that fails, an id whose manifest has no derivable address, and a
+/// manifest that says nothing all leave the package exactly as the index
+/// described it. A missing description is not an error the page should show:
+/// the package is still installable and everything the catalogue knows about
+/// it is still there.
+fn described_package(
+    row: &query::Row,
+    fetch: &dyn Fn(&str) -> Result<String>,
+) -> crate::model::Package {
+    let mut package = to_package(row);
+    if let Some(url) = manifest::manifest_url(&row.id, &row.latest_version)
+        && let Ok(text) = fetch(&url)
+    {
+        manifest::describe(&mut package, &manifest::parse(&text));
+    }
+    package
 }
 
 /// Where the App Installer bundle and its hash come from. The release is
@@ -532,7 +569,9 @@ impl Source for Winget {
                 format!("{id} is not in the winget catalogue. The catalogue is a daily snapshot; a very new package may not be in it yet."),
             )
         })?;
-        Ok(to_package(&row))
+        Ok(described_package(&row, &|url| {
+            self.client.get_text_cached(url, MANIFEST_MAX_AGE)
+        }))
     }
 
     fn plan(&self, op: &crate::model::Op) -> Result<Vec<Step>> {
@@ -877,6 +916,107 @@ mod tests {
             "took {:?}, which means it tried the network",
             start.elapsed()
         );
+    }
+
+    fn gimp_row() -> query::Row {
+        query::Row {
+            id: "GIMP.GIMP".to_string(),
+            name: "GIMP".to_string(),
+            moniker: Some("gimp".to_string()),
+            latest_version: "3.2.4".to_string(),
+            publisher: Some("thegimpteam".to_string()),
+        }
+    }
+
+    fn gimp_manifest() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/winget/gimp.locale.yaml");
+        std::fs::read_to_string(&path).expect("the fixture is checked in")
+    }
+
+    /// The detail page gets what the index never had. The address the fetch
+    /// is asked for is checked too, because a package's manifest is the one
+    /// thing here that could quietly become some other package's.
+    #[test]
+    fn a_detail_page_takes_what_the_manifest_says() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let p = described_package(&gimp_row(), &|url| {
+            asked.borrow_mut().push(url.to_string());
+            Ok(gimp_manifest())
+        });
+        assert_eq!(
+            asked.into_inner(),
+            [
+                "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/g/GIMP/GIMP/3.2.4/GIMP.GIMP.locale.en-US.yaml"
+            ]
+        );
+        assert!(
+            p.summary
+                .is_some_and(|s| s.starts_with("GIMP is an acronym"))
+        );
+        assert_eq!(p.licence.as_deref(), Some("GPLv3"));
+        assert_eq!(
+            p.homepage.as_deref(),
+            Some("https://www.gimp.org/downloads/")
+        );
+        assert_eq!(p.developer.as_deref(), Some("The GIMP Team"));
+        assert!(p.categories.contains(&"image-editor".to_string()));
+        // What the index already knew is still there.
+        assert_eq!(p.version.as_deref(), Some("3.2.4"));
+        assert!(
+            p.facts
+                .contains(&("Moniker".to_string(), "gimp".to_string()))
+        );
+    }
+
+    /// A machine that is offline, a manifest that was never written, a
+    /// GitHub that answers 404: the detail page still draws everything the
+    /// catalogue knows. A missing description is not an error to show.
+    ///
+    /// The error below is shaped like a manifest on purpose. What a failed
+    /// fetch carries is a sentence for the user, and reading it as the file
+    /// that was not fetched would put that sentence on the detail page as
+    /// though the publisher had written it.
+    #[test]
+    fn a_manifest_that_cannot_be_fetched_leaves_the_package_as_the_index_had_it() {
+        let row = gimp_row();
+        let p = described_package(&row, &|_| {
+            Err(crate::Error::new(
+                "License: could not reach raw.githubusercontent.com".to_string(),
+            ))
+        });
+        assert_eq!(p, to_package(&row));
+        assert_eq!(p.description, None);
+        assert_eq!(p.homepage, None);
+    }
+
+    /// An id with no derivable address costs no request at all, rather than
+    /// one that is certain to fail.
+    #[test]
+    fn an_id_with_no_derivable_address_is_never_fetched() {
+        let mut row = gimp_row();
+        row.id = "nodot".to_string();
+        let asked = std::cell::Cell::new(0);
+        let p = described_package(&row, &|_| {
+            asked.set(asked.get() + 1);
+            Ok(gimp_manifest())
+        });
+        assert_eq!(asked.get(), 0);
+        assert_eq!(p, to_package(&row));
+    }
+
+    /// Search builds its rows with `to_package` and nothing else, so a page
+    /// of twenty results costs no manifest fetches. This pins the half of
+    /// that which is a fact about `to_package` rather than about the caller.
+    #[test]
+    fn a_search_row_carries_no_manifest_fields() {
+        let p = to_package(&gimp_row());
+        assert_eq!(p.summary, None);
+        assert_eq!(p.description, None);
+        assert_eq!(p.homepage, None);
+        assert_eq!(p.licence, None);
+        assert_eq!(p.developer, None);
+        assert!(p.categories.is_empty());
     }
 
     /// Uninstall takes no package agreement. Nothing is being agreed to, and
