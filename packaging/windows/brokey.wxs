@@ -1,0 +1,252 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The Windows installer, built with WiX 5, installed as a global dotnet tool.
+
+  Note for anyone editing this file: an XML comment may not contain two hyphens
+  in a row, so a command line with a long option cannot be written out here.
+  That is what broke the first build of the sibling this file is ported from.
+  Write "the pdbtype option" and reword rather than quoting the flag.
+
+  Two values come from the command line so nothing here has to be edited to cut
+  a release: `Version` and `BinDir`. `packaging/windows/build-msi.sh` passes
+  them, along with `DocDir` and `AssetDir`, and CI runs that same script.
+
+  The UpgradeCode must never change: it is what tells Windows that 0.1.5 is the
+  same product as 0.1.4 and should replace it rather than install beside it.
+
+  **Every GUID in this file is Brokey's alone, and copying one from a sibling
+  application is the bug this paragraph exists to prevent.** Muster 0.0.1
+  shipped with Umber's UpgradeCode and Umber's component GUIDs, because its
+  file was ported from Umber's and the identity came with it. Windows then
+  believed the two were one product, so installing one over the other either
+  refused with a baffling message or uninstalled the wrong application. Shared
+  component GUIDs are the same hazard one level down: Windows Installer
+  reference counts by them, so removing one product can take another's files
+  with it. The five below were generated for Brokey and for nothing else.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package Name="Brokey"
+           Manufacturer="Brokey contributors"
+           Version="$(var.Version)"
+           UpgradeCode="9e467a98-24b3-439a-aea0-67df3e57da64"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <SummaryInformation Description="Brokey, one search and one install flow across every source this machine has" />
+
+    <!-- Refuse to install over a newer build rather than quietly downgrading. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of Brokey is already installed. Uninstall it first if you meant to go back." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!--
+      The Id is a file name, not a label, and the extension is load bearing.
+
+      Windows Installer streams every Icon row out to a real file inside its own
+      cache and names it with this Id; the shell then has to identify that file
+      from its name alone, and an Id like `BrokeyIcon` gives it one with no
+      extension. WiX's own `Shortcut.xsd` says the identifier "should have the
+      same extension as the file that it points at". Whether that is what draws
+      a generic page in Add/Remove Programs is inference, since the
+      documentation covers shortcuts rather than `ARPPRODUCTICON`, but an Id
+      that is a valid file name costs nothing and is what every other package
+      does.
+
+      For the *shortcut* the rule is documented and is stronger than a naming
+      convention: the Icon table requires an icon associated with a shortcut to
+      be "in the EXE binary format" and "named such that their extension matches
+      the extension of the target", and says the shortcut will not work
+      otherwise. So no `.ico` row could ever serve it, whatever it was called,
+      and satisfying the rule literally would mean an Icon row named
+      `brokey.exe` holding a second copy of the executable inside the package.
+      Hence the Start menu shortcut below names no icon at all and is not
+      advertised: a real `.lnk` takes its icon out of the executable it points
+      at, which for Brokey is the `RT_GROUP_ICON` that `tauri-build` compiles in
+      from `crates/brokey/icons/icon.ico`.
+    -->
+    <Icon Id="brokey.ico" SourceFile="$(var.AssetDir)\brokey.ico" />
+    <Property Id="ARPPRODUCTICON" Value="brokey.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Spillebulle/Brokey" />
+
+    <!--
+      WixUI_Minimal: a licence page, a progress page, and done. Brokey has one
+      feature and one directory worth choosing, so a feature tree and a
+      directory browser would be three extra pages offering a choice nobody has.
+
+      Two consequences worth knowing rather than discovering. `INSTALLFOLDER` is
+      not choosable in the interface, though it can still be set from the
+      command line:
+
+        msiexec /i brokey.msi INSTALLFOLDER="D:\Brokey"
+
+      And `WixUI_Minimal` sets `ARPNOMODIFY`, so the Add/Remove Programs entry
+      offers Remove alone rather than a Change that leads nowhere. Repair and
+      Remove keep their wizard, because the maintenance dialogs are still in the
+      set.
+    -->
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.AssetDir)\licence.rtf" />
+
+    <!--
+      The two pictures WixUI takes, drawn by `tools/make-art.py` from the same
+      tokens as the rest of Brokey and committed beside this file rather than
+      generated at build time. The banner is 493 by 58 and the dialog 493 by
+      312, which are the sizes WixUI reserves; anything else is scaled and looks
+      it.
+    -->
+    <WixVariable Id="WixUIBannerBmp" Value="$(var.AssetDir)\banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="$(var.AssetDir)\dialog.bmp" />
+
+    <!--
+      "Start Brokey" on the last page, ticked.
+
+      `ExitDialog` has a spare checkbox built into it: give it text and it
+      appears, and setting the property to 1 is what makes it start ticked.
+
+      `Impersonate="yes"` is the part that matters, and it matters more here
+      than it does in any sibling. Brokey installs per machine, so the installer
+      is elevated. Without this attribute the custom action would start Brokey
+      as the elevated account, and Brokey's first invariant is that its window
+      never runs as Administrator: the window builds plans and `brokey-helper`
+      runs the privileged steps, one prompt per stretch. A window started
+      elevated here would quietly hold the privilege the whole design exists to
+      withhold, and would write its settings into the wrong profile as well.
+
+      Deferred to the Finish button rather than run at the end of the install,
+      and conditioned on `NOT Installed`, so a repair does not launch the
+      application behind the user's back.
+    -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Start Brokey" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#BrokeyExe]" />
+    <CustomAction Id="StartBrokey"
+                  BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  DllEntry="WixShellExec"
+                  Impersonate="yes" />
+    <UI>
+      <Publish Dialog="ExitDialog"
+               Control="Finish"
+               Event="DoAction"
+               Value="StartBrokey"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+    </UI>
+
+    <!--
+      `ProgramFiles6432Folder` resolves to the native Program Files on both
+      architectures, so an x64 package lands in `C:\Program Files` and an ARM64
+      one does too, rather than either being pushed into the 32 bit directory.
+      Per machine, so the uninstall entry lands in HKLM and Brokey appears in
+      Add/Remove Programs for every user of the machine.
+    -->
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="Brokey" />
+    </StandardDirectory>
+
+    <!--
+      The Start menu shortcut, and it is deliberately **not** advertised.
+
+      Two things need it to be a plain `.lnk`. Its icon, for the reason the Icon
+      element above gives. And `System.AppUserModel.ID`, which is what lets the
+      taskbar match a running window to an installed shortcut: Microsoft's rule
+      for an explicit application id is that the same id "must also be assigned
+      to all running windows or processes, shortcuts, and file associations",
+      and setting it on the shortcut is what "allows the taskbar to identify the
+      proper shortcut to pin and ensures that windows belonging to the process
+      are appropriately associated with that taskbar button". Without it a
+      window claims an identity nothing installed on the machine owns, so the
+      taskbar button has no shortcut to take its icon, its name or its pinning
+      from. The value is the identifier in `crates/brokey/tauri.conf.json`, and
+      the two have to stay spelt the same.
+
+      The registry value is the price of a non-advertised shortcut: ICE43 is an
+      *error* unless the component holding one has an HKCU key as its keypath,
+      and validation runs as part of `wix build`.
+
+      **Do not "tidy" the root to HKMU or HKLM.** HKMU looks like the better
+      answer, since it is root minus one and resolves per install context, so on
+      a per machine package the marker would land in HKLM rather than in
+      whichever hive the unimpersonated `WriteRegistryValues` sees, and ICE43
+      even names root minus one in its own remedy. But ICE57 is the gate on the
+      other side: it refuses per user and per machine data sharing a component,
+      an HKLM keypath beside a non-advertised shortcut is that mix, and it
+      reports it at *error* severity where the HKCU spelling is the one case its
+      own examples print as a warning. A stray marker in the wrong hive is a
+      blemish; a release that will not build is not.
+    -->
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <ComponentGroup Id="StartMenu" Directory="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="2c076a68-85ff-4968-bc0b-5e05de1f1dae">
+        <Shortcut Id="BrokeyShortcut"
+                  Name="Brokey"
+                  Description="Install and update software"
+                  Target="[#BrokeyExe]"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Advertise="no">
+          <ShortcutProperty Key="System.AppUserModel.ID" Value="io.github.spillebulle.brokey" />
+        </Shortcut>
+        <RegistryValue Root="HKCU"
+                       Key="Software\Brokey contributors\Brokey"
+                       Name="StartMenuShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!--
+      No file associations and no thumbnail handler.
+
+      Umber's package registers five document types and an in-process COM server
+      to draw their thumbnails. Brokey opens no documents at all: it is a store,
+      and the whole of what it installs is two executables, a Start menu
+      shortcut and three text files. The rule Umber learned is recorded here in
+      case a document type ever arrives: register with `OpenWithProgIds` and
+      never with a bare `ProgId`, because the latter makes the application the
+      default handler for a type and takes it away from whatever owned it,
+      silently.
+    -->
+
+    <Feature Id="Main" Title="Brokey" Level="1">
+      <ComponentGroupRef Id="Files" />
+      <ComponentGroupRef Id="StartMenu" />
+    </Feature>
+
+    <!--
+      Two executables, not one. `transaction::runner::locate_helper` on Windows
+      looks for `brokey-helper.exe` beside the running executable, so the helper
+      is not an optional extra: without it in this directory every plan fails at
+      the point of elevating, which is the last moment anyone would look.
+
+      The helper is the only part of Brokey that ever holds Administrator. The
+      window starts it through `ShellExecuteEx` with `runas`, once per stretch
+      of privileged steps, and talks to it over a pair of named pipes. It has no
+      shortcut and nobody runs it by hand: it sits beside the window because
+      that is where the window looks for it.
+
+      A component each for the two executables, so they are versioned, repaired
+      and removed as the separate things they are. The three documents share one
+      component with a GUID of its own: a component with no GUID gets one
+      generated, and Windows Installer allows that only for a component holding
+      a single unversioned file that is its own keypath, so three files together
+      need the GUID written out.
+    -->
+    <ComponentGroup Id="Files" Directory="INSTALLFOLDER">
+      <Component Id="Executable" Guid="337ffc2c-254e-4f27-b07b-607345a9a4b6">
+        <File Id="BrokeyExe" Source="$(var.BinDir)\brokey.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="Helper" Guid="38d24698-fd9a-4f4c-9782-b6d197a80fa7">
+        <File Id="BrokeyHelperExe" Source="$(var.BinDir)\brokey-helper.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="Documents" Guid="7e5ebbd5-584b-4ba2-8354-344b842d3907">
+        <File Source="$(var.DocDir)\README.md" />
+        <File Source="$(var.DocDir)\CHANGELOG.md" />
+        <File Source="$(var.DocDir)\LICENSE" Name="LICENSE.txt" />
+      </Component>
+    </ComponentGroup>
+
+  </Package>
+</Wix>
