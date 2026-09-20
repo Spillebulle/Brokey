@@ -261,9 +261,16 @@ git commit -m "Art: the installer's two bitmaps, from the palette"
 
 **This is the task that makes Brokey installable, and it is independently testable on the development machine, which is Windows.**
 
-- [ ] **Step 1: Read the sibling**
+- [ ] **Step 1: Read the siblings, Umber first**
 
-Read `../Muster/packaging/windows/muster.wxs` in full before writing anything. Copy its structure, its comments' register and its `WixUI` wiring. Do not copy a single GUID.
+Read `../Umber/packaging/windows/umber.wxs` in full, then `../Muster/packaging/windows/muster.wxs`. Umber's is the better reference: it is newer, it carries the reasoning for every decision in its comments, and several of those comments record a build that failed first. Copy its structure and the register of its comments. **Do not copy a single GUID from either.**
+
+Four traps it records, each of which cost somebody a build:
+
+1. **An XML comment may not contain two hyphens in a row.** A long option written into a comment is a parse error, and it is what broke the first build of Umber's file. Write `the -pdbtype option` or reword.
+2. **The `Icon` Id is a file name, not a label, and the extension is load-bearing.** Windows Installer streams each Icon row out to a real file named with the Id, and the shell identifies it by that name alone. Use `brokey.ico`, not `BrokeyIcon`, and point `ARPPRODUCTICON` at it.
+3. **The Start menu shortcut names no icon and is not advertised.** The Icon table requires a shortcut's icon to be in EXE binary format with a matching extension, so no `.ico` row can serve it. A plain `.lnk` takes its icon from the executable it points at, which for Brokey is the `RT_GROUP_ICON` that `tauri-build` compiles in from `crates/brokey/icons/icon.ico`.
+4. **A non-advertised shortcut needs an HKCU registry value as its component's keypath**, or ICE43 fails the build, and validation runs as part of `wix build`. Do not tidy that root to HKMU or HKLM: ICE57 refuses per-user and per-machine data in one component and reports it at error severity. Umber's comment on this is worth reading before changing it.
 
 - [ ] **Step 2: Generate fresh GUIDs**
 
@@ -315,9 +322,72 @@ The dialog set and the two pictures, which is the rest of why `WixToolset.UI.wix
 <WixVariable Id="WixUIDialogBmp" Value="$(var.AssetDir)\dialog.bmp" />
 ```
 
-The exit page offers to start Brokey, which is what `WixToolset.Util.wixext` is for: set `WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT` to `Start Brokey` and `WIXUI_EXITDIALOGOPTIONALCHECKBOX` to `1`, and run the shortcut through a `CustomAction` with `BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"` conditioned on `WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed`. Copy the shape from `../Umber/packaging/windows/umber.wxs`, which does exactly this. Starting it through the Start menu shortcut rather than the executable matters: launched from the custom action the process would otherwise inherit the installer's elevated token, and Brokey's window must never run as Administrator.
+The exit page offers to start Brokey, which is what `WixToolset.Util.wixext` is for, and it is the one place in this file where Brokey's central invariant is at stake:
 
-Install per machine, into `ProgramFiles64Folder` on x64 and `ProgramFiles6432Folder` on arm64, so the uninstall entry lands in `HKLM` and Brokey appears in Add/Remove Programs for every user. The Start menu shortcut carries `<ShortcutProperty Key="System.AppUserModel.ID" Value="io.github.spillebulle.brokey" />`, the identifier already in `crates/brokey/tauri.conf.json:5`.
+```xml
+<!--
+  "Start Brokey" on the last page, ticked.
+
+  `Impersonate="yes"` is the part that matters, and it matters more here than
+  it does in any sibling. Brokey installs per machine, so the installer is
+  elevated. Without this attribute the custom action would start Brokey as
+  the elevated account, and Brokey's first invariant is that its window never
+  runs as Administrator: the window builds plans and `brokey-helper` runs the
+  privileged steps, one prompt per stretch. A window started elevated here
+  would quietly have the privilege the whole design exists to withhold, and
+  would write its settings into the wrong profile as well.
+
+  Deferred to the Finish button and conditioned on `NOT Installed`, so a
+  repair does not launch the application behind the user's back.
+-->
+<Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Start Brokey" />
+<Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+<Property Id="WixShellExecTarget" Value="[#BrokeyExe]" />
+<CustomAction Id="StartBrokey"
+              BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+              DllEntry="WixShellExec"
+              Impersonate="yes" />
+<UI>
+  <Publish Dialog="ExitDialog"
+           Control="Finish"
+           Event="DoAction"
+           Value="StartBrokey"
+           Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+</UI>
+```
+
+`[#BrokeyExe]` is the `File` Id from the component group above, which is why that element names its Id explicitly.
+
+Install per machine (`Scope="perMachine"`, `Compressed="yes"`) into `ProgramFiles6432Folder`, which resolves to the native Program Files on both architectures and is the one Umber uses for exactly this reason. The uninstall entry then lands in HKLM and Brokey appears in Add/Remove Programs for every user.
+
+The Start menu shortcut, with the keypath ICE43 requires:
+
+```xml
+<StandardDirectory Id="ProgramMenuFolder" />
+
+<ComponentGroup Id="StartMenu" Directory="ProgramMenuFolder">
+  <Component Id="StartMenuShortcut" Guid="PUT-FRESH-GUID-4-HERE">
+    <Shortcut Id="BrokeyShortcut"
+              Name="Brokey"
+              Description="Install and update software"
+              Target="[#BrokeyExe]"
+              WorkingDirectory="INSTALLFOLDER"
+              Advertise="no">
+      <ShortcutProperty Key="System.AppUserModel.ID" Value="io.github.spillebulle.brokey" />
+    </Shortcut>
+    <RegistryValue Root="HKCU"
+                   Key="Software\Brokey contributors\Brokey"
+                   Name="StartMenuShortcut"
+                   Type="integer"
+                   Value="1"
+                   KeyPath="yes" />
+  </Component>
+</ComponentGroup>
+```
+
+The `System.AppUserModel.ID` is `io.github.spillebulle.brokey`, the identifier already in `crates/brokey/tauri.conf.json:5`.
+
+Also include a `MajorUpgrade` with `AllowSameVersionUpgrades="yes"` and a `DowngradeErrorMessage`, so 0.1.6 replaces 0.1.5 rather than installing beside it and an older installer refuses rather than quietly downgrading. Brokey has no document types, so Umber's file-association section has no counterpart here: leave it out.
 
 Take `Name`, `Manufacturer`, `Version` and `UpgradeCode` from `$(var.Version)` and literals. `MediaTemplate EmbedCab="yes"` keeps it one file.
 
@@ -616,17 +686,31 @@ Copy the shape from `../Muster/.github/workflows/release.yml` lines 100 to 165, 
 
 Pin the WiX version and both extension versions exactly, as Muster does. An installer that builds differently next month is not a release process.
 
-- [ ] **Step 3: Bump the version**
+- [ ] **Step 3: Bump the version, in all three places the guard checks**
 
-0.1.4 to 0.1.5 in every `Cargo.toml` of the workspace and in `package.json`. Then `cargo build --workspace` so `Cargo.lock` follows.
+`crates/brokey/tests/release.rs` checks **three** places, and its own module documentation names them: the Cargo workspace, `crates/brokey/tauri.conf.json` (what the AppImage and the window's About say) and `package.json` (what the Tauri build reads). Miss `tauri.conf.json` and `the_tauri_config_carries_this_version` fails; miss `package.json` and `the_package_json_carries_this_version` fails.
+
+0.1.4 to 0.1.5 in the workspace `Cargo.toml`, `crates/brokey/tauri.conf.json`, and `package.json`. The member crates use `version.workspace = true`, so they need no edit; check that rather than assuming it. Then `cargo build --workspace` so `Cargo.lock` follows, and `npm install --package-lock-only` if `package-lock.json` records the version.
 
 - [ ] **Step 4: Write the CHANGELOG entry**
 
 `crates/brokey/tests/release.rs` fails if `CHANGELOG.md` has no section for the current version or if it is not the newest. Write what 0.1.5 actually is: Windows installs, updates and removes software through winget and Add/Remove Programs; there is an installer; the window never elevates. Name what is still missing, in the register the file already uses.
 
-- [ ] **Step 5: Correct the README**
+- [ ] **Step 5: Correct the README, including the table no test guards**
 
-`README.md`'s Windows bullet says "There is no installer yet, so Windows is built from source." That stops being true with this plan. Say how to install instead, and leave the rest of the bullet's honesty alone.
+Three separate edits, and the second is the one that gets forgotten:
+
+1. The Windows bullet in "What is not there yet" (`README.md:105`) says "There is no installer yet, so Windows is built from source." That stops being true with this plan. Say how to install instead, and leave the rest of the bullet's honesty alone: the missing icons and descriptions, the duplicate rows, and Chocolatey, Scoop and the Store are all still true.
+
+2. **The download table at `README.md:23-32` hardcodes `0.1.4` and eight `v0.1.4` release URLs, and nothing tests it.** `crates/brokey/tests/release.rs` says in its own documentation that Muster's README download-link guards were left out "because Brokey's README does not carry a download table yet" — which was true when that file was written and is not true now. Bump the heading and every URL to 0.1.5, and add the two Windows rows:
+
+| Windows 11, Windows 10 | [`setup.exe`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.5/brokey-setup-0.1.5-x64.exe) | [`setup.exe`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.5/brokey-setup-0.1.5-arm64.exe) |
+
+Mention that the `.msi` is published beside it for anyone deploying Brokey across a fleet.
+
+3. The banner sentence at `README.md:9` says "One store for every way a **Linux** machine gets software". Brokey now installs software on Windows. Correct it.
+
+**Ruling, carried in this plan rather than left to the implementer:** do not add a README download-link guard to `release.rs` in this task. It is the right test and Muster has one to transcribe, but it belongs with the release plumbing rather than bolted onto a version bump, and adding it here would mean writing a test and a table in the same commit with no independent check on either. Record it instead as the first item of whatever plan next touches `release.yml`.
 
 - [ ] **Step 6: Check everything**
 
