@@ -2226,12 +2226,14 @@ mod windows_tests {
     /// winget.
     #[test]
     fn another_winget_verb_is_refused() {
-        let plan = plan_of(vec![step_from(
+        let step = step_from(
             SourceKind::Winget,
             WINGET,
             &["export", "--output", r"C:\everything.json"],
-        )]);
-        let err = validate(&plan).expect_err("export is not on the list");
+        );
+        let expected = not_a_winget_command(&describe(&step.command));
+        let err = validate(&plan_of(vec![step])).expect_err("export is not on the list");
+        assert_eq!(err, expected, "the sentence this test means");
         assert!(err.contains("export"), "the refusal names the verb: {err}");
         assert!(err.ends_with('.'), "the reason is a sentence: {err}");
         assert!(!err.contains('\u{2014}'), "no em dashes: {err}");
@@ -2243,8 +2245,10 @@ mod windows_tests {
     /// Only..." with an empty name where the offending command should be.
     #[test]
     fn a_winget_command_with_no_arguments_names_the_program_not_nothing() {
-        let plan = plan_of(vec![step_from(SourceKind::Winget, WINGET, &[])]);
-        let err = validate(&plan).expect_err("no verb is on the list");
+        let step = step_from(SourceKind::Winget, WINGET, &[]);
+        let expected = not_a_winget_command(&describe(&step.command));
+        let err = validate(&plan_of(vec![step])).expect_err("no verb is on the list");
+        assert_eq!(err, expected, "the sentence this test means");
         assert!(
             err.contains(WINGET),
             "the refusal names the command it refused: {err}"
@@ -2260,13 +2264,13 @@ mod windows_tests {
     /// that says it is winget and runs something else is refused.
     #[test]
     fn a_step_cannot_claim_to_be_winget_and_run_something_else() {
+        const POWERSHELL: &str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
         let plan = plan_of(vec![step_from(
             SourceKind::Winget,
-            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            POWERSHELL,
             &["-Command", "Remove-Item C:/Windows -Recurse"],
         )]);
-        let err = validate(&plan).expect_err("the program decides, not the source");
-        assert!(err.contains("powershell.exe"), "{err}");
+        assert_eq!(validate(&plan), Err(not_allowed(POWERSHELL)));
     }
 
     /// A bare name is refused. The helper searches for nothing, so the
@@ -2276,8 +2280,11 @@ mod windows_tests {
     fn a_bare_winget_name_is_refused() {
         let mut step = operation_step(OpKind::Install, "Valve.Steam", WINGET);
         step.command.program = "winget.exe".to_string();
-        let err = validate(&plan_of(vec![step])).expect_err("a bare name is not a full path");
-        assert!(err.contains("winget.exe"), "{err}");
+        assert_eq!(
+            validate(&plan_of(vec![step])),
+            Err(not_allowed("winget.exe")),
+            "a bare name is not a full path"
+        );
     }
 
     /// `winget.exe` on a network share is not this machine's winget. A UNC
@@ -2285,14 +2292,13 @@ mod windows_tests {
     /// is.
     #[test]
     fn a_winget_on_a_share_is_refused() {
-        let step = operation_step(
-            OpKind::Install,
-            "Valve.Steam",
-            r"\\attacker\share\winget.exe",
+        const SHARE: &str = r"\\attacker\share\winget.exe";
+        let step = operation_step(OpKind::Install, "Valve.Steam", SHARE);
+        assert_eq!(
+            validate(&plan_of(vec![step])),
+            Err(not_allowed(SHARE)),
+            "a share is not a disk of this machine"
         );
-        let err =
-            validate(&plan_of(vec![step])).expect_err("a share is not a disk of this machine");
-        assert!(err.contains("winget.exe"), "{err}");
     }
 
     /// `--manifest` runs an installer of the caller's choosing through a
@@ -2300,12 +2306,15 @@ mod windows_tests {
     /// never builds it, so it is refused.
     #[test]
     fn a_manifest_is_refused() {
-        let plan = plan_of(vec![step_from(
+        let step = step_from(
             SourceKind::Winget,
             WINGET,
             &["install", "--manifest", r"C:\Users\me\Downloads\evil.yaml"],
-        )]);
-        let err = validate(&plan).expect_err("--manifest is not a command Brokey builds");
+        );
+        let expected = not_a_winget_command(&describe(&step.command));
+        let err =
+            validate(&plan_of(vec![step])).expect_err("--manifest is not a command Brokey builds");
+        assert_eq!(err, expected, "the sentence this test means");
         assert!(err.contains("--manifest"), "the refusal names it: {err}");
         assert!(err.ends_with('.'), "the reason is a sentence: {err}");
     }
@@ -2320,8 +2329,10 @@ mod windows_tests {
         step.command
             .args
             .push("/C powershell -Command whoami".to_string());
+        let expected = not_a_winget_command(&describe(&step.command));
         let err =
             validate(&plan_of(vec![step])).expect_err("--override is not a command Brokey builds");
+        assert_eq!(err, expected, "the sentence this test means");
         assert!(err.contains("--override"), "{err}");
     }
 
@@ -2334,7 +2345,8 @@ mod windows_tests {
         step.command
             .env
             .push(("PATH".to_string(), r"C:\somewhere\else".to_string()));
-        assert!(validate(&plan_of(vec![step])).is_err());
+        let expected = not_a_winget_command(&describe(&step.command));
+        assert_eq!(validate(&plan_of(vec![step])), Err(expected));
     }
 
     /// A working directory is not something the source sets either, and it
@@ -2343,7 +2355,8 @@ mod windows_tests {
     fn a_winget_step_with_a_working_directory_is_refused() {
         let mut step = operation_step(OpKind::Install, "Valve.Steam", WINGET);
         step.command.cwd = Some(std::path::PathBuf::from(r"C:\somewhere\else"));
-        assert!(validate(&plan_of(vec![step])).is_err());
+        let expected = not_a_winget_command(&describe(&step.command));
+        assert_eq!(validate(&plan_of(vec![step])), Err(expected));
     }
 
     /// An id beginning with a dash is an option to winget, and rebuilding
@@ -2353,11 +2366,15 @@ mod windows_tests {
     #[test]
     fn an_id_that_is_not_an_id_is_refused() {
         let smuggled = operation_step(OpKind::Install, "--override", WINGET);
+        let expected = not_a_winget_command(&describe(&smuggled.command));
         let err = validate(&plan_of(vec![smuggled])).expect_err("an id is never an option");
+        assert_eq!(err, expected, "the sentence this test means");
         assert!(err.contains("--override"), "{err}");
         let empty = operation_step(OpKind::Install, "", WINGET);
-        assert!(
-            validate(&plan_of(vec![empty])).is_err(),
+        let expected = not_a_winget_command(&describe(&empty.command));
+        assert_eq!(
+            validate(&plan_of(vec![empty])),
+            Err(expected),
             "an id is never empty"
         );
     }
@@ -2433,8 +2450,10 @@ mod windows_tests {
 
         for step in [appended, in_place] {
             let args = step.command.args.clone();
+            let expected = not_a_choco_command(&describe(&step.command));
             let err =
                 validate(&plan_of(vec![step])).expect_err("the source builds no such argument");
+            assert_eq!(err, expected, "the sentence this test means, for {args:?}");
             assert!(
                 err.contains(SMUGGLED),
                 "the refusal names it: {err} for {args:?}"
@@ -2456,8 +2475,10 @@ mod windows_tests {
     fn a_choco_step_with_a_working_directory_is_refused() {
         let mut step = choco_step(choco::OpKind::Install, "7zip");
         step.command.cwd = Some(std::path::PathBuf::from(r"C:\Users\me\Downloads"));
+        let expected = not_a_choco_command(&describe(&step.command));
         let err = validate(&plan_of(vec![step]))
             .expect_err("the source sets no working directory, so an equal comparison refuses one");
+        assert_eq!(err, expected, "the sentence this test means");
         assert!(
             err.contains("did not build"),
             "the command is what was refused: {err}"
@@ -2476,8 +2497,10 @@ mod windows_tests {
         ] {
             let mut step = choco_step(kind, "7zip");
             step.command.args.retain(|arg| arg != "-y");
+            let expected = not_a_choco_command(&describe(&step.command));
             let err = validate(&plan_of(vec![step]))
                 .expect_err("-y is one of the arguments the source builds");
+            assert_eq!(err, expected, "the sentence this test means");
             assert!(err.contains("7zip"), "{err}");
             assert!(err.ends_with('.'), "the reason is a sentence: {err}");
         }
@@ -2492,8 +2515,10 @@ mod windows_tests {
     fn an_id_that_is_really_an_option_is_refused() {
         for id in ["--force", "-y", ""] {
             let step = choco_step(choco::OpKind::Install, id);
+            let expected = not_a_choco_command(&describe(&step.command));
             let err = validate(&plan_of(vec![step]))
                 .expect_err("an id is never an option and never empty");
+            assert_eq!(err, expected, "the sentence this test means, for {id:?}");
             assert!(err.ends_with('.'), "the reason is a sentence: {err}");
         }
         let forced = choco_step(choco::OpKind::Install, "--force");
@@ -2514,10 +2539,7 @@ mod windows_tests {
         ] {
             let step = choco::operation_step(choco::OpKind::Install, "7zip", program);
             let err = validate(&plan_of(vec![step])).expect_err("only choco.exe runs here");
-            assert!(
-                err.contains(program),
-                "the refusal names the program: {err}"
-            );
+            assert_eq!(err, not_allowed(program), "the sentence this test means");
             assert!(err.ends_with('.'), "the reason is a sentence: {err}");
         }
     }
@@ -2531,17 +2553,11 @@ mod windows_tests {
     /// `Prefix::Disk` half of `on_a_local_disk` would never run.
     #[test]
     fn a_choco_exe_on_a_network_path_is_refused() {
-        let step = choco::operation_step(
-            choco::OpKind::Install,
-            "7zip",
-            r"\\somewhere\share\choco.exe",
-        );
+        const SHARE: &str = r"\\somewhere\share\choco.exe";
+        let step = choco::operation_step(choco::OpKind::Install, "7zip", SHARE);
         let err =
             validate(&plan_of(vec![step])).expect_err("a share is not a disk of this machine");
-        assert!(
-            err.contains(r"\\somewhere\share\choco.exe"),
-            "the refusal names the program: {err}"
-        );
+        assert_eq!(err, not_allowed(SHARE), "the sentence this test means");
         assert!(
             err.contains("does not allow") && !err.contains("did not build"),
             "the program is what was refused, before any argument was read: {err}"
@@ -2561,8 +2577,10 @@ mod windows_tests {
             "ChocolateyInstall".to_string(),
             r"C:\Users\me\somewhere-else".to_string(),
         ));
+        let expected = not_a_choco_command(&describe(&step.command));
         let err = validate(&plan_of(vec![step]))
             .expect_err("the source sets no environment, so an equal comparison refuses one");
+        assert_eq!(err, expected, "the sentence this test means");
         assert!(
             err.contains("did not build"),
             "the command is what was refused, not the program: {err}"
@@ -2581,8 +2599,10 @@ mod windows_tests {
     fn a_verb_choco_does_not_have_is_refused() {
         for args in [vec!["list"], vec!["push", "evil.nupkg"], vec![]] {
             let step = step_from(SourceKind::Choco, CHOCO, &args);
+            let expected = not_a_choco_command(&describe(&step.command));
             let err = validate(&plan_of(vec![step]))
                 .expect_err("only install, upgrade and uninstall are built");
+            assert_eq!(err, expected, "the sentence this test means, for {args:?}");
             assert!(err.contains(CHOCO), "the refusal names the command: {err}");
             assert!(!err.contains(": . "), "the name must not be empty: {err}");
             assert!(err.ends_with('.'), "the reason is a sentence: {err}");
@@ -2596,15 +2616,17 @@ mod windows_tests {
     fn a_choco_command_cannot_borrow_another_sources_label() {
         let mut as_winget = choco_step(choco::OpKind::Install, "7zip");
         as_winget.source = SourceKind::Winget;
-        assert!(
-            validate(&plan_of(vec![as_winget])).is_err(),
+        assert_eq!(
+            validate(&plan_of(vec![as_winget])),
+            Err(not_allowed(CHOCO)),
             "choco.exe is not winget.exe, whatever the step says"
         );
 
         let mut as_choco = operation_step(OpKind::Install, "Valve.Steam", WINGET);
         as_choco.source = SourceKind::Choco;
-        assert!(
-            validate(&plan_of(vec![as_choco])).is_err(),
+        assert_eq!(
+            validate(&plan_of(vec![as_choco])),
+            Err(not_allowed(WINGET)),
             "winget.exe is not choco.exe, whatever the step says"
         );
     }
@@ -2624,13 +2646,14 @@ mod windows_tests {
         let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
         let planted = dir.path().join("choco.exe");
         std::fs::write(&planted, b"not really Chocolatey").expect("this process can write here");
-        let step =
-            choco::operation_step(choco::OpKind::Install, "7zip", &planted.to_string_lossy());
+        let program = planted.to_string_lossy().into_owned();
+        let step = choco::operation_step(choco::OpKind::Install, "7zip", &program);
         let err = validate(&plan_of(vec![step]))
             .expect_err("a choco.exe this process can overwrite must not run as Administrator");
-        assert!(
-            err.contains("choco.exe"),
-            "the refusal names the program: {err}"
+        assert_eq!(
+            err,
+            can_be_replaced(&program),
+            "refused because it can be replaced, which is the only refusal this test means"
         );
         assert!(err.ends_with('.'), "the reason is a sentence: {err}");
         assert!(!err.contains('\u{2014}'), "no em dashes: {err}");
@@ -2668,7 +2691,11 @@ mod windows_tests {
         };
         let err = validate_with(&plan_of(vec![forged]), &allowed)
             .expect_err("the registry does not record this command");
-        assert!(err.contains("powershell.exe"), "{err}");
+        assert_eq!(
+            err,
+            not_allowed("powershell.exe"),
+            "the sentence this test means"
+        );
         assert!(err.ends_with('.'), "the reason is a sentence: {err}");
     }
 
@@ -2691,20 +2718,22 @@ mod windows_tests {
             removals: vec![registered.command],
             ..Allowed::system()
         };
-        assert!(validate_with(&plan_of(vec![twisted]), &allowed).is_err());
+        let expected = not_allowed(&twisted.command.program);
+        assert_eq!(
+            validate_with(&plan_of(vec![twisted]), &allowed),
+            Err(expected)
+        );
     }
 
     /// An empty list refuses every removal. That is the safe direction to
     /// fail: a caller that has not read the registry runs nothing from it.
     #[test]
     fn no_registered_removals_means_no_removal_runs() {
-        let plan = plan_of(vec![step_from(
-            SourceKind::Arp,
-            r"C:\Program Files\Thing\unins000.exe",
-            &["/SILENT"],
-        )]);
-        assert!(
-            validate(&plan).is_err(),
+        const UNINSTALLER: &str = r"C:\Program Files\Thing\unins000.exe";
+        let plan = plan_of(vec![step_from(SourceKind::Arp, UNINSTALLER, &["/SILENT"])]);
+        assert_eq!(
+            validate(&plan),
+            Err(not_allowed(UNINSTALLER)),
             "validate uses the system list, which records nothing"
         );
     }
@@ -2718,9 +2747,10 @@ mod windows_tests {
             &["-S", "steam"],
         )]);
         let err = validate(&plan).expect_err("pacman does not run on Windows");
-        assert!(
-            err.contains("Pacman"),
-            "the refusal names the source: {err}"
+        assert_eq!(
+            err,
+            not_allowed("Pacman"),
+            "the source is what was refused, before any command was read"
         );
     }
 
@@ -2739,15 +2769,12 @@ mod windows_tests {
     /// One bad step refuses the whole plan, so a plan is never half run.
     #[test]
     fn one_bad_step_refuses_the_whole_plan() {
+        const CMD: &str = r"C:\Windows\System32\cmd.exe";
         let plan = plan_of(vec![
             operation_step(OpKind::Install, "Valve.Steam", WINGET),
-            step_from(
-                SourceKind::Winget,
-                r"C:\Windows\System32\cmd.exe",
-                &["/c", "whoami"],
-            ),
+            step_from(SourceKind::Winget, CMD, &["/c", "whoami"]),
         ]);
-        assert!(validate(&plan).is_err());
+        assert_eq!(validate(&plan), Err(not_allowed(CMD)));
     }
 
     /// The two directions of the gate, measured rather than assumed, on
@@ -2767,11 +2794,13 @@ mod windows_tests {
         let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
         let mine = dir.path().join("anything.exe");
         std::fs::write(&mine, b"mine").expect("this process can write here");
-        let refusal = program_this_process_cannot_replace(&mine.to_string_lossy())
+        let program = mine.to_string_lossy().into_owned();
+        let refusal = program_this_process_cannot_replace(&program)
             .expect_err("a file this process just wrote is one it can replace");
-        assert!(
-            refusal.contains("anything.exe"),
-            "the refusal names the program: {refusal}"
+        assert_eq!(
+            refusal,
+            can_be_replaced(&program),
+            "refused because it can be replaced, not because it could not be checked"
         );
 
         let theirs = Path::new(&std::env::var("SystemRoot").expect("Windows sets SystemRoot"))
@@ -2797,10 +2826,11 @@ mod windows_tests {
         let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
         let below = dir.path().join("bin");
         std::fs::create_dir(&below).expect("this process can create directories here");
-        let program = below.join("thing.exe");
+        let program = below.join("thing.exe").to_string_lossy().into_owned();
         std::fs::write(&program, b"mine").expect("this process can write here");
-        assert!(
-            program_this_process_cannot_replace(&program.to_string_lossy()).is_err(),
+        assert_eq!(
+            program_this_process_cannot_replace(&program),
+            Err(can_be_replaced(&program)),
             "the folders above the file are this account's own"
         );
     }
@@ -2826,11 +2856,13 @@ mod windows_tests {
             .join("bin")
             .join("choco.exe");
         assert!(!program.exists(), "the test invents a name nothing uses");
-        let refusal = program_this_process_cannot_replace(&program.to_string_lossy())
+        let program = program.to_string_lossy().into_owned();
+        let refusal = program_this_process_cannot_replace(&program)
             .expect_err("any user may create a directory in C:\\ProgramData");
-        assert!(
-            refusal.contains("choco.exe"),
-            "the refusal names the program: {refusal}"
+        assert_eq!(
+            refusal,
+            can_be_replaced(&program),
+            "refused because the name is still this account's to take"
         );
     }
 
@@ -2865,6 +2897,11 @@ mod windows_tests {
         for program in ["", "choco.exe"] {
             let refusal = program_this_process_cannot_replace(program)
                 .expect_err("failure is a refusal here");
+            assert_eq!(
+                refusal,
+                cannot_be_checked(program),
+                "refused because the question could not be put, which is this one's meaning"
+            );
             assert!(
                 refusal.ends_with('.'),
                 "the reason is a sentence: {refusal}"
@@ -2894,12 +2931,14 @@ mod windows_tests {
         let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
         let planted = dir.path().join("winget.exe");
         std::fs::write(&planted, b"not really winget").expect("this process can write here");
-        let step = operation_step(OpKind::Install, "Valve.Steam", &planted.to_string_lossy());
+        let program = planted.to_string_lossy().into_owned();
+        let step = operation_step(OpKind::Install, "Valve.Steam", &program);
         let err = validate(&plan_of(vec![step]))
             .expect_err("a winget.exe this process can overwrite is not one to elevate");
-        assert!(
-            err.contains("winget.exe"),
-            "the refusal names the program: {err}"
+        assert_eq!(
+            err,
+            can_be_replaced(&program),
+            "refused because it can be replaced, which is what this test means"
         );
     }
 
@@ -2917,20 +2956,18 @@ mod windows_tests {
         let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
         let uninstaller = dir.path().join("unins000.exe");
         std::fs::write(&uninstaller, b"mine").expect("this process can write here");
-        let step = step_from(
-            SourceKind::Arp,
-            &uninstaller.to_string_lossy(),
-            &["/SILENT"],
-        );
+        let program = uninstaller.to_string_lossy().into_owned();
+        let step = step_from(SourceKind::Arp, &program, &["/SILENT"]);
         let allowed = Allowed {
             removals: vec![step.command.clone()],
             ..Allowed::system()
         };
         let err = validate_with(&plan_of(vec![step]), &allowed)
             .expect_err("the registry recording it does not make it safe to elevate");
-        assert!(
-            err.contains("unins000.exe"),
-            "the refusal names the program: {err}"
+        assert_eq!(
+            err,
+            can_be_replaced(&program),
+            "refused because it can be replaced, not because the list does not name it"
         );
     }
 
@@ -2944,14 +2981,15 @@ mod windows_tests {
             return;
         }
         let dir = tempfile::tempdir().expect("a temporary directory under this user's profile");
-        let mine = dir.path().join("thing.exe");
+        let mine = dir.path().join("thing.exe").to_string_lossy().into_owned();
         std::fs::write(&mine, b"mine").expect("this process can write here");
-        let sentences = [
-            program_this_process_cannot_replace(&mine.to_string_lossy())
-                .expect_err("a file this process wrote"),
-            program_this_process_cannot_replace("").expect_err("a path with nothing in it"),
-        ];
-        for sentence in sentences {
+        let replaceable =
+            program_this_process_cannot_replace(&mine).expect_err("a file this process wrote");
+        assert_eq!(replaceable, can_be_replaced(&mine), "the first sentence");
+        let unreadable =
+            program_this_process_cannot_replace("").expect_err("a path with nothing in it");
+        assert_eq!(unreadable, cannot_be_checked(""), "the second sentence");
+        for sentence in [replaceable, unreadable] {
             assert!(sentence.ends_with('.'), "a sentence: {sentence}");
             assert!(!sentence.contains('\u{2014}'), "no em dashes: {sentence}");
             assert!(
