@@ -91,8 +91,10 @@ jobs:
       # --- Windows build ------------------------------------------------------
       #
       # No Tauri bundler here: Windows is packaged by the two steps below
-      # instead, so this only needs the frontend built and the two binaries
-      # compiled in release, ready for `build-msi.sh` to pick up.
+      # instead, so this only needs the two binaries compiled in release, ready
+      # for `build-msi.sh` to pick up. The frontend is already built: the Test
+      # step above runs `npm run build` on every row of the matrix, and nothing
+      # cleans the workspace between the two.
       - name: Build (Windows)
         if: runner.os == 'Windows'
         shell: bash
@@ -100,8 +102,6 @@ jobs:
           set -eu
           version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          npm ci --no-audit --no-fund
-          npm run build
           cargo build --release -p brokey -p brokey-helper
 
       # --- Windows installer (WiX 5, per-architecture MSI) --------------------
