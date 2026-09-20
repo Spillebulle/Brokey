@@ -90,23 +90,39 @@ fn shim_in(root: &Path) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
-/// The program a step names: the full path to Scoop's own shim when it was
-/// found, `scoop.cmd` otherwise. That extension is not decoration.
-/// `std::process::Command` does run a `.cmd` and does search `PATH`, but it
-/// appends `.exe` to an extensionless name and never consults `PATHEXT`, so
-/// a bare `scoop` could only ever fail to spawn; all three cases were
-/// measured on Windows against a real shim. Resolution happens here, in the
-/// unelevated process, the same as `choco_program` and `winget_program`, and
-/// for the same reason: the elevated helper must never search for a program
-/// itself. Unlike Chocolatey's and winget's steps, nothing this resolves is
-/// ever handed to the helper: see the module doc comment.
-pub fn step_program(exe: Option<&Path>) -> String {
-    exe.map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "scoop.cmd".to_string())
+/// The program a step names: the full path to Scoop's own shim, which
+/// [`scoop_exe`] found. There is no fallback to a bare name, because
+/// [`Scoop::plan`] refuses before it gets here when nothing was found, and
+/// a step naming a program that is not on the machine is the defect that
+/// refusal exists to prevent.
+///
+/// The extension on what is found is not decoration. Scoop's installer
+/// writes `shims\scoop.ps1` and `shims\scoop.cmd` and no `scoop.exe` at
+/// all, and `std::process::Command` does run a `.cmd` and does search
+/// `PATH`, but it appends `.exe` to an extensionless name and never
+/// consults `PATHEXT`, so a bare `scoop` could only ever fail to spawn;
+/// all three cases were measured on Windows against a real shim. That is
+/// what `crate::system::which` reading `PATHEXT` buys, and why the whole
+/// resolved path is carried rather than a name.
+///
+/// Resolution happens in the unelevated process, the same as
+/// `choco_program` and `winget_program`, and for the same reason: the
+/// elevated helper must never search for a program itself. Unlike
+/// Chocolatey's and winget's steps, nothing this resolves is ever handed to
+/// the helper: see the module doc comment.
+pub fn step_program(exe: &Path) -> String {
+    exe.to_string_lossy().into_owned()
 }
 
 pub const NOT_INSTALLED: &str = "Scoop is not installed, so nothing can be installed, updated \
      or removed through it. Its main bucket answers over HTTP, so Brokey still searches it.";
+
+/// The error [`Scoop::plan`] answers with when Scoop is not on the machine.
+/// `NOT_INSTALLED` is the status reason, which says the source is still
+/// searchable; this is the sentence for someone who has pressed Install, so
+/// it says what to do instead.
+pub const CANNOT_PLAN: &str = "Scoop is not installed, so Brokey cannot install, update or \
+     remove anything through it. Install Scoop from https://scoop.sh first, then try again.";
 
 /// A manifest's fields, the shape scoop.rs actually reads. Scoop manifests
 /// carry far more (`architecture`, `checkver`, `autoupdate`, `notes`,
@@ -790,21 +806,36 @@ impl Source for Scoop {
     /// An operation for another source's package plans nothing: the store
     /// asks every source about every operation, and this is the one that
     /// belongs to Scoop.
+    ///
+    /// An operation that is Scoop's, on a machine that has no Scoop, is an
+    /// error rather than a step. Nothing here elevates, so the cost is not
+    /// a password prompt as it is for Chocolatey; what it saves the user is
+    /// a step that runs `scoop.cmd` out of `PATH`, finds nothing and fails
+    /// with whatever the operating system says about a missing program,
+    /// where the plan already knew. The error is raised before a `Step` is
+    /// built, so `transaction::plan::build` fails on it before there is a
+    /// plan at all, which is what makes an empty plan, meaning silently
+    /// nothing happening, impossible here.
     fn plan(&self, op: &Op) -> Result<Vec<Step>> {
-        let program = step_program(self.exe.as_deref());
-        let step = match op {
+        let (kind, id) = match op {
             Op::Install { package } if package.source == SourceKind::Scoop => {
-                operation_step(OpKind::Install, &package.id, &program)
+                (OpKind::Install, &package.id)
             }
             Op::Update { package } if package.source == SourceKind::Scoop => {
-                operation_step(OpKind::Update, &package.id, &program)
+                (OpKind::Update, &package.id)
             }
             Op::Remove { package } if package.source == SourceKind::Scoop => {
-                operation_step(OpKind::Remove, &package.id, &program)
+                (OpKind::Remove, &package.id)
             }
             _ => return Ok(Vec::new()),
         };
-        Ok(vec![step])
+        let Some(exe) = self.exe.as_deref() else {
+            return Err(Error::from_source(
+                SourceKind::Scoop,
+                CANNOT_PLAN.to_string(),
+            ));
+        };
+        Ok(vec![operation_step(kind, id, &step_program(exe))])
     }
 
     /// Deliberately `None`. The spec pins Scoop's installer to a named commit
@@ -1227,9 +1258,17 @@ mod tests {
         assert_eq!(joined(&matches, &[], 1).len(), 1);
     }
 
+    /// The shim a test hands the source when it needs it to think Scoop is
+    /// installed. Nothing here ever runs it and nothing ever reads it:
+    /// `plan` only writes the path into a step, which is why this need not
+    /// exist on the machine running the test.
+    fn a_scoop_shim() -> Option<PathBuf> {
+        Some(PathBuf::from(r"C:\Users\someone\scoop\shims\scoop.cmd"))
+    }
+
     #[test]
     fn plan_only_answers_for_its_own_packages_and_never_needs_root() {
-        let scoop = Scoop::with_root(no_network(), std::env::temp_dir(), None);
+        let scoop = Scoop::with_root(no_network(), std::env::temp_dir(), a_scoop_shim());
         let mine = PackageRef {
             source: SourceKind::Scoop,
             id: "7zip".to_string(),
@@ -1275,6 +1314,61 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// A machine without Scoop plans nothing, and says so, rather than
+    /// building a step that cannot work. The assertion is the error and not
+    /// an empty plan: an empty plan is a button that does nothing at all,
+    /// which is its own defect.
+    ///
+    /// Nothing here elevates, so what this saves is not a password prompt,
+    /// as it is for Chocolatey. It is a step that would run `scoop.cmd` out
+    /// of a `PATH` that has none and fail with whatever the operating
+    /// system says about a missing program, when the source already knew
+    /// the shim was not there and could name it.
+    #[test]
+    fn plan_refuses_when_scoop_is_not_installed() {
+        let scoop = Scoop::with_root(no_network(), std::env::temp_dir(), None);
+        let mine = PackageRef {
+            source: SourceKind::Scoop,
+            id: "7zip".to_string(),
+        };
+        let ops = [
+            Op::Install {
+                package: mine.clone(),
+            },
+            Op::Update {
+                package: mine.clone(),
+            },
+            Op::Remove {
+                package: mine.clone(),
+            },
+        ];
+        for op in ops {
+            let err = scoop
+                .plan(&op)
+                .expect_err("nothing can be planned without the shim");
+            assert_eq!(err.message, CANNOT_PLAN, "{op:?}");
+            assert_eq!(err.source_kind, Some(SourceKind::Scoop), "{op:?}");
+            assert!(
+                err.message.contains("Scoop is not installed"),
+                "the error names the missing tool: {err}"
+            );
+            assert!(
+                err.message.contains("Install Scoop"),
+                "the error says what to do: {err}"
+            );
+        }
+
+        let other = scoop
+            .plan(&Op::Install {
+                package: PackageRef {
+                    source: SourceKind::Winget,
+                    id: "Valve.Steam".to_string(),
+                },
+            })
+            .expect("another source's operation is nothing to do, not an error");
+        assert!(other.is_empty(), "{other:?}");
     }
 
     #[test]
@@ -1384,14 +1478,14 @@ mod tests {
     /// Scoop's installer writes `shims\scoop.ps1` and `shims\scoop.cmd` and
     /// no `scoop.exe` at all, and `std::process::Command` appends `.exe` to
     /// an extensionless name rather than reading `PATHEXT`, so a bare
-    /// `scoop` is a program that can only fail to spawn. That literal is the
-    /// whole of what was measured, so the literal is what this asserts.
+    /// `scoop` is a program that can only fail to spawn. A step therefore
+    /// carries the whole resolved path, extension included, and never a
+    /// name for the runner to look up.
     #[test]
-    fn the_fallback_program_is_scoop_cmd_and_not_a_bare_name() {
-        assert_eq!(step_program(None), "scoop.cmd");
+    fn a_step_carries_the_whole_resolved_shim_and_not_a_bare_name() {
         let shim = PathBuf::from(r"C:\Users\someone\scoop\shims\scoop.cmd");
         assert_eq!(
-            step_program(Some(&shim)),
+            step_program(&shim),
             r"C:\Users\someone\scoop\shims\scoop.cmd"
         );
     }
@@ -1428,25 +1522,19 @@ mod tests {
     }
 
     /// A step names the program this source resolved when it was built, not
-    /// whatever the machine running the test has on its own `PATH`.
+    /// whatever the machine running the test has on its own `PATH`. When
+    /// nothing was resolved there is no step at all, which
+    /// `plan_refuses_when_scoop_is_not_installed` is what asserts.
     #[test]
-    fn a_step_names_the_resolved_shim_or_falls_back_to_scoop_cmd() {
+    fn a_step_names_the_resolved_shim() {
         let package = PackageRef {
             source: SourceKind::Scoop,
             id: "7zip".to_string(),
         };
         let shim = PathBuf::from(r"C:\Users\someone\scoop\shims\scoop.cmd");
         let found = Scoop::with_root(no_network(), std::env::temp_dir(), Some(shim.clone()));
-        let steps = found
-            .plan(&Op::Install {
-                package: package.clone(),
-            })
-            .unwrap();
+        let steps = found.plan(&Op::Install { package }).unwrap();
         assert_eq!(steps[0].command.program, shim.to_string_lossy());
-
-        let missing = Scoop::with_root(no_network(), std::env::temp_dir(), None);
-        let steps = missing.plan(&Op::Install { package }).unwrap();
-        assert_eq!(steps[0].command.program, "scoop.cmd");
     }
 
     /// `SCOOP` set to nothing at all is not a root. Without the guard it

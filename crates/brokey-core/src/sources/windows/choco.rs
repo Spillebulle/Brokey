@@ -45,19 +45,33 @@ pub fn choco_exe() -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
-/// The program a step names: the full path to `choco.exe` when it can be
-/// found, the bare name otherwise. Resolution happens here, in the
-/// unelevated process, the same as `winget::winget_program` and for the
-/// same reason: the elevated helper must never search for a program itself.
-pub fn choco_program() -> String {
-    choco_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "choco.exe".to_string())
+/// The program a step names: the full path to `choco.exe`, which
+/// [`choco_exe`] found. There is no fallback to a bare name, because
+/// [`Choco::plan`] refuses before it gets here when nothing was found, and
+/// the closed list in `transaction::allow` would refuse a bare name anyway,
+/// which is a refusal about the wrong thing.
+///
+/// Resolution happens in the unelevated process, the same as
+/// `winget::winget_program` and `scoop::step_program` and for the same
+/// reason: the elevated helper must never search for a program itself.
+/// What was found is the argument rather than a second probe, so
+/// `Choco::plan` is a function of the field it resolved once and not of the
+/// environment a test happens to run in.
+pub fn choco_program(exe: &std::path::Path) -> String {
+    exe.to_string_lossy().into_owned()
 }
 
 pub const NOT_INSTALLED: &str = "Chocolatey is not installed, so nothing can be installed, \
      updated or removed through it. Its community feed answers over HTTP, so Brokey still \
      searches it.";
+
+/// The error [`Choco::plan`] answers with when Chocolatey is not on the
+/// machine. `NOT_INSTALLED` is the status reason, which says the source is
+/// still searchable; this is the sentence for someone who has pressed
+/// Install, so it says what to do instead.
+pub const CANNOT_PLAN: &str = "Chocolatey is not installed, so Brokey cannot install, update \
+     or remove anything through it. Install Chocolatey from https://chocolatey.org/install \
+     first, then try again.";
 
 /// One `.nuspec`'s `<metadata>`, the fields this source reads. Everything
 /// but `id` and `version` is optional because Chocolatey does not require
@@ -678,6 +692,13 @@ pub struct Choco {
     /// temporary directory in every test, from `Choco::with_lib_dir`, so
     /// that no test reads the user's real installation.
     lib_dir: PathBuf,
+    /// `choco.exe`, resolved once in [`Choco::new`] and never probed again,
+    /// the same field `Scoop` keeps for the same reason. The machine's
+    /// `PATH` and `%ChocolateyInstall%` are read there and nowhere else in
+    /// this source, so `status` and `plan` are a function of this field
+    /// rather than of the environment a test happens to run in, and a test
+    /// can force it either way.
+    exe: Option<PathBuf>,
 }
 
 impl Choco {
@@ -685,12 +706,17 @@ impl Choco {
         Choco {
             client,
             lib_dir: install_root().join("lib"),
+            exe: choco_exe(),
         }
     }
 
     #[cfg(test)]
-    fn with_lib_dir(client: Arc<Client>, lib_dir: PathBuf) -> Choco {
-        Choco { client, lib_dir }
+    fn with_lib_dir(client: Arc<Client>, lib_dir: PathBuf, exe: Option<PathBuf>) -> Choco {
+        Choco {
+            client,
+            lib_dir,
+            exe,
+        }
     }
 }
 
@@ -699,11 +725,12 @@ impl Source for Choco {
         SourceKind::Choco
     }
 
-    /// Available when `choco.exe` is on `PATH` or under `%ChocolateyInstall%`.
-    /// When it is not, the source stays searchable the way winget does,
-    /// because the feed is HTTP and needs no tool.
+    /// Available when `choco.exe` was on `PATH` or under
+    /// `%ChocolateyInstall%` when this source was built. When it was not,
+    /// the source stays searchable the way winget does, because the feed is
+    /// HTTP and needs no tool.
     fn status(&self) -> SourceStatus {
-        match choco_exe() {
+        match &self.exe {
             Some(_) => SourceStatus {
                 kind: SourceKind::Choco,
                 available: true,
@@ -773,21 +800,37 @@ impl Source for Choco {
     /// An operation for another source's package plans nothing: the store
     /// asks every source about every operation, and this is the one that
     /// belongs to Chocolatey.
+    ///
+    /// An operation that is Chocolatey's, on a machine that has no
+    /// Chocolatey, is an error rather than a step. Every step here needs
+    /// Administrator, so without this the button worked, the confirm dialog
+    /// counted a password prompt, Windows asked for Administrator, and only
+    /// then did the step fail; and since the closed list learned to refuse a
+    /// program an unprivileged account can replace, what the user read was
+    /// the sentence about a replaceable program, which is not their problem.
+    /// The error is raised before a `Step` is built, so
+    /// `transaction::plan::build` fails on it before there is a plan for the
+    /// dialog to count prompts in.
     fn plan(&self, op: &Op) -> Result<Vec<Step>> {
-        let program = choco_program();
-        let step = match op {
+        let (kind, id) = match op {
             Op::Install { package } if package.source == SourceKind::Choco => {
-                operation_step(OpKind::Install, &package.id, &program)
+                (OpKind::Install, &package.id)
             }
             Op::Update { package } if package.source == SourceKind::Choco => {
-                operation_step(OpKind::Update, &package.id, &program)
+                (OpKind::Update, &package.id)
             }
             Op::Remove { package } if package.source == SourceKind::Choco => {
-                operation_step(OpKind::Remove, &package.id, &program)
+                (OpKind::Remove, &package.id)
             }
             _ => return Ok(Vec::new()),
         };
-        Ok(vec![step])
+        let Some(exe) = self.exe.as_deref() else {
+            return Err(Error::from_source(
+                SourceKind::Choco,
+                CANNOT_PLAN.to_string(),
+            ));
+        };
+        Ok(vec![operation_step(kind, id, &choco_program(exe))])
     }
 
     /// Deliberately `None`. The spec's table has Chocolatey's bootstrap
@@ -817,6 +860,14 @@ mod tests {
             .join("tests/fixtures/choco")
             .join(name);
         std::fs::read(&path).unwrap_or_else(|e| panic!("reading fixture {}: {e}", path.display()))
+    }
+
+    /// The `choco.exe` a test hands the source when it needs it to think
+    /// Chocolatey is installed. Nothing here ever runs it and nothing ever
+    /// reads it: `plan` only writes the path into a step, which is why this
+    /// need not exist on the machine running the test.
+    fn a_choco_exe() -> Option<PathBuf> {
+        Some(PathBuf::from(r"C:\ProgramData\chocolatey\bin\choco.exe"))
     }
 
     #[test]
@@ -1018,7 +1069,7 @@ mod tests {
 
     #[test]
     fn setup_is_deliberately_none() {
-        let choco = Choco::with_lib_dir(Client::shared(), std::env::temp_dir());
+        let choco = Choco::with_lib_dir(Client::shared(), std::env::temp_dir(), None);
         assert!(choco.setup().is_none());
     }
 
@@ -1033,7 +1084,7 @@ mod tests {
         )
         .unwrap();
 
-        let choco = Choco::with_lib_dir(Client::shared(), lib.path().to_path_buf());
+        let choco = Choco::with_lib_dir(Client::shared(), lib.path().to_path_buf(), None);
         let installed = choco.installed().unwrap();
         assert_eq!(installed.len(), 1);
         assert_eq!(installed[0].id, "vlc-nightly");
@@ -1046,7 +1097,7 @@ mod tests {
     fn a_missing_lib_directory_is_simply_empty() {
         let lib = tempfile::tempdir().expect("a temporary directory");
         let missing = lib.path().join("does-not-exist");
-        let choco = Choco::with_lib_dir(Client::shared(), missing);
+        let choco = Choco::with_lib_dir(Client::shared(), missing, None);
         assert_eq!(choco.installed().unwrap(), Vec::new());
     }
 
@@ -1076,7 +1127,7 @@ mod tests {
             1,
             "the directory with no .nuspec must not be counted"
         );
-        let choco = Choco::with_lib_dir(Client::shared(), lib.path().to_path_buf());
+        let choco = Choco::with_lib_dir(Client::shared(), lib.path().to_path_buf(), None);
         let installed = choco.installed().unwrap();
         assert_eq!(installed.len(), 1);
         assert_eq!(installed[0].id, "vlc-nightly");
@@ -1187,7 +1238,7 @@ mod tests {
 
     #[test]
     fn plan_only_answers_for_its_own_packages_and_always_needs_root() {
-        let choco = Choco::with_lib_dir(Client::shared(), std::env::temp_dir());
+        let choco = Choco::with_lib_dir(Client::shared(), std::env::temp_dir(), a_choco_exe());
         let mine = PackageRef {
             source: SourceKind::Choco,
             id: "7zip".to_string(),
@@ -1234,9 +1285,68 @@ mod tests {
         );
     }
 
+    /// A machine without Chocolatey plans nothing, and says so, rather than
+    /// building a step that cannot work. The assertion is the error and not
+    /// an empty plan: an empty plan is a button that does nothing at all,
+    /// which is its own defect.
+    ///
+    /// What this saves is measured rather than guessed. Every Chocolatey
+    /// step sets `needs_root`, so without this the confirm dialog counted a
+    /// password prompt, Windows asked for Administrator, and the step then
+    /// failed; and since the closed list learned to refuse a program an
+    /// unprivileged account can replace, the sentence the user read was the
+    /// one about a replaceable program, which is a true thing to say about
+    /// `C:\ProgramData\chocolatey\bin\choco.exe` on a machine where anyone
+    /// could have made it and no help at all to somebody whose actual
+    /// problem is that Chocolatey is not installed.
+    #[test]
+    fn plan_refuses_when_chocolatey_is_not_installed() {
+        let choco = Choco::with_lib_dir(Client::shared(), std::env::temp_dir(), None);
+        let mine = PackageRef {
+            source: SourceKind::Choco,
+            id: "7zip".to_string(),
+        };
+        let ops = [
+            Op::Install {
+                package: mine.clone(),
+            },
+            Op::Update {
+                package: mine.clone(),
+            },
+            Op::Remove {
+                package: mine.clone(),
+            },
+        ];
+        for op in ops {
+            let err = choco
+                .plan(&op)
+                .expect_err("nothing can be planned without choco.exe");
+            assert_eq!(err.message, CANNOT_PLAN, "{op:?}");
+            assert_eq!(err.source_kind, Some(SourceKind::Choco), "{op:?}");
+            assert!(
+                err.message.contains("Chocolatey is not installed"),
+                "the error names the missing tool: {err}"
+            );
+            assert!(
+                err.message.contains("Install Chocolatey"),
+                "the error says what to do: {err}"
+            );
+        }
+
+        let other = choco
+            .plan(&Op::Install {
+                package: PackageRef {
+                    source: SourceKind::Winget,
+                    id: "Valve.Steam".to_string(),
+                },
+            })
+            .expect("another source's operation is nothing to do, not an error");
+        assert!(other.is_empty(), "{other:?}");
+    }
+
     #[test]
     fn refresh_and_update_all_plan_nothing() {
-        let choco = Choco::with_lib_dir(Client::shared(), std::env::temp_dir());
+        let choco = Choco::with_lib_dir(Client::shared(), std::env::temp_dir(), None);
         for op in [
             Op::Refresh {
                 source: SourceKind::Choco,
