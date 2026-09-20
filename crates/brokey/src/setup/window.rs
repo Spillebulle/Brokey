@@ -578,8 +578,13 @@ fn fit_to(hwnd: HWND) {
 /// `true` when it ended because the window was closed, which is every run
 /// anybody will ever see. `false` when `GetMessageW` itself failed, where
 /// carrying on would spin and the caller has to say something other than
-/// "nothing was installed".
-fn pump(_hwnd: HWND) -> bool {
+/// "nothing was installed". That path leaves the window standing, because
+/// `DestroyWindow` sends and there is no loop left to carry the messages, so
+/// the pointer in its user data word is cleared on the way out: the `Box` it
+/// points at is dropped as soon as `open` returns, and a window holding a
+/// freed pointer is a thing to leave behind even when nothing will dispatch
+/// to it again.
+fn pump(hwnd: HWND) -> bool {
     // SAFETY: `MSG` is a plain C structure of integers, a window handle and a
     // point, for which all zeroes is a valid value; `GetMessageW` overwrites
     // every field of it before anything below reads one.
@@ -594,6 +599,11 @@ fn pump(_hwnd: HWND) -> bool {
             return true;
         }
         if got < 0 {
+            // SAFETY: a plain write of zero into this window's own user data
+            // word, which is what `with_state` reads and answers `None` to.
+            // Nothing is dispatched after this, and a `with_state` from a
+            // stray send would now find nothing rather than a freed box.
+            unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
             return false;
         }
         // SAFETY: `message` was filled by the call above and is untouched
@@ -615,6 +625,17 @@ fn pump(_hwnd: HWND) -> bool {
 /// `InvalidateRect` and `PostMessageW`. `DestroyWindow`, `ShowWindow` and
 /// `SetWindowPos` all send, and every one of them in this file is called from
 /// outside a `with_state`.
+///
+/// **There is one sanctioned exception and it is [`paint`].** `paint` runs
+/// inside a `with_state`, and its `BeginPaint` sends `WM_ERASEBKGND` straight
+/// back into [`window_proc`], because [`redraw`] invalidates with the erase
+/// flag set. It is safe for one reason only: the `WM_ERASEBKGND` arm is a
+/// bare `=> 1` that never calls `with_state`, so the re-entry takes no second
+/// reference and returns before `BeginPaint` does. The rule above is what
+/// holds; this is the one place where a send is answered by a branch that
+/// touches no state, and it stays that way. Answering `WM_ERASEBKGND` with
+/// anything that reads or writes `State` would be the bug the rule exists to
+/// prevent.
 ///
 /// `None` before `create_window` has published the pointer, which is when
 /// `CreateWindowExW` is still sending the window its first few messages.

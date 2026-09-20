@@ -99,9 +99,9 @@ pub fn read(bytes: &[u8]) -> Option<&[u8]> {
 ///
 /// Cheap on purpose, because it runs on **every** ordinary start: a seek and a
 /// sixteen-byte read, never the whole executable. [`read`] does the real
-/// validation once the window is up and can say so; the worst this can do is
-/// send a corrupt setup file to a window that reports the corruption, which is
-/// better than the silence it replaces.
+/// validation, over the whole image and before the window opens, so the worst
+/// this can do is send a corrupt setup file to a window that opens straight
+/// onto the sentence saying so, which is better than the silence it replaces.
 ///
 /// `false` for anything it cannot read. A file that will not open is not an
 /// installer, and refusing to start Brokey over it would be the wrong way
