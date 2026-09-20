@@ -109,7 +109,7 @@ def fitted_group(font: Path, text: str, box_w: float, box_h: float) -> float:
     return probe * min(box_w / row_w, box_h / row_h)
 
 
-def installer_art(images: dict[int, "Image.Image"], colour: tuple[int, int, int]) -> None:
+def installer_art(images: dict[int, "Image.Image"]) -> None:
     """The WiX banner and dialog bitmaps.
 
     Light where MSI writes its black transparent titles, dark everywhere else.
@@ -172,7 +172,10 @@ def readable(path: Path, size: tuple[int, int], light: tuple[int, int, int, int]
     """
     img = Image.open(path)
     if img.size != size or img.mode != "RGB":
-        sys.exit(f"{path.name} is {img.size} {img.mode}, and WiX takes {size} 24-bit")
+        sys.exit(
+            f"{path.name} is {img.size} {img.mode}, and WiX takes {size} 24-bit. "
+            f"Check BANNER and DIALOG against the sizes WixUI asks for, then run this script again."
+        )
     x0, y0, x1, y1 = light
     px = img.load()
     darkest = min(
@@ -180,7 +183,11 @@ def readable(path: Path, size: tuple[int, int], light: tuple[int, int, int, int]
         for y in range(y0, y1) for x in range(x0, x1)
     )
     if darkest <= 0.6:
-        sys.exit(f"{path.name} is too dark at {darkest:.2f} where MSI writes its titles in black")
+        sys.exit(
+            f"{path.name} is too dark at {darkest:.2f} where MSI writes its titles in black, "
+            f"so the installer's headings would not be readable. Move the light part of the "
+            f"picture to cover that box, or widen it: see BANNER_SPLIT and DIALOG_SIDEBAR."
+        )
 
 
 def main() -> int:
@@ -204,7 +211,7 @@ def main() -> int:
     images[512].save(tauri / "icon.png")
     print(f"wrote {len(sizes)} icon sizes, the .ico and Tauri's four")
 
-    installer_art(images, colour)
+    installer_art(images)
 
     out = ROOT / "docs/images"
     out.mkdir(parents=True, exist_ok=True)
