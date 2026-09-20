@@ -1,4 +1,4 @@
-import { Cpu, HardDrive, RefreshCw, Search, Settings } from "lucide-react";
+import { Cpu, HardDrive, Package, RefreshCw, Search, Settings } from "lucide-react";
 import type { ReactNode } from "react";
 import pkg from "../../../package.json";
 import { isLive, selectActivePlan, useActivity } from "../activity/store";
@@ -46,7 +46,9 @@ function MenuBar() {
   const status = useShell((s) => s.status);
   return (
     <header className="bk-menubar">
-      <span className="bk-mark" aria-hidden="true" />
+      <span className="bk-mark" aria-hidden="true">
+        <Package />
+      </span>
       <span className="bk-appname">Brokey</span>
       <span className="bk-menubar-status" role="status" aria-live="polite">
         {status ?? ""}
