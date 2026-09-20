@@ -22,7 +22,7 @@ use crate::model::{Command, Plan, Step};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::os::windows::io::{AsRawHandle, OwnedHandle};
 #[cfg(unix)]
 use std::path::Component;
 use std::path::{Path, PathBuf};
@@ -31,8 +31,8 @@ use std::ptr;
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_NO_SUCH_LOGON_SESSION, ERROR_PATH_NOT_FOUND,
-    ERROR_SHARING_VIOLATION, ERROR_SUCCESS, GetLastError, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
+    ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE, ERROR_NO_SUCH_LOGON_SESSION,
+    ERROR_PATH_NOT_FOUND, ERROR_SHARING_VIOLATION, ERROR_SUCCESS, GetLastError, HANDLE, HLOCAL,
     LocalFree,
 };
 #[cfg(windows)]
@@ -54,6 +54,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+#[cfg(windows)]
+use crate::system::windows::owned_handle;
 #[cfg(windows)]
 use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
 
@@ -631,13 +634,31 @@ const REPLACE_A_DIRECTORY: [u32; 4] = [DELETE, FILE_DELETE_CHILD, WRITE_DAC, WRI
 /// does not exist on a machine without Chocolatey, `C:\ProgramData` lets
 /// any user create a directory, so an unprivileged process makes the folder
 /// and puts its own `choco.exe` at the end of it.
+///
+/// The aliasing in these three arrays is known rather than overlooked.
+/// `FILE_ADD_FILE` and `FILE_WRITE_DATA` are the same bit, 0x0002, and
+/// `FILE_ADD_SUBDIRECTORY` and `FILE_APPEND_DATA` are the same bit, 0x0004:
+/// Windows reads the pair by whether the object is a directory or a file,
+/// and there is no way to ask for one meaning and not the other. So
+/// `CREATE_A_NAME` put to something that turns out to be a file measures
+/// write and append on that file instead. What follows from it is that
+/// `C:\Windows\System32\cmd.exe\winget.exe` is admitted by the walk,
+/// because the missing leaf's directory above is `cmd.exe` and this account
+/// can write neither. Nothing follows from that in turn, because such a
+/// path cannot be executed, and it is written down here so that the next
+/// reader does not have to rediscover it.
 #[cfg(windows)]
 const CREATE_A_NAME: [u32; 2] = [FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY];
 
 /// How `AccessCheck` is to read a right that a stored descriptor still
 /// spells generically. These are the file system's own four mappings.
+///
+/// A `static` and not a `const`: a `const` is a value, so every
+/// `&FILE_MAPPING` would materialise a fresh temporary at a fresh address.
+/// Both parameters it is passed to are read-only today, so that is harmless
+/// today, and it stops being harmless the moment either is spelt `*mut`.
 #[cfg(windows)]
-const FILE_MAPPING: GENERIC_MAPPING = GENERIC_MAPPING {
+static FILE_MAPPING: GENERIC_MAPPING = GENERIC_MAPPING {
     GenericRead: FILE_GENERIC_READ,
     GenericWrite: FILE_GENERIC_WRITE,
     GenericExecute: FILE_GENERIC_EXECUTE,
@@ -866,11 +887,14 @@ fn any_right_opened_on(path: &Path, token: &OwnedHandle, rights: &[u32]) -> Resu
                 ptr::null_mut(),
             )
         };
-        if handle != INVALID_HANDLE_VALUE {
-            // SAFETY: `handle` is the one the successful call above
-            // returned and nothing else has taken ownership of it, so this
-            // closes it exactly once, here and now.
-            drop(unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) });
+        // `owned_handle` rather than a bare check against
+        // `INVALID_HANDLE_VALUE`, because null is the other value an
+        // `OwnedHandle` may not hold. It closes the handle exactly once,
+        // here and now. A null would fall to the error road below and be a
+        // refusal, which is the safe direction for a value `CreateFileW`
+        // does not return.
+        if let Some(opened) = owned_handle(handle) {
+            drop(opened);
             return Ok(true);
         }
         // SAFETY: `GetLastError` takes no arguments and reads this thread's
@@ -923,7 +947,26 @@ impl Drop for Impersonating {
         // SAFETY: `RevertToSelf` takes no arguments and acts on the calling
         // thread, which `begin` put into impersonation and which nothing
         // between then and now has reverted.
-        unsafe { RevertToSelf() };
+        let reverted = unsafe { RevertToSelf() };
+        if reverted == 0 {
+            // SAFETY: `GetLastError` takes no arguments and reads this
+            // thread's own last error code, which the failed call above has
+            // just set.
+            let error = unsafe { GetLastError() };
+            // The decision, made here rather than left to whatever happens
+            // next. This thread is still answering as somebody else, and
+            // every question this gate asks is a question about which
+            // account; the call that undoes it is the one that has just
+            // failed, so there is nothing to retry. Carrying on would mean
+            // a process quietly measuring the wrong account for the rest of
+            // its life, which is worse than stopping. It is an abort and
+            // not a panic because a panic would unwind, running arbitrary
+            // `Drop` code on a thread that is still impersonating, and a
+            // panic in a `Drop` during an unwind aborts anyway.
+            log::error!("the thread could not stop impersonating this account: {error}");
+            eprintln!("Brokey stopped: the thread could not stop impersonating this account.");
+            std::process::abort();
+        }
     }
 }
 
@@ -959,9 +1002,10 @@ fn impersonation_of(token: &OwnedHandle) -> Result<OwnedHandle, u32> {
         // own last error code.
         return Err(unsafe { GetLastError() });
     }
-    // SAFETY: `raw` was set by the successful call above to a fresh handle
-    // nothing else owns, so `OwnedHandle` may take it and close it once.
-    Ok(unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) })
+    // A success that handed back no handle is not one this can carry on
+    // from, and it is a refusal rather than a value `OwnedHandle` may not
+    // hold. `DuplicateTokenEx` does not do it; the check is what says so.
+    owned_handle(raw).ok_or(ERROR_INVALID_HANDLE)
 }
 
 /// What the gate can put its questions to: a token that stands for this
@@ -1051,9 +1095,9 @@ fn an_unelevated_impersonation_token() -> Result<Unprivileged, u32> {
         // own last error code.
         return Err(unsafe { GetLastError() });
     }
-    // SAFETY: `raw` was set by the successful call above to a fresh handle
-    // nothing else owns, so `OwnedHandle` may take it and close it once.
-    let process_token = unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) };
+    // A success that handed back no handle is a refusal here too. See
+    // [`owned_handle`] for why it is not merely wrapped.
+    let process_token = owned_handle(raw).ok_or(ERROR_INVALID_HANDLE)?;
 
     let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
     let mut written: u32 = 0;
@@ -1105,9 +1149,12 @@ fn an_unelevated_impersonation_token() -> Result<Unprivileged, u32> {
         }
         return Err(error);
     }
-    // SAFETY: the call above succeeded, so `link.LinkedToken` is a handle
-    // this process owns alone and nothing else will close.
-    let linked = unsafe { OwnedHandle::from_raw_handle(link.LinkedToken as RawHandle) };
+    // The call above succeeded, so `link.LinkedToken` is a handle this
+    // process owns alone and nothing else will close. It is still put
+    // through [`owned_handle`], because the failure road above leaves that
+    // field null and a future edit that reordered these lines would wrap
+    // it.
+    let linked = owned_handle(link.LinkedToken).ok_or(ERROR_INVALID_HANDLE)?;
     // A linked token is already an impersonation token, so when it cannot
     // be duplicated it is used as it stands rather than the step refused.
     // The duplicate is what carries `TOKEN_IMPERSONATE`, and `AccessCheck`

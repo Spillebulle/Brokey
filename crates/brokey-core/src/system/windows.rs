@@ -151,6 +151,27 @@ pub fn which_in(name: &str, path: &str, pathext: &str) -> Option<PathBuf> {
     None
 }
 
+/// `raw` as an [`OwnedHandle`], or `None` where Windows handed one of the
+/// two values that are not a handle back.
+///
+/// `OwnedHandle` carries `rustc_layout_scalar_valid_range` attributes that
+/// exclude both null and `INVALID_HANDLE_VALUE`, so wrapping either is
+/// undefined behaviour rather than a value that would be caught later. None
+/// of the calls in this crate returns null on success, so the null half is
+/// unreachable today; it is checked because an invariant nothing states is
+/// one the next call site will not know it has to keep.
+#[cfg(windows)]
+pub(crate) fn owned_handle(raw: HANDLE) -> Option<OwnedHandle> {
+    if raw.is_null() || raw == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    // SAFETY: `raw` is a fresh handle from a call that reported success and
+    // that nothing else has taken ownership of, and it is neither of the
+    // two values `OwnedHandle` excludes, so this takes it and closes it
+    // exactly once.
+    Some(unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) })
+}
+
 /// The executable an App Execution Alias names, or `path` unchanged.
 ///
 /// `winget.exe` in `%LOCALAPPDATA%\Microsoft\WindowsApps` is not a program.
@@ -281,13 +302,11 @@ fn reparse_data(path: &Path) -> Option<Vec<u8>> {
             ptr::null_mut(),
         )
     };
-    if handle == INVALID_HANDLE_VALUE {
-        return None;
-    }
-    // SAFETY: `handle` is a valid handle from the successful call above and
-    // nothing else has taken ownership of it, so this closes it exactly
-    // once, on every path out of this function including the failure below.
-    let handle = unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) };
+    // `owned_handle` rather than a bare check against
+    // `INVALID_HANDLE_VALUE`, because null is the other value an
+    // `OwnedHandle` may not hold. It closes the handle exactly once on
+    // every path out of this function, including the failure below.
+    let handle = owned_handle(handle)?;
 
     let mut buffer = vec![0u8; MAXIMUM_REPARSE_DATA_BUFFER_SIZE as usize];
     let mut written: u32 = 0;
