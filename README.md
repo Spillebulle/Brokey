@@ -53,8 +53,9 @@ across a fleet with the tools that expect one.
 On Windows you also need the Microsoft Edge WebView2 runtime, because Brokey's
 window is a WebView. Windows 11 has it already. Windows 10 may not, and this
 installer neither installs it nor checks for it, so on a Windows 10 machine
-without it Brokey installs and then opens a window that never paints. Install
-the WebView2 Evergreen runtime from Microsoft first if you are not sure.
+without it Brokey installs and then will not start: creating the window fails
+before it is ever shown, so nothing appears. Install the WebView2 Evergreen
+runtime from Microsoft first if you are not sure.
 
 Brokey checks for its own new versions when it starts and shows a notice with
 the release notes. You can turn that off in **Settings**.

@@ -529,7 +529,7 @@ fn fit_to(hwnd: HWND) {
     // SAFETY: the window's own device context, released again below; the font
     // is created, selected, put back and deleted here; `needed` and
     // `measured` are both alive for the call, the count excludes the
-    // terminator `wide` appended, and `DT_CALCRECT` writes the height into
+    // terminator `wide_null` appended, and `DT_CALCRECT` writes the height into
     // `needed` rather than drawing anything.
     unsafe {
         let dc = GetDC(hwnd);
@@ -1104,7 +1104,7 @@ fn text(hdc: HDC, what: &str, box_: &mut RECT, with: HFONT, colour: COLORREF, fo
     let mut wide_text = wide_null(what);
     let count = wide_text.len() as i32 - 1;
     // SAFETY: `wide_text` and `box_` are both alive for the whole call, the
-    // count excludes the terminator `wide` appended, and the font is put back
+    // count excludes the terminator `wide_null` appended, and the font is put back
     // before this returns so the context is left as it was found.
     unsafe {
         let old = SelectObject(hdc, with);

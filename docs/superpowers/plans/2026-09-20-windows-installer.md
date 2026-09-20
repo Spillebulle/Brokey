@@ -52,7 +52,7 @@ Checked against the real tree on 2026-09-20 so implementers do not re-derive it.
 
 ## Known gap, recorded rather than hidden
 
-The MSI does not install or check for the WebView2 runtime. Brokey's window needs it. Windows 11 ships it, and the development machine is Windows 11 Pro 26H1, so this is invisible here and would not be on an older Windows 10 machine, where Brokey would install and then open a window that cannot paint. Detecting it means reading `HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`, and delivering it means carrying the Evergreen bootstrapper. Both belong with whichever plan first targets Windows 10.
+The MSI does not install or check for the WebView2 runtime. Brokey's window needs it. Windows 11 ships it, and the development machine is Windows 11 Pro 26H1, so this is invisible here and would not be on an older Windows 10 machine, where Brokey would install and then fail to start, because `lib.rs`'s `run` returns an error before the event loop begins and the `expect` beside it panics, so no window is ever shown. Detecting it means reading `HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`, and delivering it means carrying the Evergreen bootstrapper. Both belong with whichever plan first targets Windows 10.
 
 ## File Structure
 

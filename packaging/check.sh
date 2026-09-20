@@ -94,7 +94,7 @@ ok "the shortcut's AppUserModel.ID is $identifier"
 guids=$(sed -n -e 's/.*UpgradeCode="\([^"]*\)".*/\1/p' -e 's/.*Guid="\([^"]*\)".*/\1/p' "$wxs")
 written=$(printf '%s\n' "$guids" | wc -l | tr -d ' ')
 [ "$written" -eq 5 ] || \
-    fail "$wxs writes $written GUIDs and the package has five, the UpgradeCode and one for each of its four components; give the component that lost its Guid attribute a fresh one"
+    fail "$wxs writes $written GUIDs and this check expects five, the UpgradeCode and one for each of its four components. If a component lost its Guid attribute, give it a fresh one from python -c \"import uuid; print(uuid.uuid4())\". If you added or removed a component on purpose, change the five here to match"
 dupe=$(printf '%s\n' "$guids" | sort | uniq -d | head -1)
 [ -z "$dupe" ] || \
     fail "$wxs uses the GUID $dupe more than once; every GUID in it is Brokey's alone, so generate a fresh one for the second"
@@ -102,8 +102,15 @@ ok "the five GUIDs are five and are all different"
 
 # WiX's stock dialog set takes exactly two bitmap sizes and no others, and a
 # wrong one is a stretched picture with no error anywhere. The sizes are read
-# out of the BMP headers themselves, two little-endian 32-bit integers at
-# bytes 18 and 22, which od does without any image library.
+# out of the BMP headers themselves, two 32-bit integers at bytes 18 and 22,
+# which od does without any image library.
+#
+# BMP stores them little-endian and `od -tu4` reads them in the host's order,
+# so this is right on the little-endian machines Brokey is built on, which is
+# every x86-64 and every aarch64 runner in the release workflow, and would read
+# the bytes backwards on a big-endian host. Stated rather than worked around:
+# the failure is a size check reporting nonsense on a machine Brokey does not
+# target, not a wrong bitmap going unnoticed on one it does.
 bmp_int() { od -An -tu4 -j "$2" -N 4 -v "$1" | tr -d ' \n'; }
 
 check_bmp() {
