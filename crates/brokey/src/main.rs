@@ -1,6 +1,26 @@
 //! `brokey` opens the window. `brokey <subcommand>` is the text mode:
 //! the same core with a table printer, which is how the sources are exercised
 //! on a machine without a display.
+//!
+//! **One binary, and on Windows no console behind it.** A console-subsystem
+//! binary is given a console window at every launch, so the Start menu
+//! shortcut opened a black window behind Brokey and the setup executable
+//! opened one behind its own. A release build is therefore a
+//! windows-subsystem binary, which is given no console at all, and the text
+//! mode takes the console of the terminal that started it instead.
+//! `console.rs` is where that is done and why.
+
+// Windows decides whether to give a process a console from this, and it is
+// read out of the binary at launch: a windows-subsystem binary never flashes
+// one, which is the whole point. Debug builds stay console binaries so that
+// `npm run app:dev` still shows the window's log lines in the terminal that
+// started it. `console::attach_to_the_terminal_that_started_this` is what
+// keeps the text mode printing in the release build, and it is a no-op in a
+// build that already has a console, so both builds take the same path.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+#[cfg(windows)]
+mod console;
 
 /// The flags that `cli::run` answers rather than the window. Without these,
 /// anything beginning with a dash opens the window, so `brokey --help`
@@ -49,6 +69,13 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(windows)]
     {
+        // Before anything prints. A text-mode run is the only one with
+        // something to say to a terminal: the window and the setup window say
+        // it on the screen, and a setup run reaches neither of the two
+        // branches below.
+        if is_text_mode(&args) {
+            console::attach_to_the_terminal_that_started_this();
+        }
         let carries_a_package = std::env::current_exe()
             .map(|path| brokey_lib::setup::payload::carried_by(&path))
             .unwrap_or(false);

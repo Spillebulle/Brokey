@@ -85,11 +85,11 @@ pub fn install() -> i32 {
         Ok(image) => window::show(&title, Box::new(move || install_from(&image, &version))),
     };
 
-    // Said twice on purpose. `brokey.exe` is a console application, which is
-    // what makes `brokey search` work, so a run from a terminal has a console
-    // that should be told what happened as well as a window. A double-click
-    // from Explorer has a console nobody reads, and the window is the answer
-    // there.
+    // Said twice on purpose. `brokey --install` is a text-mode run, so it has
+    // taken the console of the terminal that started it, and that terminal
+    // should be told what happened as well as the window. A double-click from
+    // Explorer takes no console and these two lines reach nobody, which is
+    // what the window is there for. `main.rs` and `console.rs` say how.
     if outcome.code == 0 {
         println!("{}", outcome.sentence);
     } else {
