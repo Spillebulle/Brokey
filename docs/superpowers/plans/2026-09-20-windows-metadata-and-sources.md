@@ -346,6 +346,27 @@ into the cache, which the scope already admits through `$CACHE/**`.
   at about line 232, and `to_package` at about line 288)
 - Modify: `crates/brokey-core/src/sources/windows/mod.rs` (add `pub mod icon;`)
 
+**The path from a cached file to a drawn picture, checked end to end.** Every
+link below was read in the dependency sources rather than assumed, because
+the assumption is what cost this branch a release:
+
+1. `Picture::File(p)` reaches the page as `{kind: "file", value: p}`, and
+   `frontend/src/api.ts` puts it through Tauri's `convertFileSrc`.
+2. The asset protocol's scope in `crates/brokey/tauri.conf.json` lists
+   `$CACHE/**`. Tauri resolves `$CACHE` with `dirs::cache_dir()`
+   (`tauri-2.11.5/src/path/desktop.rs:53`), which on Windows is
+   `{FOLDERID_LocalAppData}`, so `C:\Users\<user>\AppData\Local`.
+3. Brokey's own cache is `directories::ProjectDirs`' cache directory,
+   `%LOCALAPPDATA%\spillebulle\brokey\cache`, which is under that.
+4. The protocol types the reply by sniffing and by extension, and `.ico` is
+   `image/vnd.microsoft.icon` (`tauri-utils/src/mime_type.rs:34`), which
+   WebView2 renders in an `<img>`.
+5. The CSP already allows `img-src ... asset: http://asset.localhost ...`.
+
+**None of that is evidence the picture draws.** It is five reasons to expect
+it to, and step 7 is where you find out. If the window shows nothing, this
+list is where to look, one link at a time.
+
 **Interfaces:**
 - Consumes: `pe::{icon, Wanted}` from Task 1.
 - Produces:
