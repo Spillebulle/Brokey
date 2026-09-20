@@ -620,18 +620,45 @@ this source reads. `7zip`'s `d:Description` carries Markdown headings, and its
 `<title>` and `<d:Title>` differ, which is the case the reader gets wrong if
 it takes the id from the wrong element.
 
-Then write `tests/fixtures/choco/googlechrome.nuspec` and
-`tests/fixtures/choco/7zip.nuspec` by hand, each a short but real-shaped
-`.nuspec`. Give one of them a `<title>` and an `<iconUrl>` and the other
-neither, so the fallbacks below have something to fall back from.
+**Chocolatey turns out to be installed on the reference machine,** so the two
+`.nuspec` fixtures are real files copied out of `C:\ProgramData\chocolatey\lib`
+rather than invented. They are staged beside the search fixture:
+
+```bash
+cp "$W/choco-vlc-nightly.nuspec" crates/brokey-core/tests/fixtures/choco/
+cp "$W/choco-core-extension.nuspec" crates/brokey-core/tests/fixtures/choco/
+```
+
+They differ in the ways that matter:
+
+- `choco-vlc-nightly.nuspec` **begins with a UTF-8 byte order mark**, `ef bb
+  bf`, which is the trap here: a parser handed those three bytes as the start
+  of a document either copes or fails on every real Chocolatey package that
+  carries one. It also has `<title>`, `<iconUrl>` and `<summary>`, and a
+  `<description>` of Markdown with blank lines in it.
+- `choco-core-extension.nuspec` has **no** byte order mark and **no**
+  `<iconUrl>`.
+
+Both carry the namespace `xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd"`
+on `<package>`, so a reader matching element names must account for it.
+
+Every package on that machine has a `<title>`, so the no-title fallback has no
+real example. Write one short `.nuspec` by hand for that case alone, at
+`tests/fixtures/choco/no-title.nuspec`, and say in a comment that it is
+invented because the case does not occur in the sample.
 
 - [ ] **Step 2: Write the failing tests**
 
 All pure, so they run on Linux:
 - `a_nuspec_becomes_a_package` — id, version, title, description, developer,
-  homepage, and `installed == true`.
+  homepage, and `installed == true`, against `choco-vlc-nightly.nuspec`.
+- `a_byte_order_mark_does_not_stop_the_reader` — the same file, asserting the
+  id is `vlc-nightly` and not something with three stray bytes on the front.
+  This is the test most likely to fail first, so write it early.
 - `a_nuspec_without_a_title_falls_back_to_its_id`.
-- `an_icon_url_becomes_a_url_picture` — `Picture::Url`, never `Picture::File`.
+- `an_icon_url_becomes_a_url_picture` — `Picture::Url`, never `Picture::File`,
+  from `choco-vlc-nightly.nuspec`; and `choco-core-extension.nuspec` has none,
+  so it gives `None` rather than an empty string.
 - `a_search_reply_becomes_packages` — against `search.xml`, asserting both
   entries.
 - `the_id_comes_from_the_atom_title_and_the_name_from_d_title` — `7zip`
