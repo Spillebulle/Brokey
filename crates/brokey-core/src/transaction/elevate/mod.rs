@@ -6,7 +6,10 @@
 //! Linux gets them from `pkexec`'s standard streams. Windows cannot:
 //! `ShellExecuteEx` is the only call that elevates and it cannot redirect
 //! standard streams, while `CreateProcess` can redirect them and cannot
-//! elevate. So on Windows the two sides meet on a named pipe instead.
+//! elevate. So on Windows the two sides meet on named pipes instead: one
+//! per direction, as `pkexec`'s stdin and stdout are one per direction,
+//! because a Windows handle serialises every operation on its file object
+//! and one duplex pipe would let a pending read hold up the plan's write.
 //!
 //! This module is the only place in the workspace that obtains privilege.
 
@@ -27,6 +30,12 @@ use unix::Inner;
 mod windows;
 #[cfg(windows)]
 use windows::Inner;
+/// The two pipe names, derived from the one base name the helper is given
+/// on its command line. Re-exported because `brokey-helper` derives the
+/// same two names from the same base, and one definition is the only way
+/// the two sides cannot disagree about which pipe is which.
+#[cfg(windows)]
+pub use windows::{events_pipe_name, plan_pipe_name};
 
 /// Neither Unix nor Windows: there is nothing to wait on, only the sentence
 /// `start` already returned as an `Err`. This keeps `Elevated` one type on

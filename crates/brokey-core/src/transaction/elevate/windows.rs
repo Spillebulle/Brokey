@@ -2,16 +2,27 @@
 //!
 //! `ShellExecuteEx` is the only call that elevates and it cannot redirect
 //! standard streams; `CreateProcess` can redirect them and cannot elevate.
-//! So the unelevated side listens on a named pipe first, hands the name to
-//! the elevated helper on its command line, and the helper connects back.
-//! The pipe's DACL admits this user and the Administrators group and
+//! So the unelevated side listens on named pipes first, hands their base
+//! name to the elevated helper on its command line, and the helper connects
+//! back. Each pipe's DACL admits this user and the Administrators group and
 //! nobody else, so nothing else on the machine can answer in the helper's
 //! place or listen to what passes.
+//!
+//! There are two pipes, one per direction, which is what Linux already has
+//! in `pkexec`'s stdin and stdout. One duplex pipe will not do: a handle
+//! created without `FILE_FLAG_OVERLAPPED` is synchronous, the I/O manager
+//! serialises every operation on such a file object, and `try_clone`
+//! duplicates the handle but not the file object. The runner starts reading
+//! events the moment `start` returns and writes the plan on a thread of its
+//! own, so with one pipe the write queues behind a read that cannot finish
+//! until the plan it is waiting on has been written, and both sides wait for
+//! ever. Two one-directional pipes make that impossible: nothing is ever
+//! read and written at the same time on one file object.
 
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle, RawHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::Path;
 use std::ptr;
 
@@ -25,7 +36,9 @@ use windows_sys::Win32::Security::{
     GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
     TokenUser,
 };
-use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAGS_AND_ATTRIBUTES, PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND,
+};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
@@ -39,8 +52,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
 use super::Elevated;
 
-/// A pipe name no other run will choose. The process id alone is not
-/// enough: one session can run two plans.
+/// The base name no other run will choose, which the two pipe names are
+/// derived from. The process id alone is not enough: one session can run
+/// two plans.
+///
+/// This is what goes on the helper's command line as `--pipe <base>`: the
+/// helper derives the same two names from it with the functions below, so
+/// there is one name to pass and no way for the two sides to disagree about
+/// which pipe is which.
 pub fn pipe_name() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -50,6 +69,18 @@ pub fn pipe_name() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!(r"\\.\pipe\brokey-{}-{n}-{nanos}", std::process::id())
+}
+
+/// The pipe the plan travels down, from the runner to the helper. Derived
+/// from [`pipe_name`]'s base by both sides.
+pub fn plan_pipe_name(base: &str) -> String {
+    format!("{base}-plan")
+}
+
+/// The pipe the events travel back up, from the helper to the runner.
+/// Derived from [`pipe_name`]'s base by both sides.
+pub fn events_pipe_name(base: &str) -> String {
+    format!("{base}-events")
 }
 
 /// `D:` then one allow-all entry for this user and one for the local
@@ -170,18 +201,61 @@ fn current_user_sid() -> io::Result<String> {
     Ok(result)
 }
 
-/// One named pipe, listening for the one client this run expects.
+/// The two named pipes, listening for the one client this run expects.
 pub struct PipeServer {
-    /// `None` once `accept` has handed the connected handle to a `File`.
-    handle: Option<OwnedHandle>,
+    /// The plan pipe, which this side writes and the helper reads. `None`
+    /// once `accept` has handed the connected handle to a `File`.
+    plan: Option<OwnedHandle>,
+    /// The events pipe, which the helper writes and this side reads. `None`
+    /// once `accept` has handed the connected handle to a `File`.
+    events: Option<OwnedHandle>,
 }
 
-/// Builds the pipe's DACL, creates the pipe, and returns a server ready to
-/// accept the one client this run expects.
-pub fn listen(name: &str) -> io::Result<PipeServer> {
+/// One pipe, one direction, with the DACL `listen` built for both.
+///
+/// `access` is `PIPE_ACCESS_OUTBOUND` or `PIPE_ACCESS_INBOUND` rather than
+/// `PIPE_ACCESS_DUPLEX`: a pipe that only goes one way cannot have a read
+/// and a write pending on the same file object at once, which is the whole
+/// reason there are two of them.
+fn create_pipe(
+    name: &str,
+    access: FILE_FLAGS_AND_ATTRIBUTES,
+    attributes: &SECURITY_ATTRIBUTES,
+) -> io::Result<OwnedHandle> {
+    let name_wide = wide_null(name);
+    // SAFETY: `name_wide` is a valid null-terminated wide string and
+    // `attributes` is a valid `SECURITY_ATTRIBUTES` whose descriptor
+    // `CreateNamedPipeW` copies into the pipe object before returning.
+    let handle = unsafe {
+        CreateNamedPipeW(
+            name_wide.as_ptr(),
+            access,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            1,
+            4096,
+            4096,
+            0,
+            attributes,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `handle` is a valid, freshly created handle from the
+    // successful call above, and nothing else has taken ownership of it.
+    Ok(unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) })
+}
+
+/// Builds the DACL, creates both pipes with it, and returns a server ready
+/// to accept the one client this run expects.
+///
+/// Both pipes are created here, before the helper is started, because the
+/// helper opens both the instant it launches and a pipe that does not yet
+/// exist gets it nothing. They are created from the one descriptor built
+/// below, so neither can end up with a weaker DACL than the other.
+pub fn listen(base: &str) -> io::Result<PipeServer> {
     let sddl = sddl_for_current_user()?;
     let sddl_wide = wide_null(&sddl);
-    let name_wide = wide_null(name);
 
     let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
     // SAFETY: `sddl_wide` is a valid null-terminated wide string and
@@ -205,83 +279,97 @@ pub fn listen(name: &str) -> io::Result<PipeServer> {
         bInheritHandle: 0,
     };
 
-    // SAFETY: `name_wide` is a valid null-terminated wide string and
-    // `attributes` is a valid `SECURITY_ATTRIBUTES` whose descriptor
-    // `CreateNamedPipeW` copies into the pipe object before returning.
-    let handle = unsafe {
-        CreateNamedPipeW(
-            name_wide.as_ptr(),
-            PIPE_ACCESS_DUPLEX,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            1,
-            4096,
-            4096,
-            0,
-            &attributes,
-        )
-    };
+    // The plan goes out, so the server end writes it; the events come in,
+    // so the server end reads them.
+    let plan = create_pipe(&plan_pipe_name(base), PIPE_ACCESS_OUTBOUND, &attributes);
+    let events = create_pipe(&events_pipe_name(base), PIPE_ACCESS_INBOUND, &attributes);
 
-    // The pipe now holds its own copy of the descriptor (or the call
-    // failed and nothing needs it), so this run's copy is freed either way.
+    // Each pipe now holds its own copy of the descriptor (or a call failed
+    // and nothing needs it), so this run's copy is freed either way, and
+    // before either error below is returned.
     // SAFETY: `descriptor` was allocated by
     // `ConvertStringSecurityDescriptorToSecurityDescriptorW` above and this
     // frees it exactly once.
     unsafe { LocalFree(descriptor as HLOCAL) };
 
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
-
-    // SAFETY: `handle` is a valid, freshly created handle from the
-    // successful call above, and nothing else has taken ownership of it.
-    let handle = unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) };
-
     Ok(PipeServer {
-        handle: Some(handle),
+        plan: Some(plan?),
+        events: Some(events?),
     })
 }
 
+/// Waits for the one client this pipe expects.
+///
+/// Treats `ERROR_PIPE_CONNECTED` as success, not failure: a client that
+/// opened the pipe before this call is made gets that error instead of a
+/// zero return, and it means exactly the same thing. Both pipes exist
+/// before the helper is started, so this is the ordinary case for whichever
+/// of them the helper opened first.
+fn connect(handle: &OwnedHandle) -> io::Result<()> {
+    // SAFETY: `handle` is the pipe's handle, valid for the duration of this
+    // call because the caller still owns it; a null overlapped pointer
+    // requests the blocking form of `ConnectNamedPipe`.
+    let connected = unsafe { ConnectNamedPipe(handle.as_raw_handle() as HANDLE, ptr::null_mut()) };
+    if connected == 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(ERROR_PIPE_CONNECTED as i32) {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
 impl PipeServer {
-    /// Waits for the helper to connect, then hands back an ordinary stream.
+    /// Waits for the helper to connect to both pipes, then hands back the
+    /// two ends this side uses: the plan's writer and the events' reader.
     ///
-    /// Treats `ERROR_PIPE_CONNECTED` as success, not failure: a client that
-    /// opened the pipe before this call is made gets that error instead of
-    /// a zero return, and it means exactly the same thing.
-    pub fn accept(&mut self) -> io::Result<std::fs::File> {
-        let Some(handle) = self.handle.as_ref() else {
+    /// The order is the plan pipe first and the events pipe second, and the
+    /// helper opens them in that same order. Two connects made in opposite
+    /// orders would be a deadlock of their own: each side would sit on the
+    /// pipe the other had not reached yet. The order is stated here and in
+    /// the helper's `run` so that neither can be changed without the other.
+    pub fn accept(&mut self) -> io::Result<(std::fs::File, std::fs::File)> {
+        let (Some(plan), Some(events)) = (self.plan.as_ref(), self.events.as_ref()) else {
             return Err(io::Error::other(
-                "This pipe has already accepted its client. Call listen() again for another connection.",
+                "These pipes have already accepted their client. Call listen() again for another connection.",
             ));
         };
+        connect(plan)?;
+        connect(events)?;
 
-        // SAFETY: `handle` is the pipe's handle, valid for the duration of
-        // this call because `self.handle` still owns it; a null overlapped
-        // pointer requests the blocking form of `ConnectNamedPipe`.
-        let connected =
-            unsafe { ConnectNamedPipe(handle.as_raw_handle() as HANDLE, ptr::null_mut()) };
-        if connected == 0 {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() != Some(ERROR_PIPE_CONNECTED as i32) {
-                return Err(err);
-            }
-        }
-
-        // The handle moves from here into the `File`: `self.handle` is
-        // `None` from this point, so nothing keeps a copy that could close
-        // it a second time.
-        let owned = self.handle.take().expect("checked Some above");
-        let raw = owned.into_raw_handle();
-        // SAFETY: `raw` came from the `OwnedHandle` this `PipeServer` held,
-        // which has just given up ownership by converting into it; the new
-        // `File` becomes the sole owner and closes it exactly once when
-        // dropped.
-        let file = unsafe { std::fs::File::from_raw_handle(raw) };
-        Ok(file)
+        // The handles move from here into the `File`s: `self.plan` and
+        // `self.events` are `None` from this point, so nothing keeps a copy
+        // that could close either a second time.
+        let plan = self.plan.take().expect("checked Some above");
+        let events = self.events.take().expect("checked Some above");
+        Ok((std::fs::File::from(plan), std::fs::File::from(events)))
     }
 }
 
-/// What the elevated helper is started with. Separate from the call that
-/// elevates so it can be tested without raising a prompt.
+#[cfg(test)]
+impl PipeServer {
+    /// Both pipes' handles, the plan's first, for the test that reads back
+    /// what DACL Windows actually put on each. Nothing outside the tests
+    /// wants them: `accept` hands out the two `File`s instead.
+    fn handles(&self) -> [HANDLE; 2] {
+        [
+            self.plan
+                .as_ref()
+                .expect("not yet accepted")
+                .as_raw_handle() as HANDLE,
+            self.events
+                .as_ref()
+                .expect("not yet accepted")
+                .as_raw_handle() as HANDLE,
+        ]
+    }
+}
+
+/// What the elevated helper is started with. `pipe` is the base name from
+/// [`pipe_name`], not either pipe's own name: the helper derives both from
+/// it with [`plan_pipe_name`] and [`events_pipe_name`], so one argument
+/// carries both. Separate from the call that elevates so it can be tested
+/// without raising a prompt.
 pub fn helper_arguments(pipe: &str) -> Vec<String> {
     vec!["run".to_string(), "--pipe".to_string(), pipe.to_string()]
 }
@@ -341,8 +429,8 @@ impl Inner {
     }
 }
 
-/// Starts `helper` elevated with the `runas` verb and meets it on a named
-/// pipe. The pipe is listened on before the helper is started: the helper
+/// Starts `helper` elevated with the `runas` verb and meets it on the two
+/// named pipes. Both are listened on before the helper is started: it
 /// connects back the instant it launches, and a pipe that does not yet exist
 /// gets it nothing.
 pub fn start(helper: &Path, wrapper: &[String]) -> io::Result<Elevated> {
@@ -391,30 +479,21 @@ pub fn start(helper: &Path, wrapper: &[String]) -> io::Result<Elevated> {
     // path, owns the process and can wait on it rather than abandoning it.
     let mut inner = Inner { process };
 
-    let stream = match server.accept() {
-        Ok(stream) => stream,
+    let (plan, events) = match server.accept() {
+        Ok(pipes) => pipes,
         Err(e) => {
-            // `server` is dropped when this returns, closing the pipe before
-            // the helper ever connects to it; its connect then fails and it
-            // exits on its own, so this wait is bounded, not indefinite.
+            // `server` is dropped when this returns, closing whichever pipes
+            // it still holds before the helper reads or writes them; the
+            // helper's own open, read or write then fails and it exits on
+            // its own, so this wait is bounded, not indefinite.
             let _ = inner.wait();
             return Err(e);
         }
     };
-    let reader = match stream.try_clone() {
-        Ok(reader) => reader,
-        Err(e) => {
-            // `stream` is dropped when this returns, closing the pipe the
-            // helper is already connected to; its next read or write then
-            // fails and it exits on its own, so this wait is bounded too.
-            let _ = inner.wait();
-            return Err(e);
-        }
-    };
-    let lines = crate::transaction::runner::stream_lines_from(reader);
+    let lines = crate::transaction::runner::stream_lines_from(events);
 
     Ok(Elevated {
-        input: Some(Box::new(stream)),
+        input: Some(Box::new(plan)),
         lines,
         inner,
     })
@@ -423,6 +502,340 @@ pub fn start(helper: &Path, wrapper: &[String]) -> io::Result<Elevated> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The client half of a run, without elevating anything: open both
+    /// pipes in the order `accept` connects them, read one line of plan,
+    /// and answer on the events pipe. This is what `brokey-helper`'s
+    /// Windows `run` does, close enough to stand in for it here.
+    fn helper_side(base: &str) -> std::thread::JoinHandle<String> {
+        use std::io::{BufRead, BufReader, Write};
+        let base = base.to_string();
+        std::thread::spawn(move || {
+            let plan = std::fs::OpenOptions::new()
+                .read(true)
+                .open(plan_pipe_name(&base))
+                .expect("the client opens the plan pipe");
+            let mut events = std::fs::OpenOptions::new()
+                .write(true)
+                .open(events_pipe_name(&base))
+                .expect("the client opens the events pipe");
+            let mut reader = BufReader::new(plan);
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("the plan arrives");
+            writeln!(events, "got it").expect("the answer is written");
+            events.flush().expect("the answer is flushed");
+            line
+        })
+    }
+
+    /// What `run_helper` actually does: a reader thread is already blocked
+    /// waiting for events when the plan is written, because
+    /// `stream_lines_from` is started the moment `start` returns and the
+    /// plan goes out on a thread of its own.
+    ///
+    /// The write must finish anyway. A Windows handle opened without
+    /// `FILE_FLAG_OVERLAPPED` is synchronous, and the I/O manager
+    /// serialises every operation on such a file object, so a pending read
+    /// can hold up a write to the same object. `try_clone` duplicates the
+    /// handle but not the file object, so cloning does not escape it; two
+    /// pipes, one per direction, do.
+    ///
+    /// The watchdog makes this a failure rather than a hang: a test that
+    /// blocks for ever tells nobody anything.
+    #[test]
+    fn the_plan_can_be_written_while_a_reader_is_waiting() {
+        use std::io::{Read, Write};
+        use std::sync::mpsc;
+
+        let base = pipe_name();
+        let mut server = listen(&base).expect("the pipes are created");
+
+        // The helper's side: connect, then wait for the plan exactly as the
+        // helper does, and answer only once it has one.
+        let client = helper_side(&base);
+
+        let (stream, mut reader) = server.accept().expect("the client connects");
+
+        // Exactly what `stream_lines_from` does: a thread already blocked on
+        // a read before the plan is written.
+        let (reading, waited) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 64];
+            let _ = reading.send(());
+            let _ = reader.read(&mut buffer);
+        });
+        waited.recv().expect("the reader thread started");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let (done, written) = mpsc::channel();
+        let mut writer = stream;
+        std::thread::spawn(move || {
+            let outcome = writer
+                .write_all(b"{\"id\":\"plan\"}\n")
+                .and_then(|()| writer.flush());
+            let _ = done.send(outcome.is_ok());
+            // Held open, as `run_helper` holds it for the cancel line.
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        });
+
+        let outcome = written.recv_timeout(std::time::Duration::from_secs(5));
+        assert!(
+            outcome.is_ok(),
+            "the plan was never written: a pending read blocked it"
+        );
+        assert_eq!(
+            client.join().expect("the client finished").trim_end(),
+            "{\"id\":\"plan\"}"
+        );
+    }
+
+    /// The property the whole fix exists to provide: the two pipes are
+    /// separate objects, so a read that is still pending does not hold up a
+    /// write.
+    ///
+    /// The read is proven pending rather than assumed: nothing can arrive
+    /// on the events pipe until the client has the plan, so the first
+    /// `recv_timeout` must time out. The write is then issued while that
+    /// read is outstanding, and both complete. Everything is waited on with
+    /// a timeout, so a regression fails rather than hangs.
+    #[test]
+    fn a_read_and_a_write_can_be_in_flight_at_once() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let base = pipe_name();
+        assert_ne!(plan_pipe_name(&base), events_pipe_name(&base));
+
+        let mut server = listen(&base).expect("the pipes are created");
+        let client = helper_side(&base);
+        let (mut writer, events) = server.accept().expect("the client connects");
+        assert_ne!(
+            writer.as_raw_handle(),
+            events.as_raw_handle(),
+            "the two ends are one handle, so they are one file object"
+        );
+
+        let (answered, answer) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(events);
+            let mut line = String::new();
+            let read = reader.read_line(&mut line);
+            let _ = answered.send(read.map(|_| line));
+        });
+
+        // The client answers only what it was sent, so while it has no plan
+        // this read cannot finish: it is still in flight below.
+        assert!(
+            answer.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the events pipe answered before anything was written to the plan pipe"
+        );
+
+        let (done, written) = mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = writer
+                .write_all(b"{\"id\":\"plan\"}\n")
+                .and_then(|()| writer.flush());
+            let _ = done.send(outcome.is_ok());
+            // Held open past the write, as `run_helper` holds it for the
+            // cancel line.
+            std::thread::sleep(Duration::from_secs(5));
+        });
+
+        assert_eq!(
+            written.recv_timeout(Duration::from_secs(5)),
+            Ok(true),
+            "the plan was not written while a read was in flight"
+        );
+        let line = answer
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the answer arrives")
+            .expect("the events pipe reads");
+        assert_eq!(line.trim_end(), "got it");
+        assert_eq!(
+            client.join().expect("the client finished").trim_end(),
+            "{\"id\":\"plan\"}"
+        );
+    }
+
+    /// The cancel line, which `run_helper` writes down the plan pipe long
+    /// after the plan, while the events are still streaming back. That
+    /// write is the same shape as the plan's and must not block either: a
+    /// cancellation that never reaches the helper would leave the user
+    /// watching a run they had already stopped.
+    ///
+    /// Both writes go through one thread that owns the pipe, as
+    /// `run_helper`'s do, and each is waited for with a timeout, so a write
+    /// that blocks fails this rather than hanging it.
+    #[test]
+    fn the_cancel_line_can_be_written_while_events_are_streaming() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let base = pipe_name();
+        let mut server = listen(&base).expect("the pipes are created");
+
+        // A client that answers two lines rather than one: the plan, and
+        // then the cancel line that follows it.
+        let client_base = base.clone();
+        let client = std::thread::spawn(move || {
+            let plan = std::fs::OpenOptions::new()
+                .read(true)
+                .open(plan_pipe_name(&client_base))
+                .expect("the client opens the plan pipe");
+            let mut events = std::fs::OpenOptions::new()
+                .write(true)
+                .open(events_pipe_name(&client_base))
+                .expect("the client opens the events pipe");
+            let mut reader = BufReader::new(plan);
+            let mut heard = Vec::new();
+            for _ in 0..2 {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("a line arrives");
+                let line = line.trim_end().to_string();
+                writeln!(events, "read {line}").expect("the answer is written");
+                events.flush().expect("the answer is flushed");
+                heard.push(line);
+            }
+            heard
+        });
+
+        let (mut writer, events) = server.accept().expect("the client connects");
+
+        let (answered, answer) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(events);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if answered.send(line.trim_end().to_string()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // One thread owns the pipe and writes whatever it is sent, exactly
+        // as `run_helper`'s writer thread owns it for the plan and then the
+        // cancel line.
+        let (send, to_write) = mpsc::channel::<String>();
+        let (done, written) = mpsc::channel::<bool>();
+        std::thread::spawn(move || {
+            for text in to_write {
+                let outcome = writer
+                    .write_all(text.as_bytes())
+                    .and_then(|()| writer.flush());
+                if done.send(outcome.is_ok()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        send.send("{\"id\":\"plan\"}\n".to_string())
+            .expect("the writer thread is running");
+        assert_eq!(
+            written.recv_timeout(Duration::from_secs(5)),
+            Ok(true),
+            "the plan was not written"
+        );
+        assert_eq!(
+            answer.recv_timeout(Duration::from_secs(5)),
+            Ok("read {\"id\":\"plan\"}".to_string())
+        );
+
+        // Long enough for the events reader to be back in a blocking read,
+        // which is the situation this is about: the cancel line goes out
+        // while a read is pending, and must finish anyway.
+        std::thread::sleep(Duration::from_millis(200));
+        send.send("cancel\n".to_string())
+            .expect("the writer thread is still running");
+        assert_eq!(
+            written.recv_timeout(Duration::from_secs(5)),
+            Ok(true),
+            "the cancel line was not written while the events were streaming"
+        );
+        assert_eq!(
+            answer.recv_timeout(Duration::from_secs(5)),
+            Ok("read cancel".to_string())
+        );
+        assert_eq!(
+            client.join().expect("the client finished"),
+            vec!["{\"id\":\"plan\"}".to_string(), "cancel".to_string()]
+        );
+    }
+
+    /// Each side sees the other go away, which is what stops a run that has
+    /// failed from waiting for ever. The runner's line channel disconnects
+    /// because `stream_lines_from`'s read of the events pipe ends when the
+    /// helper's end of it closes, and the helper's wait for the plan ends
+    /// when the runner drops the plan pipe, which `run_helper`'s writer
+    /// thread does once the run is over.
+    ///
+    /// Both reads are waited for with a timeout, because the whole point of
+    /// the assertion is that neither blocks.
+    #[test]
+    fn each_side_notices_when_the_other_goes_away() {
+        use std::io::Read;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let base = pipe_name();
+        let mut server = listen(&base).expect("the pipes are created");
+
+        let (plan_ended, plan_end) = mpsc::channel();
+        let (connected, go) = mpsc::channel();
+        let client_base = base.clone();
+        std::thread::spawn(move || {
+            let mut plan = std::fs::OpenOptions::new()
+                .read(true)
+                .open(plan_pipe_name(&client_base))
+                .expect("the client opens the plan pipe");
+            let events = std::fs::OpenOptions::new()
+                .write(true)
+                .open(events_pipe_name(&client_base))
+                .expect("the client opens the events pipe");
+            // Both ends are held until `accept` has connected them: a
+            // client that closed one before then would fail the connect
+            // instead, which is a different sentence about a different
+            // failure.
+            let _ = go.recv();
+            // A helper that writes nothing and goes, which is what one that
+            // refuses to start does.
+            drop(events);
+            // And this is where the helper waits for its plan.
+            let mut buffer = [0u8; 64];
+            let _ = plan_ended.send(plan.read(&mut buffer));
+        });
+
+        let (writer, mut events) = server.accept().expect("the client connects");
+        connected.send(()).expect("the client is waiting");
+
+        let (events_ended, events_end) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 64];
+            let _ = events_ended.send(events.read(&mut buffer));
+        });
+        let read = events_end
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the events read ends when the helper's end of it closes");
+        assert!(
+            matches!(read, Ok(0) | Err(_)),
+            "the events pipe went on reading after the helper closed it: {read:?}"
+        );
+
+        drop(writer);
+        let read = plan_end
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the plan read ends when the runner's end of it closes");
+        assert!(
+            matches!(read, Ok(0) | Err(_)),
+            "the plan pipe went on reading after the runner closed it: {read:?}"
+        );
+    }
 
     /// Two runs never collide. A stale pipe of the same name would make the
     /// second run fail to listen, and one session can run two plans.
@@ -538,31 +951,143 @@ mod tests {
         assert_eq!(joined, r#"run "C:\Program Files\x""#);
     }
 
-    /// A client connects and the two sides speak. This is the whole
-    /// contract the helper relies on.
+    /// A client connects and the two sides speak, each way on its own pipe.
+    /// This is the whole contract the helper relies on.
     #[test]
     fn a_client_can_connect_and_be_read() {
         use std::io::{BufRead, BufReader, Write};
-        let name = pipe_name();
-        let mut server = listen(&name).expect("the pipe is created");
-        let client_name = name.clone();
-        // The server is already listening: `listen` returns after
-        // CreateNamedPipeW, and a client may open a pipe that has no
+        let base = pipe_name();
+        let mut server = listen(&base).expect("the pipes are created");
+        // The server is already listening: `listen` returns after both
+        // CreateNamedPipeW calls, and a client may open a pipe that has no
         // pending ConnectNamedPipe.
-        let client = std::thread::spawn(move || {
-            let mut f = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&client_name)
-                .expect("the client opens the pipe");
-            writeln!(f, "from the helper").expect("the client writes");
-            f.flush().expect("the client flushes");
-        });
-        let stream = server.accept().expect("the client connects");
-        let mut reader = BufReader::new(stream);
+        let client = helper_side(&base);
+        let (mut writer, events) = server.accept().expect("the client connects");
+        writeln!(writer, "from the runner").expect("the runner writes");
+        writer.flush().expect("the runner flushes");
+        let mut reader = BufReader::new(events);
         let mut line = String::new();
         reader.read_line(&mut line).expect("a line arrives");
-        assert_eq!(line.trim_end(), "from the helper");
-        client.join().expect("the client thread finished");
+        assert_eq!(line.trim_end(), "got it");
+        assert_eq!(
+            client
+                .join()
+                .expect("the client thread finished")
+                .trim_end(),
+            "from the runner"
+        );
+    }
+
+    /// The DACL Windows actually put on `handle`, as SDDL. Read back from
+    /// the kernel rather than from the string `listen` passed in, so the
+    /// test below proves what the pipe carries rather than what the code
+    /// meant to ask for.
+    fn dacl_of(handle: HANDLE) -> String {
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_KERNEL_OBJECT,
+        };
+        use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: `handle` is a live pipe handle owned by the caller, the
+        // SID and ACL out-parameters may be null when only the whole
+        // descriptor is wanted, and `descriptor` is a valid out-parameter;
+        // on success it is set to memory this call allocates, which is
+        // freed with `LocalFree` below.
+        let got = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        assert_eq!(got, 0, "the pipe's descriptor could not be read: {got}");
+
+        let mut text: windows_sys::core::PWSTR = ptr::null_mut();
+        let mut len: u32 = 0;
+        // SAFETY: `descriptor` is the descriptor just read, and `text` and
+        // `len` are valid out-parameters; on success `text` is set to
+        // memory this call allocates, which is freed with `LocalFree` below.
+        let converted = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
+                &mut len,
+            )
+        };
+        assert_ne!(
+            converted,
+            0,
+            "the descriptor could not be rendered: {}",
+            io::Error::last_os_error()
+        );
+        let sddl = string_from_wide_ptr(text);
+
+        // SAFETY: `text` and `descriptor` were each allocated by one of the
+        // calls above and each is freed exactly once, now that the string
+        // has been copied out.
+        unsafe { LocalFree(text as HLOCAL) };
+        // SAFETY: as above, for the descriptor `GetSecurityInfo` allocated.
+        unsafe { LocalFree(descriptor as HLOCAL) };
+        sddl
+    }
+
+    /// Both pipes carry the DACL, not only whichever was created first.
+    /// This is the security boundary: a pipe that admitted anyone else
+    /// would let something on the machine answer in the helper's place or
+    /// read the plan going past. The SID is checked against `whoami.exe`'s
+    /// answer for the same reason as in the test above.
+    ///
+    /// Windows maps the generic rights the SDDL asked for onto the object's
+    /// own, so the rights field read back is not the `GA` that went in;
+    /// what matters here and is asserted is who is named, and that nobody
+    /// else is.
+    #[test]
+    fn both_pipes_carry_the_descriptor() {
+        let base = pipe_name();
+        let server = listen(&base).expect("the pipes are created");
+        let sid = expected_sid();
+        for (which, handle) in ["the plan pipe", "the events pipe"]
+            .into_iter()
+            .zip(server.handles())
+        {
+            let sddl = dacl_of(handle);
+            assert!(
+                sddl.contains(&format!(";;;{sid})")),
+                "{which} does not admit this user: {sddl}"
+            );
+            assert!(
+                sddl.contains(";;;BA)"),
+                "{which} does not admit Administrators: {sddl}"
+            );
+            assert_eq!(
+                sddl.matches("(A;").count(),
+                2,
+                "{which} has more than the two allow entries: {sddl}"
+            );
+            assert!(
+                !sddl.contains(";;;WD)"),
+                "everyone can open {which}: {sddl}"
+            );
+            assert!(
+                !sddl.contains(";;;AN)"),
+                "anonymous can open {which}: {sddl}"
+            );
+            assert!(
+                !sddl.contains(";;;S-1-1-0)"),
+                "everyone as a raw SID can open {which}: {sddl}"
+            );
+            assert!(
+                !sddl.contains(";;;S-1-5-7)"),
+                "anonymous as a raw SID can open {which}: {sddl}"
+            );
+        }
     }
 }

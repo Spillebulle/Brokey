@@ -24,10 +24,11 @@
 //!
 //! *How the plan arrives and the events leave.* Linux is started as
 //! `pkexec brokey-helper run` and uses the stdin and stdout `pkexec` gave
-//! it. Windows is started as `brokey-helper run --pipe <name>`, because
+//! it. Windows is started as `brokey-helper run --pipe <base>`, because
 //! `ShellExecuteEx` is the only call that elevates and it cannot redirect
-//! standard streams; it opens that pipe, which the unelevated side is
-//! already listening on, and reads and writes both ends of it.
+//! standard streams; it opens the two pipes derived from that base name,
+//! which the unelevated side is already listening on, and reads the plan
+//! from one and writes the events to the other.
 //!
 //! *How "am I privileged" is answered.* Linux asks the kernel for its
 //! effective user id. Windows asks its own process token whether it is
@@ -73,8 +74,8 @@ Reads a JSON plan on stdin; run needs root and is meant to be started through pk
 /// The same sentence for Windows, where `run` is told which pipe to answer
 /// on rather than reading stdin, and needs Administrator rather than root.
 #[cfg(windows)]
-const USAGE: &str = "Usage: brokey-helper run --pipe <name> | check | --version. \
-run needs Administrator and is started by Brokey, which gives it the pipe to answer on; \
+const USAGE: &str = "Usage: brokey-helper run --pipe <base> | check | --version. \
+run needs Administrator and is started by Brokey, which gives it the pipes to answer on; \
 check reads a JSON plan on stdin.";
 
 fn main() {
@@ -127,42 +128,50 @@ fn run(_args: &[String]) -> i32 {
     run_with(BufReader::new(std::io::stdin()), std::io::stdout())
 }
 
-/// `run`'s own transport on Windows: the named pipe whose name was given on
-/// the command line. `ShellExecuteEx` is the only call that elevates and it
-/// cannot redirect standard streams, so the unelevated side listens on a
-/// pipe first and this connects back to it. The pipe is duplex, so one
-/// handle carries the plan in and a clone of it carries the events out.
+/// `run`'s own transport on Windows: the two named pipes whose base name was
+/// given on the command line. `ShellExecuteEx` is the only call that
+/// elevates and it cannot redirect standard streams, so the unelevated side
+/// listens on both pipes first and this connects back to them. There is one
+/// pipe per direction, as there is on Linux: the plan pipe carries the plan
+/// in and the events pipe carries the events out. One duplex pipe would not
+/// do, because a Windows handle created without `FILE_FLAG_OVERLAPPED`
+/// serialises every operation on its file object, so the runner's pending
+/// read of the events would hold up its write of the plan and both sides
+/// would wait for ever.
+///
+/// They are opened in the order the runner connects them, the plan pipe
+/// first and the events pipe second. Two sides connecting two pipes in
+/// opposite orders would deadlock, so this order and `PipeServer::accept`'s
+/// are stated in both places and changed together.
 ///
 /// Nothing here can be reported as an `Event`, because an event needs the
 /// pipe these failures are about. They go to stderr and an exit code, which
 /// is what the unelevated side reads when no event ever arrives.
 #[cfg(windows)]
 fn run(args: &[String]) -> i32 {
-    let name = match pipe_argument(args) {
-        Ok(name) => name,
+    let base = match pipe_argument(args) {
+        Ok(base) => base,
         Err(message) => {
             eprintln!("{message}");
             return EXIT_BAD_INPUT;
         }
     };
-    let writer = match std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&name)
-    {
+    let plan_name = brokey_core::transaction::elevate::plan_pipe_name(&base);
+    let reader = match std::fs::OpenOptions::new().read(true).open(&plan_name) {
         Ok(pipe) => pipe,
         Err(e) => {
             eprintln!(
-                "The helper could not open {name}: {e}. Start the operation again from Brokey, which makes the pipe before it starts the helper."
+                "The helper could not open the plan pipe {plan_name}: {e}. Start the operation again from Brokey, which makes the pipes before it starts the helper."
             );
             return EXIT_BAD_INPUT;
         }
     };
-    let reader = match writer.try_clone() {
-        Ok(reader) => reader,
+    let events_name = brokey_core::transaction::elevate::events_pipe_name(&base);
+    let writer = match std::fs::OpenOptions::new().write(true).open(&events_name) {
+        Ok(pipe) => pipe,
         Err(e) => {
             eprintln!(
-                "The helper could not open a second handle on {name}: {e}. Start the operation again from Brokey."
+                "The helper could not open the events pipe {events_name}: {e}. Start the operation again from Brokey."
             );
             return EXIT_BAD_INPUT;
         }
@@ -170,7 +179,7 @@ fn run(args: &[String]) -> i32 {
     run_with(BufReader::new(reader), writer)
 }
 
-/// The pipe to answer on, from `run --pipe <name>`.
+/// The base name of the pipes to answer on, from `run --pipe <base>`.
 #[cfg(windows)]
 fn pipe_argument(args: &[String]) -> Result<String, String> {
     let mut rest = args.iter();
