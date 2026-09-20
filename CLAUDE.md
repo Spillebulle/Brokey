@@ -19,10 +19,14 @@ Windows side of that split and what it supersedes in `architecture.md`.
 **Early and building out.** The first machine is Arch (CachyOS): pacman and the
 AUR are the reference sources. apt and dnf are written to the same interface and
 are marked untested until they have run on a real Debian and Fedora. Windows
-now has two sources, Add/Remove Programs (`sources/windows/arp.rs`) and winget
-(`sources/windows/winget/`): winget's catalogue is downloaded and read by
-Brokey rather than shelled out to, which is why search works without winget
-installed, and its installed list is the registry joined to that catalogue.
+has four sources, in the order the page draws them: Add/Remove Programs
+(`sources/windows/arp.rs`), winget (`sources/windows/winget/`), Chocolatey
+(`sources/windows/choco.rs`) and Scoop (`sources/windows/scoop.rs`). None of
+them shells out: winget's catalogue is downloaded and read by Brokey
+itself, which is why search works without winget installed, and its installed
+list is the registry joined to that catalogue; Chocolatey searches the
+community feed over HTTP and reads its own `lib` directory; Scoop reads the
+buckets on disk, or the main bucket over HTTP when there are none.
 `brokey-helper` runs on Windows too, elevated through `ShellExecuteEx` and
 answering on a pair of named pipes, so installing, updating and removing
 work there. `README.md`'s "What is not there yet" is the
@@ -104,8 +108,9 @@ crates/brokey-core/src/
   sources/          one module per source, split by platform and selected by #[cfg]
     linux/          pacman.rs, aur.rs, flatpak.rs, snap.rs, apt.rs, dnf.rs, github.rs, fwupd.rs, chwd.rs
     windows/        arp.rs (Add/Remove Programs), winget/ (mod.rs, index.rs,
-                    query.rs, version.rs); Chocolatey, Scoop and the Store
-                    come next, per the Windows spec
+                    query.rs, version.rs), choco.rs, scoop.rs, pe.rs and
+                    icon.rs (an installed application's own icon); the
+                    Microsoft Store comes next, per the Windows spec
   appstream/        catalogue XML parser, icon resolution, index
   group.rs          packages -> apps. Pure. Fixture-tested
   transaction/      Plan building and the Runner (spawns the helper and user-session steps)

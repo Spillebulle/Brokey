@@ -35,7 +35,9 @@ pub fn all(
         let _ = (system, catalogue, preferences);
         vec![
             Box::new(windows::arp::Arp::new()),
-            Box::new(windows::winget::Winget::new(client)),
+            Box::new(windows::winget::Winget::new(client.clone())),
+            Box::new(windows::choco::Choco::new(client.clone())),
+            Box::new(windows::scoop::Scoop::new(client)),
         ]
     }
 }
@@ -80,10 +82,42 @@ fn linux_all(
 mod tests {
     /// The point of the test is that `all` answers rather than panicking or
     /// being absent, so the application and the text mode both run on
-    /// Windows from here on.
+    /// Windows from here on. The order is the order the page draws them in.
     #[cfg(windows)]
     #[test]
-    fn windows_has_add_remove_programs_and_winget() {
+    fn windows_has_add_remove_programs_winget_chocolatey_and_scoop() {
+        let kinds = windows_kinds();
+        assert_eq!(
+            kinds,
+            [
+                crate::SourceKind::Arp,
+                crate::SourceKind::Winget,
+                crate::SourceKind::Choco,
+                crate::SourceKind::Scoop,
+            ]
+        );
+    }
+
+    /// A source whose kind has no label draws a blank badge and a blank
+    /// column in the page's source filter, and a kind the settings cannot
+    /// parse back is a preference that never applies. `check.sh` is a shell
+    /// script and cannot ask Rust either question, so the suite asks them
+    /// here, of every kind Windows actually builds.
+    #[cfg(windows)]
+    #[test]
+    fn every_windows_source_has_a_label_and_parses_back() {
+        for kind in windows_kinds() {
+            assert!(!kind.label().is_empty(), "{kind:?} has no label");
+            assert_eq!(
+                crate::SourceKind::parse(kind.id()),
+                Some(kind),
+                "{kind:?} does not parse back from its id"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    fn windows_kinds() -> Vec<crate::SourceKind> {
         let system = crate::system::detect();
         let sources = super::all(
             &system,
@@ -91,7 +125,6 @@ mod tests {
             crate::appstream::Catalogue::load_system(&system),
             &crate::Preferences::default(),
         );
-        let kinds: Vec<_> = sources.iter().map(|s| s.kind()).collect();
-        assert_eq!(kinds, [crate::SourceKind::Arp, crate::SourceKind::Winget]);
+        sources.iter().map(|s| s.kind()).collect()
     }
 }
