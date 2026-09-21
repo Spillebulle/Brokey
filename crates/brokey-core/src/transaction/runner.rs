@@ -54,6 +54,17 @@ pub const HELPER_MISSING: &str =
     "The helper that installs packages was not found. Reinstall Brokey.";
 pub const AUTH_CANCELLED: &str = "Authentication was cancelled.";
 pub const NOT_AUTHORISED: &str = "You are not authorised to install packages on this machine.";
+/// pkexec answers 127 for this as well, and it is not the sentence above:
+/// nobody was asked, so nothing was refused. Seen on Pop!_OS, where pkexec
+/// falls back to its own textual agent and then cannot open `/dev/tty`
+/// because a window has none.
+pub const NO_AUTH_AGENT: &str = "Nothing on this desktop offered to ask for your password, so the helper was never started. \
+     Log out and back in, which starts the session's authentication agent again.";
+/// And 127 for this, which is further from the sentence above still: the
+/// password was taken and polkit could not say whose session it belonged to.
+pub const NO_POLKIT_SESSION: &str = "This desktop session could not be authenticated, so the helper was never started. The polkit \
+     service has no record of the session, which is what happens when it is restarted while you \
+     are logged in. Log out and back in, or restart the machine.";
 pub const CANCELLED: &str = "Cancelled.";
 pub const CANCELLING_ROOT: &str =
     "Cancelling. The step running under the helper cannot be stopped; nothing after it will start.";
@@ -503,12 +514,7 @@ impl Runner {
                 Ok(())
             }
             (Some(126), _) => Err(AUTH_CANCELLED.to_string()),
-            // 127 is also pkexec's answer when no authentication agent is
-            // registered or the helper could not be executed; its own line
-            // says which.
-            (Some(127), _) => Err(format!("{NOT_AUTHORISED} {}", first_line(&stderr_text))
-                .trim_end()
-                .to_string()),
+            (Some(127), _) => Err(pkexec_refusal(&stderr_text)),
             (_, Some((false, message))) => Err(message),
             (Some(4), _) => Err(format!(
                 "The helper refused to run because it was not started as root. {}",
@@ -826,6 +832,38 @@ fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("").trim()
 }
 
+/// What pkexec's 127 actually was.
+///
+/// pkexec answers 127 for the caller not being authorised, for an
+/// authentication that could never be put, and for a helper it could not
+/// execute, and only its own output says which. Leading with
+/// [`NOT_AUTHORISED`] for all three is wrong twice over: nobody was asked,
+/// so nothing was refused, and a reader sent to look at their permissions is
+/// looking in the place where the answer is not.
+///
+/// The line quoted back is the one that matched rather than the first,
+/// because pkexec writes its prompt and its complaint in either order and a
+/// reader needs the complaint.
+fn pkexec_refusal(stderr: &str) -> String {
+    let matching = |needle: &str| {
+        stderr
+            .lines()
+            .map(str::trim)
+            .find(|line| line.to_lowercase().contains(needle))
+    };
+    // "Error creating textual authentication agent" when pkexec falls back to
+    // its own agent and finds no terminal, and "No authentication agent
+    // found." when it does not get that far.
+    let (sentence, line) = if let Some(line) = matching("authentication agent") {
+        (NO_AUTH_AGENT, line)
+    } else if let Some(line) = matching("no session for cookie") {
+        (NO_POLKIT_SESSION, line)
+    } else {
+        (NOT_AUTHORISED, first_line(stderr))
+    };
+    format!("{sentence} {line}").trim_end().to_string()
+}
+
 /// The final sentence for a plan that ran through: what was asked for, in
 /// the past tense.
 pub fn summary(ops: &[Op]) -> String {
@@ -1068,12 +1106,49 @@ mod tests {
         );
     }
 
+    /// pkexec's 127 is three different answers wearing one number, and the
+    /// two that are not refusals used to be reported as one. A user on
+    /// Pop!_OS read "you are not authorised" while being perfectly
+    /// authorised, and went looking at their group membership.
+    #[test]
+    fn a_127_reads_as_whichever_127_it_was() {
+        assert_eq!(
+            pkexec_refusal("No authentication agent found."),
+            format!("{NO_AUTH_AGENT} No authentication agent found.")
+        );
+        assert_eq!(
+            pkexec_refusal(
+                "Error creating textual authentication agent: Error opening current \
+                 controlling terminal for the process"
+            ),
+            format!(
+                "{NO_AUTH_AGENT} Error creating textual authentication agent: Error opening \
+                 current controlling terminal for the process"
+            )
+        );
+        assert_eq!(
+            pkexec_refusal(
+                "==== AUTHENTICATION FAILED ====\npolkit-agent-helper-1: No session for cookie\n"
+            ),
+            format!("{NO_POLKIT_SESSION} polkit-agent-helper-1: No session for cookie"),
+            "the whole of stderr is read, not the first line of it"
+        );
+        assert_eq!(pkexec_refusal(""), NOT_AUTHORISED);
+        assert_eq!(
+            pkexec_refusal("Not authorized to perform operation"),
+            format!("{NOT_AUTHORISED} Not authorized to perform operation"),
+            "anything else is still the refusal it always was"
+        );
+    }
+
     #[test]
     fn the_sentences_follow_the_copy_rules() {
         for s in [
             HELPER_MISSING,
             AUTH_CANCELLED,
             NOT_AUTHORISED,
+            NO_AUTH_AGENT,
+            NO_POLKIT_SESSION,
             CANCELLED,
             CANCELLING_ROOT,
             CANCELLING_SESSION,

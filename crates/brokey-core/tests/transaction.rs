@@ -546,20 +546,39 @@ fn pkexec_exit_codes_become_sentences() {
     let dir = tempfile::tempdir().unwrap();
     let helper = dir.path().join("brokey-helper");
     write_executable(&helper, "#!/bin/sh\nexit 0\n");
-    let no_agent = format!("{} No authentication agent found.", runner::NOT_AUTHORISED);
+    // pkexec answers 127 for three different things and only its own output
+    // says which, so each of the three has to read as itself: nothing was
+    // there to ask, the session could not be authenticated at all, or the
+    // caller really was refused. The first two are not refusals and must not
+    // read as one.
+    let no_terminal = "Error creating textual authentication agent: \
+        Error opening current controlling terminal for the process: \
+        No such device or address";
+    let no_agent = format!("{} No authentication agent found.", runner::NO_AUTH_AGENT);
+    let no_terminal_said = format!("{} {no_terminal}", runner::NO_AUTH_AGENT);
+    // The cookie line comes last and the banner above it matches nothing, so
+    // this case also shows that the whole of stderr is read, not the first
+    // line of it.
+    let no_session = format!(
+        "{} polkit-agent-helper-1: No session for cookie",
+        runner::NO_POLKIT_SESSION
+    );
     for (code, said, sentence) in [
         (126, "", runner::AUTH_CANCELLED),
         (127, "", runner::NOT_AUTHORISED),
-        // pkexec's own line for a desktop without a polkit agent, or a
-        // helper it could not execute, is appended so the user reads why.
         (127, "No authentication agent found.", no_agent.as_str()),
+        (127, no_terminal, no_terminal_said.as_str()),
+        (
+            127,
+            "==== AUTHENTICATION FAILED ====\npolkit-agent-helper-1: No session for cookie",
+            no_session.as_str(),
+        ),
     ] {
         let pkexec = dir.path().join(format!("pkexec-{code}-{}", said.len()));
-        let print = if said.is_empty() {
-            String::new()
-        } else {
-            format!("echo '{said}' >&2\n")
-        };
+        let print: String = said
+            .lines()
+            .map(|line| format!("echo '{line}' >&2\n"))
+            .collect();
         write_executable(&pkexec, &format!("#!/bin/sh\n{print}exit {code}\n"));
         let runner = Runner::new()
             .with_helper(Some(helper.clone()))
