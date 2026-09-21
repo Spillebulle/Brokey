@@ -213,13 +213,23 @@ jobs:
             artifacts/*
 
       # The apt and rpm archive rebuilds itself from the newest release of
-      # every project it carries. Skipped when the token is absent.
+      # every project it carries. Without the token it cannot be told, and
+      # saying so out loud is the point of the shape below: this step used to
+      # carry `if: env.ARCHIVE_DISPATCH_TOKEN != ''`, so on a machine with no
+      # secret it did not run, the job went green, and the archive went on
+      # advertising the previous release until somebody noticed and pressed
+      # the button. 0.1.5 was released and the archive said 0.1.4 for as long
+      # as it took a human to spot it. A step that does nothing must say that
+      # it did nothing.
       - name: Tell the archive
         env:
           ARCHIVE_DISPATCH_TOKEN: ${{ secrets.ARCHIVE_DISPATCH_TOKEN }}
-        if: env.ARCHIVE_DISPATCH_TOKEN != ''
         run: |
           set -eu
+          if [ -z "${ARCHIVE_DISPATCH_TOKEN}" ]; then
+            echo "::warning title=The archive was not told::ARCHIVE_DISPATCH_TOKEN is not set, so https://spillebulle.github.io/packages/ still advertises the previous release and apt and dnf users will not see ${GITHUB_REF_NAME#v}. Run the Publish archive workflow in Spillebulle/packages by hand, or set the secret to a token that may dispatch to that repository and this becomes automatic."
+            exit 0
+          fi
           GH_TOKEN="$ARCHIVE_DISPATCH_TOKEN" gh api \
             /repos/Spillebulle/packages/dispatches \
             -f event_type=package \
@@ -228,13 +238,17 @@ jobs:
 
       # The AUR package `brokey` builds from the tagged source. Pushed only
       # when an SSH key for the AUR account is configured; otherwise the
-      # PKGBUILD in packaging/linux/ is what a maintainer pushes by hand.
+      # PKGBUILD in packaging/linux/ is what a maintainer pushes by hand, and
+      # the warning below is how anyone learns that is still the arrangement.
       - name: Publish to the AUR
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-        if: env.AUR_SSH_PRIVATE_KEY != ''
         run: |
           set -eu
+          if [ -z "${AUR_SSH_PRIVATE_KEY}" ]; then
+            echo "::warning title=The AUR package was not pushed::AUR_SSH_PRIVATE_KEY is not set, so aur/brokey still builds the previous version. Push packaging/linux/PKGBUILD by hand, or set the secret."
+            exit 0
+          fi
           version="${GITHUB_REF_NAME#v}"
           mkdir -p ~/.ssh
           printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
