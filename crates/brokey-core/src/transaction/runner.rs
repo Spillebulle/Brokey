@@ -680,6 +680,22 @@ impl Runner {
                 emit_progress(sink, &id, current, state, Some(CANCELLING_ROOT.to_string()));
             }
         }
+        // A helper that failed is about to exit, and what it wrote on stderr
+        // travels on its own pipe, so it can arrive after the `PlanFinished`
+        // above. It is read to the end and forwarded, so the log has it.
+        if matches!(helper_said, Some((false, _))) {
+            while let Ok(line) = live.elevated.lines.recv() {
+                if line.stderr {
+                    transcript.line(&line.text);
+                }
+                sink.event(Event::Log {
+                    plan: id.clone(),
+                    step: current,
+                    line: line.text,
+                    stderr: line.stderr,
+                });
+            }
+        }
         match helper_said {
             Some((true, _)) => {
                 for index in run.first..run.first + run.len {
@@ -1178,7 +1194,12 @@ fn pkexec_refusal(stderr: &str) -> String {
     } else {
         (NOT_AUTHORISED, first_line(stderr))
     };
-    format!("{sentence} {line}").trim_end().to_string()
+    // The quoted line is pkexec's, and it does not always end a sentence.
+    let mut out = format!("{sentence} {line}").trim_end().to_string();
+    if !out.ends_with(['.', '!', '?']) {
+        out.push('.');
+    }
+    out
 }
 
 /// The final sentence for a plan that ran through: what was asked for, in
@@ -1440,20 +1461,21 @@ mod tests {
             ),
             format!(
                 "{NO_AUTH_AGENT} Error creating textual authentication agent: Error opening \
-                 current controlling terminal for the process"
-            )
+                 current controlling terminal for the process."
+            ),
+            "pkexec's line does not end a sentence, so a full stop does"
         );
         assert_eq!(
             pkexec_refusal(
                 "==== AUTHENTICATION FAILED ====\npolkit-agent-helper-1: No session for cookie\n"
             ),
-            format!("{NO_POLKIT_SESSION} polkit-agent-helper-1: No session for cookie"),
+            format!("{NO_POLKIT_SESSION} polkit-agent-helper-1: No session for cookie."),
             "the whole of stderr is read, not the first line of it"
         );
         assert_eq!(pkexec_refusal(""), NOT_AUTHORISED);
         assert_eq!(
             pkexec_refusal("Not authorized to perform operation"),
-            format!("{NOT_AUTHORISED} Not authorized to perform operation"),
+            format!("{NOT_AUTHORISED} Not authorized to perform operation."),
             "anything else is still the refusal it always was"
         );
     }

@@ -758,12 +758,12 @@ fn pkexec_exit_codes_become_sentences() {
         Error opening current controlling terminal for the process: \
         No such device or address";
     let no_agent = format!("{} No authentication agent found.", runner::NO_AUTH_AGENT);
-    let no_terminal_said = format!("{} {no_terminal}", runner::NO_AUTH_AGENT);
+    let no_terminal_said = format!("{} {no_terminal}.", runner::NO_AUTH_AGENT);
     // The cookie line comes last and the banner above it matches nothing, so
     // this case also shows that the whole of stderr is read, not the first
     // line of it.
     let no_session = format!(
-        "{} polkit-agent-helper-1: No session for cookie",
+        "{} polkit-agent-helper-1: No session for cookie.",
         runner::NO_POLKIT_SESSION
     );
     for (code, said, sentence) in [
