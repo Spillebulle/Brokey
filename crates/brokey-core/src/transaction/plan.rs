@@ -11,8 +11,8 @@
 //! root step that starts its socket, and `flatpak install` runs after the
 //! root steps that install flatpak and add Flathub), and so does a source
 //! whose steps alternate (download as the user, then `pacman -U` as root).
-//! The runner starts one helper run per stretch of consecutive root steps,
-//! and polkit's `auth_admin_keep` keeps that to one password in practice.
+//! The runner starts one helper for the whole plan and writes it each
+//! stretch of consecutive root steps in turn, so a plan costs one password.
 
 use crate::model::*;
 use crate::{Result, Store};
@@ -149,6 +149,8 @@ pub fn notices_in(store: &Store, ops: &[Op], session: &[std::path::PathBuf]) -> 
     let mut notices = setup_notices(store, ops, session);
     if let Some(partial) = partial_upgrade_notice(store, ops) {
         notices.push(partial);
+    } else if let Some(pending) = pending_upgrade_notice(store, ops) {
+        notices.push(pending);
     }
     notices
 }
@@ -249,6 +251,59 @@ fn display_name(store: &Store, package: &PackageRef) -> String {
                 parts.last().copied().unwrap_or(id).to_string()
             }
         })
+}
+
+/// An install from the Arch repositories, or a build from the AUR, starts
+/// with `pacman -Syu`, so it brings every pending update with it. Said
+/// before it runs, with how many, so a small install that turns out to be
+/// a kernel upgrade is not a surprise; and when the kernel or a graphics
+/// driver is among them, that a restart follows.
+fn pending_upgrade_notice(store: &Store, ops: &[Op]) -> Option<String> {
+    let upgrades_first = ops.iter().any(|op| match op {
+        Op::Install { package } => matches!(package.source, SourceKind::Pacman | SourceKind::Aur),
+        Op::Update { package } => package.source == SourceKind::Aur,
+        Op::UpdateAll {
+            source: SourceKind::Aur,
+        } => true,
+        _ => false,
+    });
+    let updates_all = ops.iter().any(|op| {
+        matches!(
+            op,
+            Op::UpdateAll {
+                source: SourceKind::Pacman
+            }
+        )
+    });
+    if !upgrades_first || updates_all {
+        return None;
+    }
+    let pending = store.source(SourceKind::Pacman)?.updates().ok()?;
+    pending_sentence(
+        &pending
+            .iter()
+            .map(|u| u.package.id.as_str())
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// The sentence for [`pending_upgrade_notice`], from the pending names.
+pub fn pending_sentence(pending: &[&str]) -> Option<String> {
+    use crate::transaction::diagnose::{is_driver, is_kernel};
+    let mut sentence = match pending.len() {
+        0 => return None,
+        1 => "Arch does not support partial upgrades, so the 1 pending system update is installed first.".to_string(),
+        n => format!(
+            "Arch does not support partial upgrades, so the {n} pending system updates are installed first."
+        ),
+    };
+    if pending.iter().any(|n| is_kernel(n)) {
+        sentence.push_str(" They include a new kernel, so restart the computer afterwards.");
+    } else if pending.iter().any(|n| is_driver(n)) {
+        sentence
+            .push_str(" They include a new graphics driver, so restart the computer afterwards.");
+    }
+    Some(sentence)
 }
 
 fn partial_upgrade_notice(store: &Store, ops: &[Op]) -> Option<String> {
@@ -1474,7 +1529,10 @@ mod tests {
         );
         assert_eq!(
             notices(&store, &[install(SourceKind::Pacman, "a")]),
-            Vec::<String>::new()
+            [
+                "Arch does not support partial upgrades, so the 3 pending system updates are installed first."
+            ],
+            "an install is a full upgrade too, and says how big"
         );
         assert_eq!(
             notices(&store, &[update(SourceKind::Flatpak, "org.x")]),
@@ -1550,8 +1608,31 @@ mod tests {
                     install(SourceKind::Pacman, "x")
                 ]
             ),
-            Vec::<String>::new(),
-            "another source's refresh is not pacman's"
+            [
+                "Arch does not support partial upgrades, so the 1 pending system update is installed first."
+            ],
+            "another source's refresh is not pacman's, so this is the install's own notice"
+        );
+    }
+
+    #[test]
+    fn a_pending_kernel_says_a_restart_follows() {
+        assert_eq!(pending_sentence(&[]), None);
+        assert_eq!(
+            pending_sentence(&["firefox"]).as_deref(),
+            Some(
+                "Arch does not support partial upgrades, so the 1 pending system update is installed first."
+            )
+        );
+        assert!(
+            pending_sentence(&["firefox", "linux-cachyos"])
+                .unwrap()
+                .ends_with("They include a new kernel, so restart the computer afterwards.")
+        );
+        assert!(
+            pending_sentence(&["nvidia-open-dkms"])
+                .unwrap()
+                .ends_with("graphics driver, so restart the computer afterwards.")
         );
     }
 

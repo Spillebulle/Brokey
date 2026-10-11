@@ -2,15 +2,15 @@
 //!
 //! The local database is a directory per installed package under
 //! `/var/lib/pacman/local/<name>-<version>/` holding a `desc` file. A sync
-//! database (`/var/lib/pacman/sync/<repo>.db`) is a tar archive, gzip or
-//! zstd compressed, of the same `<name>-<version>/desc` layout. `desc` is a
+//! database (`/var/lib/pacman/sync/<repo>.db`) is a tar archive, gzip, zstd
+//! or xz compressed, of the same `<name>-<version>/desc` layout. `desc` is a
 //! sequence of `%KEY%` lines each followed by its values, blank-line
 //! separated. That is the whole format, and reading it here rather than
 //! through libalpm is what lets one binary run on every distribution.
 
 use crate::{Error, Result};
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
 /// One `desc` file, keys as written (`NAME`, `VERSION`, `DESC`, …).
@@ -169,24 +169,163 @@ impl SyncDb {
     }
 }
 
-/// gzip, zstd or already plain, judged by the magic bytes.
-fn decompress(bytes: &[u8]) -> Result<Vec<u8>> {
-    if bytes.starts_with(&[0x1f, 0x8b]) {
-        let mut out = Vec::new();
-        flate2::read::GzDecoder::new(bytes)
-            .read_to_end(&mut out)
-            .map_err(|e| Error::new(format!("gzip: {e}")))?;
-        Ok(out)
-    } else if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-        let mut out = Vec::new();
-        ruzstd::decoding::StreamingDecoder::new(bytes)
-            .map_err(|e| Error::new(format!("zstd: {e}")))?
-            .read_to_end(&mut out)
-            .map_err(|e| Error::new(format!("zstd: {e}")))?;
-        Ok(out)
-    } else {
-        Ok(bytes.to_vec())
+/// How a database or a package file is compressed, judged by its first
+/// bytes. `repo-add` writes gzip unless told otherwise, Arch's own
+/// repositories are zstd, and xz is what `makepkg` wrote before zstd and
+/// what fpm (electron-builder's `.pacman`) still writes. bzip2 is
+/// recognised so that it can be named in the error rather than read as a
+/// tar and reported as garbage; nothing current writes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compression {
+    Gzip,
+    Zstd,
+    Xz,
+    Bzip2,
+    /// Anything else, read as an uncompressed tar.
+    None,
+}
+
+impl Compression {
+    pub fn of(bytes: &[u8]) -> Compression {
+        if bytes.starts_with(&[0x1f, 0x8b]) {
+            Compression::Gzip
+        } else if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+            Compression::Zstd
+        } else if bytes.starts_with(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]) {
+            Compression::Xz
+        } else if bytes.starts_with(b"BZh") {
+            Compression::Bzip2
+        } else {
+            Compression::None
+        }
     }
+}
+
+/// The whole of a compressed database, uncompressed.
+fn decompress(bytes: &[u8]) -> Result<Vec<u8>> {
+    decompress_prefix(bytes, usize::MAX)
+}
+
+/// The first `limit` bytes of what `reader` holds once uncompressed, or all
+/// of it when it is shorter. A sync database is read whole; a package file
+/// is read only as far as its metadata, which `makepkg` and fpm both put at
+/// the front, so a 150 MB package is not inflated into memory to learn its
+/// name.
+pub fn decompress_prefix(mut reader: impl BufRead, limit: usize) -> Result<Vec<u8>> {
+    let magic = reader
+        .fill_buf()
+        .map_err(|e| Error::new(format!("could not read the file: {e}")))?;
+    let mut out = Vec::new();
+    // `take` wants a u64; usize::MAX is the "everything" a whole database asks for.
+    let cap = u64::try_from(limit).unwrap_or(u64::MAX);
+    match Compression::of(magic) {
+        Compression::Gzip => {
+            flate2::bufread::GzDecoder::new(reader)
+                .take(cap)
+                .read_to_end(&mut out)
+                .map_err(|e| Error::new(format!("gzip: {e}")))?;
+        }
+        Compression::Zstd => {
+            ruzstd::decoding::StreamingDecoder::new(reader)
+                .map_err(|e| Error::new(format!("zstd: {e}")))?
+                .take(cap)
+                .read_to_end(&mut out)
+                .map_err(|e| Error::new(format!("zstd: {e}")))?;
+        }
+        Compression::Xz => {
+            // lzma-rs decodes into a writer rather than offering a reader,
+            // so the cap is a writer that refuses more once it is full.
+            // Stopping it that way is an error to lzma-rs and success here.
+            let mut capped = Capped {
+                out: &mut out,
+                limit,
+            };
+            if let Err(e) = lzma_rs::xz_decompress(&mut reader, &mut capped)
+                && out.len() < limit
+            {
+                return Err(Error::new(format!("xz: {e}")));
+            }
+        }
+        Compression::Bzip2 => {
+            return Err(Error::new(
+                "it is compressed with bzip2, which Brokey does not read".to_string(),
+            ));
+        }
+        Compression::None => {
+            reader
+                .take(cap)
+                .read_to_end(&mut out)
+                .map_err(|e| Error::new(format!("could not read the file: {e}")))?;
+        }
+    }
+    Ok(out)
+}
+
+/// A writer that keeps at most `limit` bytes and then says it is full.
+struct Capped<'a> {
+    out: &'a mut Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for Capped<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let room = self.limit.saturating_sub(self.out.len());
+        if room == 0 {
+            return Err(std::io::Error::other("the prefix is full"));
+        }
+        let n = room.min(buf.len());
+        self.out.extend_from_slice(&buf[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// How much of a package file is uncompressed to find its `.PKGINFO`.
+/// `makepkg` writes `.BUILDINFO`, `.MTREE` and `.PKGINFO` before any of the
+/// package's own files, and fpm writes `.PKGINFO` first; a few kilobytes
+/// each, so a megabyte is generous.
+const PKGINFO_WINDOW: usize = 1024 * 1024;
+
+/// The `pkgname` a package file's `.PKGINFO` declares: what pacman records
+/// it under once installed, which the file name does not reliably say
+/// (`Heroic-2.22.1-linux-x64.pacman` installs as `heroic`). `None` when the
+/// file cannot be read, is not a package, or names something that is not a
+/// package name.
+pub fn package_file_name(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let prefix = decompress_prefix(std::io::BufReader::new(file), PKGINFO_WINDOW).ok()?;
+    pkginfo_name(&prefix)
+}
+
+/// [`package_file_name`] over the uncompressed front of a package, which
+/// may stop part-way through an entry: the entries are read until one
+/// cannot be, and `.PKGINFO` is normally among the first.
+pub fn pkginfo_name(tar_prefix: &[u8]) -> Option<String> {
+    let mut archive = tar::Archive::new(tar_prefix);
+    for entry in archive.entries().ok()? {
+        let Ok(mut entry) = entry else {
+            return None;
+        };
+        // At the top of the archive, written with or without a leading `./`.
+        let is_pkginfo = entry
+            .path()
+            .ok()
+            .is_some_and(|p| p.strip_prefix(".").unwrap_or(&p) == Path::new(".PKGINFO"));
+        if !is_pkginfo {
+            continue;
+        }
+        let mut text = String::new();
+        entry.read_to_string(&mut text).ok()?;
+        return text.lines().find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            let value = value.trim();
+            (key.trim() == "pkgname" && is_package_name(value)).then(|| value.to_string())
+        });
+    }
+    None
 }
 
 /// The repositories `pacman.conf` names, in order, with their database
@@ -399,6 +538,135 @@ mod tests {
         let bytes = builder.into_inner().unwrap();
         let db = SyncDb::from_bytes("multilib", &bytes).unwrap();
         assert_eq!(db.get("steam").unwrap().version(), "1.0.0.87-3");
+    }
+
+    /// A tar of `(path, text)` entries, as a database or a package is.
+    fn tar_of(entries: &[(&str, &str)]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, text) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(text.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, text.as_bytes())
+                .unwrap();
+        }
+        builder.into_inner().unwrap()
+    }
+
+    fn xz(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        lzma_rs::xz_compress(&mut &bytes[..], &mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn compressions_are_told_by_their_magic_bytes() {
+        assert_eq!(Compression::of(&[0x1f, 0x8b, 8]), Compression::Gzip);
+        assert_eq!(
+            Compression::of(&[0x28, 0xb5, 0x2f, 0xfd, 0]),
+            Compression::Zstd
+        );
+        assert_eq!(
+            Compression::of(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 0]),
+            Compression::Xz
+        );
+        assert_eq!(Compression::of(b"BZh91AY&SY"), Compression::Bzip2);
+        assert_eq!(Compression::of(b"steam-1.0/desc"), Compression::None);
+        assert_eq!(Compression::of(&[]), Compression::None);
+        // Five of the six xz bytes are not xz.
+        assert_eq!(
+            Compression::of(&[0xfd, 0x37, 0x7a, 0x58, 0x5a]),
+            Compression::None
+        );
+    }
+
+    #[test]
+    fn an_xz_database_reads_and_a_bzip2_one_is_named() {
+        let bytes = xz(&tar_of(&[("steam-1.0.0.87-3/desc", STEAM)]));
+        assert_eq!(Compression::of(&bytes), Compression::Xz);
+        let db = SyncDb::from_bytes("multilib", &bytes).unwrap();
+        assert_eq!(db.get("steam").unwrap().version(), "1.0.0.87-3");
+
+        let e = SyncDb::from_bytes("old", b"BZh91AY&SY not really").unwrap_err();
+        assert!(e.message.contains("bzip2"), "{}", e.message);
+
+        let zstd = ruzstd::encoding::compress_to_vec(
+            &tar_of(&[("steam-1.0.0.87-3/desc", STEAM)])[..],
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        let db = SyncDb::from_bytes("multilib", &zstd).unwrap();
+        assert_eq!(db.get("steam").unwrap().version(), "1.0.0.87-3");
+    }
+
+    #[test]
+    fn a_broken_database_is_an_error_not_a_panic() {
+        // Gzip cut off half-way, as an interrupted download leaves it.
+        let mut gz = Vec::new();
+        {
+            use std::io::Write;
+            let mut encoder = flate2::write::GzEncoder::new(&mut gz, flate2::Compression::fast());
+            encoder
+                .write_all(&tar_of(&[("steam-1.0.0.87-3/desc", STEAM)]))
+                .unwrap();
+            encoder.finish().unwrap();
+        }
+        gz.truncate(gz.len() / 2);
+        assert!(SyncDb::from_bytes("core", &gz).is_err());
+        let mut cut = xz(&tar_of(&[("steam-1.0.0.87-3/desc", STEAM)]));
+        cut.truncate(cut.len() / 2);
+        assert!(SyncDb::from_bytes("core", &cut).is_err());
+    }
+
+    const PKGINFO: &str = "# Generated by makepkg 7.0.0\npkgname = heroic\npkgbase = heroic\npkgver = 2.22.1-1\narch = x86_64\n";
+
+    #[test]
+    fn a_package_s_name_comes_from_its_pkginfo_not_its_file_name() {
+        // makepkg's order: .BUILDINFO and .MTREE may come before .PKGINFO.
+        let package = tar_of(&[
+            (".BUILDINFO", "format = 2\npkgname = not-this\n"),
+            (".PKGINFO", PKGINFO),
+            ("usr/bin/heroic", "#!/bin/sh\n"),
+        ]);
+        assert_eq!(pkginfo_name(&package).as_deref(), Some("heroic"));
+        let dir = tempfile::tempdir().unwrap();
+        for (file, bytes) in [
+            ("Heroic-2.22.1-linux-x64.pacman", xz(&package)),
+            (
+                "heroic-2.22.1-1-x86_64.pkg.tar.zst",
+                ruzstd::encoding::compress_to_vec(
+                    &package[..],
+                    ruzstd::encoding::CompressionLevel::Fastest,
+                ),
+            ),
+        ] {
+            let path = dir.path().join(file);
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                package_file_name(&path).as_deref(),
+                Some("heroic"),
+                "{file}"
+            );
+        }
+        assert_eq!(package_file_name(&dir.path().join("missing")), None);
+    }
+
+    #[test]
+    fn a_prefix_cut_after_the_pkginfo_still_names_the_package() {
+        let big = "x".repeat(64 * 1024);
+        let package = tar_of(&[(".PKGINFO", PKGINFO), ("usr/lib/big", &big)]);
+        let prefix = decompress_prefix(&xz(&package)[..], 4096).unwrap();
+        assert_eq!(prefix.len(), 4096);
+        assert_eq!(pkginfo_name(&prefix).as_deref(), Some("heroic"));
+
+        // A name that is not one pacman accepts is not trusted.
+        let odd = tar_of(&[(".PKGINFO", "pkgname = --Rs\n")]);
+        assert_eq!(pkginfo_name(&odd), None);
+        let none = tar_of(&[("usr/bin/x", "")]);
+        assert_eq!(pkginfo_name(&none), None);
+        let dotted = tar_of(&[("./.PKGINFO", PKGINFO)]);
+        assert_eq!(pkginfo_name(&dotted).as_deref(), Some("heroic"));
     }
 
     #[test]

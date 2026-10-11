@@ -6,6 +6,8 @@
 //! - `allow` is the closed list of what may run as root, built on both
 //!   platforms. It is a pure function of the plan; `brokey-helper` calls it
 //!   and so does the runner's dry run.
+//! - `diagnose` reads a failed step's output for why it failed, and a
+//!   finished plan's for what the user should know (a restart, a `.pacnew`).
 //! - `progress` reads a tool's output for "(3/7) installing foo".
 //! - `runner` executes a plan: root steps go to `brokey-helper`, however
 //!   `elevate` starts it on this platform; session steps run here, every
@@ -17,6 +19,7 @@
 //! both platforms alongside `runner`, the thing it cancels.
 
 pub mod allow;
+pub mod diagnose;
 pub mod elevate;
 pub mod plan;
 pub mod progress;

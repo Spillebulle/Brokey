@@ -151,7 +151,9 @@ fn write_executable(path: &Path, text: &str) {
 
 /// A helper stand-in. The prelude reads the plan line unbuffered (so a later
 /// `cancel` line is still on the pipe for `select`), records what it was
-/// given, and defines `emit`; `body` is the behaviour under test.
+/// given, and defines `emit`, `read_line` (the next line, `None` once the
+/// runner closes the input) and `take` (make a line the current plan and
+/// record it); `body` is the behaviour under test.
 fn fake_helper(dir: &Path, body: &str) -> (PathBuf, PathBuf) {
     let record = dir.join("record.jsonl");
     let record_literal = format!("{:?}", record.display().to_string());
@@ -162,17 +164,25 @@ RECORD = {record}
 def emit(e):
     sys.stdout.write(json.dumps(e) + "\n")
     sys.stdout.flush()
-data = b""
-while b"\n" not in data:
-    chunk = os.read(0, 65536)
-    if not chunk:
-        break
-    data += chunk
-first, _, rest = data.partition(b"\n")
-plan = json.loads(first)
-pid = plan["id"]
-with open(RECORD, "a") as f:
-    f.write(json.dumps({{"argv": sys.argv[1:], "wrapped": os.environ.get("WRAPPED"), "steps": len(plan["steps"]), "programs": [s["command"]["program"] for s in plan["steps"]]}}) + "\n")
+buf = b""
+def read_line():
+    global buf
+    while b"\n" not in buf:
+        chunk = os.read(0, 65536)
+        if not chunk:
+            line, buf = buf, b""
+            return line or None
+        buf += chunk
+    line, _, buf = buf.partition(b"\n")
+    return line
+def take(line):
+    global plan, pid
+    plan = json.loads(line)
+    pid = plan["id"]
+    with open(RECORD, "a") as f:
+        f.write(json.dumps({{"argv": sys.argv[1:], "wrapped": os.environ.get("WRAPPED"), "process": os.getpid(), "steps": len(plan["steps"]), "programs": [s["command"]["program"] for s in plan["steps"]]}}) + "\n")
+take(read_line())
+rest = buf
 "#,
         record = record_literal
     );
@@ -182,14 +192,41 @@ with open(RECORD, "a") as f:
     (path, record)
 }
 
-/// Runs every step, printing pacman-shaped lines for pacman steps so the
-/// progress parser has something to read.
+/// Runs every step of every plan it is sent, printing pacman-shaped lines
+/// for pacman steps so the progress parser has something to read, until
+/// the runner closes its input.
 const WELL_BEHAVED: &str = r#"
 LINES = {"pacman": ["(1/2) installing foo", "(2/2) installing bar"]}
+while True:
+    for i, step in enumerate(plan["steps"]):
+        emit({"event": "step_started", "plan": pid, "step": i, "title": step["title"]})
+        for line in LINES.get(step["command"]["program"], ["working"]):
+            emit({"event": "log", "plan": pid, "step": i, "line": line, "stderr": False})
+        emit({"event": "step_finished", "plan": pid, "step": i, "ok": True, "message": None})
+    emit({"event": "plan_finished", "plan": pid, "ok": True, "message": "Finished."})
+    line = read_line()
+    if line is None:
+        sys.exit(0)
+    take(line)
+"#;
+
+/// The first step fails the way pacman does when a package has left the
+/// repositories, and the helper reports it with its usual sentence.
+const NOT_FOUND: &str = r#"
+title = plan["steps"][0]["title"]
+emit({"event": "step_started", "plan": pid, "step": 0, "title": title})
+emit({"event": "log", "plan": pid, "step": 0, "line": "error: target not found: foo", "stderr": True})
+msg = title + " failed with exit code 1. The log has the details."
+emit({"event": "step_finished", "plan": pid, "step": 0, "ok": False, "message": msg})
+emit({"event": "plan_finished", "plan": pid, "ok": False, "message": msg})
+sys.exit(1)
+"#;
+
+/// Finishes one plan and then exits as an old, one-plan helper would, so a
+/// second sub-plan is written to nobody.
+const ONE_PLAN_ONLY: &str = r#"
 for i, step in enumerate(plan["steps"]):
     emit({"event": "step_started", "plan": pid, "step": i, "title": step["title"]})
-    for line in LINES.get(step["command"]["program"], ["working"]):
-        emit({"event": "log", "plan": pid, "step": i, "line": line, "stderr": False})
     emit({"event": "step_finished", "plan": pid, "step": i, "ok": True, "message": None})
 emit({"event": "plan_finished", "plan": pid, "ok": True, "message": "Finished."})
 sys.exit(0)
@@ -480,7 +517,6 @@ fn root_runs_go_through_the_wrapper_and_come_back_renumbered() {
             "log 3 two",
             "step_finished 3 ok",
             "progress 3 0.83 -",
-            "auth_required",
             "step_started 4 Removing baz",
             "progress 4 0.83 -",
             "log 4 (1/2) installing foo",
@@ -497,15 +533,15 @@ fn root_runs_go_through_the_wrapper_and_come_back_renumbered() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(
-        runs.len(),
-        2,
-        "two stretches of root steps, two helper runs"
-    );
+    assert_eq!(runs.len(), 2, "two stretches of root steps, two sub-plans");
     for run in &runs {
         assert_eq!(run["argv"], serde_json::json!(["run"]));
         assert_eq!(run["wrapped"], "yes", "started through the wrapper");
     }
+    assert_eq!(
+        runs[0]["process"], runs[1]["process"],
+        "one helper, and so one password, for the whole plan"
+    );
     assert_eq!(
         runs[0]["programs"],
         serde_json::json!(["pacman", "flatpak"])
@@ -539,6 +575,173 @@ fn a_step_the_helper_reports_as_failed_ends_the_plan() {
         "the helper's own stderr is forwarded as a log line: {:?}",
         shapes(&events)
     );
+}
+
+#[test]
+fn a_failure_the_output_explains_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let (helper, _) = fake_helper(dir.path(), NOT_FOUND);
+    let plan = plan(vec![root(
+        "Installing foo",
+        "pacman",
+        &["-S", "--noconfirm", "foo"],
+    )]);
+    let (outcome, events) = run_collect(&runner_with(&helper), &plan);
+    assert!(!outcome.ok);
+    assert!(
+        outcome
+            .message
+            .starts_with("Installing foo failed. foo is not in any repository"),
+        "{}",
+        outcome.message
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::StepFinished { ok: false, message: Some(m), .. } if *m == outcome.message
+        )),
+        "the step says the same: {:?}",
+        shapes(&events)
+    );
+}
+
+#[test]
+fn a_session_failure_the_output_explains_says_why() {
+    let plan = plan(vec![session(
+        "Building foo",
+        "sh",
+        &[
+            "-c",
+            "echo '==> ERROR: A failure occurred in build().' >&2; exit 4",
+        ],
+    )]);
+    let (outcome, _) = run_collect(&Runner::new().with_helper(None), &plan);
+    assert!(!outcome.ok);
+    assert!(
+        outcome
+            .message
+            .starts_with("Building foo failed. The package failed to build."),
+        "{}",
+        outcome.message
+    );
+}
+
+#[test]
+fn a_helper_that_leaves_early_is_not_a_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let (helper, _) = fake_helper(dir.path(), ONE_PLAN_ONLY);
+    let plan = plan(vec![
+        root("Installing foo", "pacman", &["-S", "--noconfirm", "foo"]),
+        session("Between", "true", &[]),
+        root("Removing baz", "pacman", &["-Rs", "--noconfirm", "baz"]),
+    ]);
+    let (outcome, events) = run_collect(&runner_with(&helper), &plan);
+    assert!(!outcome.ok, "{}", outcome.message);
+    assert!(
+        outcome.message.starts_with("The helper stopped"),
+        "{}",
+        outcome.message
+    );
+    assert_eq!(starts(&events), [0, 1]);
+}
+
+#[test]
+fn a_kernel_upgrade_asks_for_a_restart_at_the_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = WELL_BEHAVED.replace("(1/2) installing foo", "(1/2) upgrading linux-cachyos");
+    let (helper, _) = fake_helper(dir.path(), &body);
+    let plan = plan(vec![root("Updating", "pacman", &["-Syu", "--noconfirm"])]);
+    let (outcome, _) = run_collect(&runner_with(&helper), &plan);
+    assert!(outcome.ok);
+    assert!(
+        outcome.message.contains("linux-cachyos changed.")
+            && outcome.message.contains("restart the computer"),
+        "{}",
+        outcome.message
+    );
+}
+
+#[test]
+fn plans_sharing_a_queue_run_one_at_a_time() {
+    let queue = Arc::new(Mutex::new(()));
+    let first = Runner::new().with_helper(None).with_queue(queue.clone());
+    let second = Runner::new().with_helper(None).with_queue(queue);
+    let slow = plan(vec![session("Sleeping", "sleep", &["1"])]);
+    let quick = plan(vec![session("Quick", "true", &[])]);
+    let handle = std::thread::spawn(move || run_collect(&first, &slow));
+    std::thread::sleep(Duration::from_millis(200));
+    let started = Instant::now();
+    let (outcome, events) = run_collect(&second, &quick);
+    assert!(outcome.ok);
+    assert!(
+        started.elapsed() >= Duration::from_millis(500),
+        "the second plan did not wait for the first"
+    );
+    assert_eq!(
+        shapes(&events)[1],
+        format!("progress 0 - {}", runner::WAITING_FOR_PLAN)
+    );
+    assert!(handle.join().unwrap().0.ok);
+}
+
+#[test]
+fn a_held_pacman_lock_is_waited_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let (helper, _) = fake_helper(dir.path(), WELL_BEHAVED);
+    let lock = dir.path().join("db.lck");
+    std::fs::write(&lock, "").unwrap();
+    let runner = runner_with(&helper).with_pacman_lock(Some(lock.clone()));
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(800));
+        std::fs::remove_file(lock).unwrap();
+    });
+    let started = Instant::now();
+    let plan = plan(vec![root(
+        "Installing foo",
+        "pacman",
+        &["-S", "--noconfirm", "foo"],
+    )]);
+    let (outcome, events) = run_collect(&runner, &plan);
+    releaser.join().unwrap();
+    assert!(outcome.ok, "{}", outcome.message);
+    assert!(started.elapsed() >= Duration::from_millis(700));
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::Progress { message: Some(m), .. } if m == runner::WAITING_FOR_PACMAN
+        )),
+        "{:?}",
+        shapes(&events)
+    );
+}
+
+#[test]
+fn waiting_for_the_pacman_lock_can_be_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let (helper, record) = fake_helper(dir.path(), WELL_BEHAVED);
+    let lock = dir.path().join("db.lck");
+    std::fs::write(&lock, "").unwrap();
+    let runner = runner_with(&helper).with_pacman_lock(Some(lock));
+    let token = runner.cancel_token();
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        token.cancel();
+    });
+    let plan = plan(vec![root(
+        "Installing foo",
+        "pacman",
+        &["-S", "--noconfirm", "foo"],
+    )]);
+    let (outcome, events) = run_collect(&runner, &plan);
+    canceller.join().unwrap();
+    assert_eq!(outcome.message, runner::CANCELLED);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::AuthRequired { .. })),
+        "nobody was asked for a password"
+    );
+    assert!(!record.exists(), "the helper was never started");
 }
 
 #[test]

@@ -886,14 +886,48 @@ fn installing_a_classic_snap_from_cold_asks_the_store_once() {
 }
 
 #[test]
-fn installing_without_snapd_plans_strictly_and_asks_nothing() {
+fn installing_when_the_store_cannot_be_asked_refuses_rather_than_guessing() {
+    // No snapd and an offline public store: whether code is classic cannot
+    // be known, and planning it strictly would fail after snapd was set up.
     let s = source(Canned::absent());
-    let steps = s
+    let e = s
         .plan(&Op::Install {
             package: snap_ref("code"),
         })
+        .unwrap_err();
+    assert_eq!(e.source_kind, Some(SourceKind::Snap));
+    assert!(
+        e.message
+            .starts_with("The Snap Store could not be reached to check how code is confined ("),
+        "{}",
+        e.message
+    );
+    assert!(
+        e.message
+            .ends_with("). Check the connection and try again."),
+        "{}",
+        e.message
+    );
+    no_em_dash(&e.message);
+
+    // snapd running but its store lookup failing is the same refusal.
+    let mut cut_off = Canned::snapd();
+    cut_off.unreachable.push("/v2/find?name=code");
+    let e = source(cut_off)
+        .plan(&Op::Install {
+            package: snap_ref("code"),
+        })
+        .unwrap_err();
+    assert!(e.message.contains("could not be reached"), "{}", e.message);
+
+    // A name the store answers it does not know is planned strictly, and
+    // snap install then says there is no such snap.
+    let steps = source(Canned::snapd())
+        .plan(&Op::Install {
+            package: snap_ref("nonesuch"),
+        })
         .unwrap();
-    assert_eq!(steps[0].command.args, ["install", "code"]);
+    assert_eq!(steps[0].command.args, ["install", "nonesuch"]);
 }
 
 #[test]

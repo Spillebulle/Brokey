@@ -13,33 +13,34 @@
 //! **A build never runs as root.** `makepkg` refuses to run as root
 //! (`E_ROOT`, see `/usr/bin/makepkg`) because a PKGBUILD is arbitrary shell
 //! run at build time, and a store that elevated it would be handing every
-//! AUR maintainer the machine. So the build is a user-session step; only the
-//! two pacman calls inside it (dependencies, then `-U` of the result) are
-//! elevated, through `pkexec`. Running the whole build through `brokey-helper`
-//! was rejected for exactly that reason, and it would not work anyway.
+//! AUR maintainer the machine. So the build is a user-session step, and the
+//! pacman calls around it (the system upgrade and the dependencies before,
+//! the built package after) are root steps through `brokey-helper` like
+//! every other install. The runner keeps one helper for the whole plan, so
+//! an AUR install costs one password however long the build takes.
 //!
-//! When paru or yay is installed it does the whole job with `--sudo pkexec`.
-//! When neither is, the built-in path is a shallow `git clone` of the
-//! package base and `makepkg -s -i` in it. makepkg reads `PACMAN_AUTH` as a
-//! bash array from its configuration files and never from the environment
-//! (`run_pacman` in `/usr/bin/makepkg`, `source_makepkg_config` in
-//! `/usr/share/makepkg/util/config.sh`), so the built-in path writes a
-//! configuration file that replays what makepkg would read on its own and
-//! sets `PACMAN_AUTH=(pkexec)` last, and runs makepkg with `--config` on it.
-//! Setting the variable in the step's environment was tried first and does
-//! nothing.
+//! Brokey drives makepkg itself rather than handing the job to paru or yay.
+//! Both elevate on their own, through `sudo` or whatever `--sudo` names,
+//! once for the dependencies and once for the install, which was two or
+//! three password prompts per package and a way to root that did not go
+//! through the helper's closed list. What they added (AUR dependencies,
+//! signing keys, split packages) is done here: [`Aur::resolve`] walks the
+//! dependencies through the RPC, the keys a base's `.SRCINFO` names are
+//! imported as the user before the build, and only the packages asked for
+//! are installed from the build's output.
 
 use super::alpmdb::{self, Desc, LocalDb, SyncDb, is_package_name, read_includes};
 use crate::appstream::Catalogue;
 use crate::http::Client;
 use crate::model::*;
-use crate::system::{self, Dirs};
+use crate::system::Dirs;
+use crate::transaction::allow;
 use crate::vercmp::is_newer;
 use crate::{Error, Op, Query, Result, Source};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 /// The aurweb RPC, version 5.
@@ -58,12 +59,6 @@ const EDITION_SUFFIXES: [&str; 3] = ["-bin", "-git", "-appimage"];
 /// local build produced, so the AUR's copy is usually older, not newer.
 const VCS_SUFFIXES: [&str; 4] = ["-git", "-svn", "-hg", "-bzr"];
 
-/// Why the source is unavailable and why a plan is refused when nothing
-/// on the machine can build a package: one sentence for both, so the
-/// tooltip and the error never drift apart.
-pub const NO_BUILDER: &str =
-    "makepkg is not installed, so AUR packages cannot be built. Install base-devel and try again.";
-
 /// What aurweb answers when a search term matches more than its limit of
 /// packages (5000): the term is too common to be searched on its own.
 const TOO_MANY_RESULTS: &str = "Too many package results";
@@ -73,84 +68,6 @@ const TOO_MANY_RESULTS: &str = "Too many package results";
 /// asks the network.
 type RpcAnswer = dyn Fn(&str) -> Result<String> + Send + Sync;
 
-/// Which program will build AUR packages on this machine.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Helper {
-    /// paru, with the version its `--version` reports ("2.1.0").
-    Paru(String),
-    /// yay, likewise.
-    Yay(String),
-    /// No helper: the built-in git clone and makepkg path.
-    Makepkg,
-    /// Nothing that can build a package.
-    None,
-}
-
-impl Helper {
-    /// Look on `PATH`, preferring paru over yay over bare makepkg. paru is
-    /// first because it is the one the reference machine has and because
-    /// its `--skipreview` makes an unattended build possible.
-    pub fn detect() -> Helper {
-        if system::which("paru").is_some() {
-            return Helper::Paru(version_of("paru"));
-        }
-        if system::which("yay").is_some() {
-            return Helper::Yay(version_of("yay"));
-        }
-        if system::which("makepkg").is_some() {
-            return Helper::Makepkg;
-        }
-        Helper::None
-    }
-
-    /// The helper the user named in Settings ("paru", "yay", "builtin"),
-    /// when it is installed; otherwise whatever [`Helper::detect`] finds, so
-    /// a choice that cannot be honoured degrades to one that works rather
-    /// than to a build that fails. Anything else is [`Helper::detect`].
-    pub fn choose(choice: &str) -> Helper {
-        match choice {
-            "paru" if system::which("paru").is_some() => Helper::Paru(version_of("paru")),
-            "yay" if system::which("yay").is_some() => Helper::Yay(version_of("yay")),
-            "builtin" if system::which("makepkg").is_some() => Helper::Makepkg,
-            _ => Helper::detect(),
-        }
-    }
-
-    /// The status bar line: "paru 2.1.0", "yay 12.4", "makepkg".
-    pub fn detail(&self) -> Option<String> {
-        match self {
-            Helper::Paru(v) => Some(with_version("paru", v)),
-            Helper::Yay(v) => Some(with_version("yay", v)),
-            Helper::Makepkg => Some("makepkg".to_string()),
-            Helper::None => None,
-        }
-    }
-}
-
-fn with_version(program: &str, version: &str) -> String {
-    if version.is_empty() {
-        program.to_string()
-    } else {
-        format!("{program} {version}")
-    }
-}
-
-fn version_of(program: &str) -> String {
-    system::run(program, &["--version"])
-        .ok()
-        .and_then(|out| parse_version_line(&out))
-        .unwrap_or_default()
-}
-
-/// The version out of `paru v2.1.0 +git - libalpm v16.0.1` or
-/// `yay v12.4.2 - libalpm v15.0.0`: the second word, without its `v`.
-pub fn parse_version_line(out: &str) -> Option<String> {
-    out.split_whitespace()
-        .nth(1)
-        .map(|v| v.trim_start_matches('v').to_string())
-        .filter(|v| v.starts_with(|c: char| c.is_ascii_digit()))
-}
-
 /// Where the databases and the build cache are. Injectable so the tests
 /// can point at a temporary directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,7 +75,9 @@ pub struct Paths {
     pub pacman_conf: PathBuf,
     pub local_db: PathBuf,
     pub sync_dir: PathBuf,
-    /// Clones and the makepkg configuration live here: `<cache>/aur`.
+    /// Checkouts, and each build's output under `out/`, live here:
+    /// `<cache>/aur`, which is under `~/.cache/brokey`, the directory the
+    /// helper installs a package file from.
     pub cache: PathBuf,
 }
 
@@ -203,6 +122,8 @@ pub struct RpcPackage {
     pub depends: Vec<String>,
     #[serde(default)]
     pub make_depends: Vec<String>,
+    #[serde(default)]
+    pub check_depends: Vec<String>,
     #[serde(default)]
     pub opt_depends: Vec<String>,
     #[serde(default)]
@@ -266,6 +187,10 @@ struct Dbs {
     /// Every name a configured repository carries. A local package not in
     /// here is foreign.
     sync_names: HashSet<String>,
+    /// Every name a configured repository's packages provide, so a build
+    /// dependency on `java-runtime` is installed from there by that name and
+    /// pacman picks the provider.
+    sync_provides: HashSet<String>,
     /// Every name the local database satisfies: package names and what
     /// they provide, so a dependency on `rust` counts as met by `rustup`.
     satisfied: HashSet<String>,
@@ -276,7 +201,6 @@ pub struct Aur {
     client: Arc<Client>,
     catalogue: Arc<Catalogue>,
     paths: Paths,
-    helper: OnceLock<Helper>,
     /// A scripted RPC for the tests; `None` asks `client`.
     rpc_answer: Option<Box<RpcAnswer>>,
     dbs: Mutex<Option<Arc<Dbs>>>,
@@ -293,7 +217,6 @@ impl Aur {
             client,
             catalogue,
             paths: Paths::system(),
-            helper: OnceLock::new(),
             rpc_answer: None,
             dbs: Mutex::new(None),
             known: Mutex::new(HashMap::new()),
@@ -311,19 +234,9 @@ impl Aur {
         self
     }
 
-    /// Pretend a helper exists (or does not), instead of looking on `PATH`.
-    pub fn with_helper(self, helper: Helper) -> Aur {
-        let _ = self.helper.set(helper);
-        self
-    }
-
     pub fn with_paths(mut self, paths: Paths) -> Aur {
         self.paths = paths;
         self
-    }
-
-    pub fn helper(&self) -> &Helper {
-        self.helper.get_or_init(Helper::detect)
     }
 
     pub fn paths(&self) -> &Paths {
@@ -379,23 +292,6 @@ impl Aur {
         Ok(out)
     }
 
-    /// The record for one name: what the session already saw, else the RPC.
-    fn record(&self, name: &str) -> Result<RpcPackage> {
-        let cached = self
-            .known
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(name)
-            .cloned();
-        if let Some(p) = cached {
-            return Ok(p);
-        }
-        self.info(&[name])?
-            .into_iter()
-            .find(|p| p.name == name)
-            .ok_or_else(|| Error::from_source(SourceKind::Aur, format!("{name} is not in the AUR. It may have been deleted or merged into another package.")))
-    }
-
     // ---- the databases -------------------------------------------------
 
     fn stamp(&self) -> Vec<(PathBuf, Option<SystemTime>)> {
@@ -425,12 +321,19 @@ impl Aur {
         })?;
         let conf = std::fs::read_to_string(&self.paths.pacman_conf).unwrap_or_default();
         let mut sync_names = HashSet::new();
+        let mut sync_provides = HashSet::new();
         for (repo, path) in alpmdb::repos(&conf, &self.paths.sync_dir, &read_includes) {
             if !path.exists() {
                 continue;
             }
             match SyncDb::load(&repo, &path) {
-                Ok(db) => sync_names.extend(db.packages.into_keys()),
+                Ok(db) => {
+                    for (name, desc) in db.packages {
+                        sync_provides
+                            .extend(desc.all("PROVIDES").iter().map(|p| dep_name(p).to_string()));
+                        sync_names.insert(name);
+                    }
+                }
                 Err(e) => log::warn!("skipping {repo}: {e}"),
             }
         }
@@ -443,6 +346,7 @@ impl Aur {
             stamp,
             local,
             sync_names,
+            sync_provides,
             satisfied,
         });
         *guard = Some(dbs.clone());
@@ -450,12 +354,18 @@ impl Aur {
     }
 
     /// The local packages no configured repository carries, by name.
+    ///
+    /// A package Brokey installed from a GitHub release is foreign to
+    /// pacman too, but it is the GitHub source's: listing it here would
+    /// offer to rebuild it from whatever the AUR has under that name.
     fn foreign(dbs: &Dbs) -> Vec<Desc> {
+        let from_github =
+            super::github::pacman_names_installed_by_github(&crate::system::Dirs::new().data);
         let mut out: Vec<Desc> = dbs
             .local
             .packages
             .values()
-            .filter(|d| !dbs.sync_names.contains(d.name()))
+            .filter(|d| !dbs.sync_names.contains(d.name()) && !from_github.contains(d.name()))
             .cloned()
             .collect();
         out.sort_by(|a, b| a.name().cmp(b.name()));
@@ -477,6 +387,7 @@ impl Aur {
                 pkg.installed_size = d.u64("SIZE");
             }
             self.lend_entry(pkg);
+            note_vcs(pkg);
         }
     }
 
@@ -605,6 +516,7 @@ impl Aur {
                     p.installed_version = Some(desc.version().to_string());
                     p.installed_size = desc.u64("SIZE");
                     self.lend_entry(&mut p);
+                    note_vcs(&mut p);
                     p
                 }
                 None => {
@@ -725,65 +637,213 @@ impl Aur {
         }
     }
 
-    fn helper_step(&self, program: &str, args: &[&str], name: Option<&str>, title: String) -> Step {
-        let args: Vec<String> = args
-            .iter()
-            .chain(name.iter())
-            .map(|s| s.to_string())
-            .collect();
-        Self::step(title, program, args, None, false, 8)
-    }
-
-    /// The steps that install or update one name.
-    fn build_steps(&self, name: &str) -> Result<Vec<Step>> {
-        let title = format!("Building {name} from the AUR");
-        match self.helper() {
-            Helper::Paru(_) => Ok(vec![self.helper_step(
-                "paru",
-                &[
-                    "-S",
-                    "--noconfirm",
-                    "--needed",
-                    "--sudo",
-                    "pkexec",
-                    "--skipreview",
-                ],
-                Some(name),
-                title,
-            )]),
-            Helper::Yay(_) => Ok(vec![self.helper_step(
-                "yay",
-                &["-S", "--noconfirm", "--needed", "--sudo", "pkexec"],
-                Some(name),
-                title,
-            )]),
-            Helper::Makepkg => {
-                let rpc = self.record(name)?;
-                self.builtin_steps(&rpc)
-            }
-            Helper::None => Err(no_builder()),
+    /// Fetch a URL's text the way the RPC is fetched: through the scripted
+    /// answer in the tests, through the client otherwise.
+    fn fetch_text(&self, url: &str) -> Result<String> {
+        match &self.rpc_answer {
+            Some(answer) => answer(url),
+            None => self.client.get_text(url),
         }
     }
 
-    /// The built-in path for one package base: repository dependencies
-    /// through the helper (one prompt for all of them), a shallow clone of
-    /// the base, then `makepkg -s -i` in it as the user.
-    pub fn builtin_steps(&self, rpc: &RpcPackage) -> Result<Vec<Step>> {
-        let base = &rpc.package_base;
-        let conf = self.write_makepkg_conf()?;
-        let dir = self.paths.cache.join(base);
+    /// The full record for one name, from `info`: a search record carries
+    /// no dependencies, so a cached one will not do here.
+    fn described(&self, name: &str) -> Result<Option<RpcPackage>> {
+        Ok(self.info(&[name])?.into_iter().find(|p| p.name == name))
+    }
+
+    /// The AUR package that satisfies `dep`: one by that name, else the
+    /// most voted one that provides it.
+    fn aur_provider(&self, dep: &str) -> Result<Option<RpcPackage>> {
+        if let Some(p) = self.described(dep)? {
+            return Ok(Some(p));
+        }
+        let found = match self.rpc(&format!("{RPC}/search/{}?by=provides", urlencode(dep))) {
+            Ok(found) => found,
+            // aurweb answers "no such package" as an empty list, and a term
+            // too common to search for is not a provider either.
+            Err(e) if is_too_many_results(&e) => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        let best = found
+            .into_iter()
+            .filter(|p| p.name == dep || p.provides.iter().any(|v| dep_name(v) == dep))
+            .max_by(|a, b| {
+                a.num_votes
+                    .cmp(&b.num_votes)
+                    .then_with(|| b.name.cmp(&a.name))
+            });
+        match best {
+            Some(p) => self.described(&p.name),
+            None => Ok(None),
+        }
+    }
+
+    /// What building `targets` takes: the repository packages to install
+    /// first, and the AUR package bases to build, dependencies before what
+    /// needs them. A dependency the machine already satisfies, by name or
+    /// by something installed providing it, is left alone; one a configured
+    /// repository carries or provides is installed from there; anything
+    /// else must come from the AUR, by name or by what a package there
+    /// provides. One that no repository and no AUR package provides is a
+    /// sentence before anything runs, rather than makepkg's "Missing
+    /// dependencies" twenty minutes into a build.
+    pub fn resolve(&self, targets: &[&str]) -> Result<Resolution> {
+        let dbs = self.dbs()?;
+        let mut walk = Walk {
+            dbs: &dbs,
+            repo: Vec::new(),
+            order: Vec::new(),
+            visiting: HashSet::new(),
+            planned: HashSet::new(),
+        };
+        for target in targets {
+            let rpc = self.described(target)?.ok_or_else(|| {
+                Error::from_source(
+                    SourceKind::Aur,
+                    format!("{target} is not in the AUR. It may have been deleted or merged into another package."),
+                )
+            })?;
+            self.visit(&mut walk, rpc, false)?;
+        }
+        let mut builds: Vec<Build> = Vec::new();
+        for (rpc, as_dep) in walk.order {
+            match builds.iter_mut().find(|b| b.base == rpc.package_base) {
+                Some(build) => build.names.push((rpc.name, as_dep)),
+                None => builds.push(Build {
+                    base: rpc.package_base,
+                    names: vec![(rpc.name, as_dep)],
+                }),
+            }
+        }
+        Ok(Resolution {
+            repo: walk.repo,
+            builds,
+        })
+    }
+
+    fn visit(&self, walk: &mut Walk<'_>, rpc: RpcPackage, as_dep: bool) -> Result<()> {
+        if walk.planned.contains(&rpc.name) {
+            // Asked for by name after being pulled in as a dependency: the
+            // user wants it, so it is installed as explicit.
+            if !as_dep && let Some(entry) = walk.order.iter_mut().find(|(p, _)| p.name == rpc.name)
+            {
+                entry.1 = false;
+            }
+            return Ok(());
+        }
+        if !walk.visiting.insert(rpc.name.clone()) {
+            // A cycle; makepkg reports it better than a guess here would.
+            return Ok(());
+        }
+        let deps: Vec<String> = rpc
+            .depends
+            .iter()
+            .chain(&rpc.make_depends)
+            .chain(&rpc.check_depends)
+            .map(|d| dep_name(d).to_string())
+            .collect();
+        for dep in deps {
+            if walk.dbs.satisfied.contains(&dep) || walk.planned.contains(&dep) {
+                continue;
+            }
+            if walk.dbs.sync_names.contains(&dep) || walk.dbs.sync_provides.contains(&dep) {
+                if !walk.repo.contains(&dep) {
+                    walk.repo.push(dep);
+                }
+                continue;
+            }
+            match self.aur_provider(&dep)? {
+                Some(provider) => self.visit(walk, provider, true)?,
+                None => {
+                    return Err(Error::from_source(
+                        SourceKind::Aur,
+                        format!(
+                            "{} needs {dep}, which no configured repository and no AUR package provides, so it cannot be built here.",
+                            rpc.name
+                        ),
+                    ));
+                }
+            }
+        }
+        walk.visiting.remove(&rpc.name);
+        walk.planned.insert(rpc.name.clone());
+        walk.planned
+            .extend(rpc.provides.iter().map(|p| dep_name(p).to_string()));
+        walk.order.push((rpc, as_dep));
+        Ok(())
+    }
+
+    /// The PGP keys a package base's sources are signed with, from its
+    /// `.SRCINFO`. Empty when the file cannot be fetched: makepkg then says
+    /// which key is missing, and the failure sentence names it.
+    fn signing_keys(&self, base: &str) -> Vec<String> {
+        match self.fetch_text(&srcinfo_url(base)) {
+            Ok(text) => validpgpkeys(&text),
+            Err(e) => {
+                log::warn!(".SRCINFO for {base} could not be fetched: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// The steps that install or update `targets` and everything they need.
+    ///
+    /// Every step that needs root goes through the helper, and the runner
+    /// keeps one helper for the whole plan, so this costs one password
+    /// however long the builds take. Nothing here calls pkexec, sudo, paru
+    /// or yay: makepkg builds as the user, with no `-s` and no `-i`, which
+    /// are the two flags that would make it elevate on its own.
+    ///
+    /// 1. The system is brought up to date, with base-devel and git if they
+    ///    are missing: Arch supports no partial upgrade, and installing
+    ///    dependencies from databases that are weeks old is one.
+    /// 2. The repository dependencies, as dependencies.
+    /// 3. For each package base, dependencies first: fetch it, import the
+    ///    keys its sources are signed with, build it as the user into a
+    ///    directory of its own, install the packages asked for from there
+    ///    (only those, not every member of a split base, and never the
+    ///    `-debug` package), then remove the build output.
+    pub fn build_steps(&self, targets: &[&str]) -> Result<Vec<Step>> {
+        let plan = self.resolve(targets)?;
+        let dbs = self.dbs()?;
         let mut steps = Vec::new();
-        let deps = self.repo_deps(rpc);
-        if !deps.is_empty() {
+        let tools: Vec<&str> = BUILD_TOOLS
+            .iter()
+            .copied()
+            .filter(|t| !dbs.satisfied.contains(*t))
+            .collect();
+        let mut args = vec![
+            "-Syu".to_string(),
+            "--noconfirm".to_string(),
+            "--needed".to_string(),
+        ];
+        args.extend(tools.iter().map(|t| t.to_string()));
+        steps.push(Self::step(
+            if tools.is_empty() {
+                "Updating the system before building".to_string()
+            } else {
+                format!(
+                    "Updating the system and installing {} before building",
+                    join_and(&tools)
+                )
+            },
+            "pacman",
+            args,
+            None,
+            true,
+            3,
+        ));
+        if !plan.repo.is_empty() {
             let mut args = vec![
                 "-S".to_string(),
-                "--needed".to_string(),
                 "--noconfirm".to_string(),
+                "--needed".to_string(),
                 "--asdeps".to_string(),
             ];
-            args.extend(deps);
+            args.extend(plan.repo.iter().cloned());
             steps.push(Self::step(
-                format!("Installing build dependencies for {base}"),
+                "Installing what the build needs".to_string(),
                 "pacman",
                 args,
                 None,
@@ -791,27 +851,55 @@ impl Aur {
                 3,
             ));
         }
-        // A checkout from an earlier build is pulled rather than cloned
-        // again; its src/ keeps the downloaded sources, which is most of
-        // what a rebuild would fetch. Deleting it here was rejected: a
-        // source describes, it does not touch the disk beyond its own
-        // configuration file.
-        let fetch = if dir.join(".git").is_dir() {
-            Self::step(
+        for build in &plan.builds {
+            steps.extend(self.base_steps(build));
+        }
+        Ok(steps)
+    }
+
+    fn base_steps(&self, build: &Build) -> Vec<Step> {
+        let base = &build.base;
+        let dir = self.paths.cache.join(base);
+        let out = self.paths.cache.join("out").join(base);
+        let mut steps = Vec::new();
+        // A checkout from an earlier build is updated rather than cloned
+        // again; its downloaded sources are most of what a rebuild would
+        // fetch. Reset rather than pulled: makepkg writes a VCS package's
+        // new pkgver back into the tracked PKGBUILD, and `pull --ff-only`
+        // refuses a dirty checkout.
+        if dir.join(".git").is_dir() {
+            let dir = dir.display().to_string();
+            steps.push(Self::step(
                 format!("Fetching {base}"),
                 "git",
                 vec![
                     "-C".to_string(),
-                    dir.display().to_string(),
-                    "pull".to_string(),
-                    "--ff-only".to_string(),
+                    dir.clone(),
+                    "fetch".to_string(),
+                    "--depth".to_string(),
+                    "1".to_string(),
+                    "origin".to_string(),
                 ],
                 None,
                 false,
                 1,
-            )
+            ));
+            steps.push(Self::step(
+                format!("Updating the checkout of {base}"),
+                "git",
+                vec![
+                    "-C".to_string(),
+                    dir,
+                    "reset".to_string(),
+                    "--hard".to_string(),
+                    "FETCH_HEAD".to_string(),
+                ],
+                None,
+                false,
+                1,
+            ));
         } else {
-            Self::step(
+            steps.push(Self::step(
                 format!("Fetching {base}"),
                 "git",
                 vec![
@@ -824,91 +912,157 @@ impl Aur {
                 None,
                 false,
                 1,
-            )
-        };
-        steps.push(fetch);
-        steps.push(Self::step(
+            ));
+        }
+        let keys = self.signing_keys(base);
+        if !keys.is_empty() {
+            // Only the keys the keyring lacks are fetched, so a keyserver
+            // that is down costs nothing once they are there. The keys are
+            // hexadecimal fingerprints (`validpgpkeys` checks that) and are
+            // passed as arguments, never put into the script.
+            let mut args = vec!["-c".to_string(), IMPORT_KEYS.to_string(), "sh".to_string()];
+            args.extend(keys);
+            steps.push(Self::step(
+                format!("Importing the keys {base} is signed with"),
+                "sh",
+                args,
+                None,
+                false,
+                1,
+            ));
+        }
+        let mut make = Self::step(
             format!("Building {base}"),
             "makepkg",
             vec![
-                "--config".to_string(),
-                conf.display().to_string(),
-                "-s".to_string(),
-                "-i".to_string(),
+                "--force".to_string(),
+                "--clean".to_string(),
                 "--noconfirm".to_string(),
-                "--needed".to_string(),
             ],
             Some(dir),
             false,
             8,
-        ));
-        Ok(steps)
-    }
-
-    /// The dependencies a configured repository carries and the machine
-    /// does not yet satisfy. Anything else (a virtual name, a `.so`, an
-    /// AUR dependency) is left for `makepkg -s` to resolve or report.
-    fn repo_deps(&self, rpc: &RpcPackage) -> Vec<String> {
-        let Ok(dbs) = self.dbs() else {
-            return Vec::new();
-        };
-        let mut seen = HashSet::new();
-        rpc.depends
-            .iter()
-            .chain(&rpc.make_depends)
-            .map(|d| dep_name(d))
-            .filter(|n| !dbs.satisfied.contains(*n) && dbs.sync_names.contains(*n))
-            .filter(|n| seen.insert(n.to_string()))
-            .map(str::to_string)
-            .collect()
-    }
-
-    /// `<cache>/aur/makepkg.conf`, rewritten when its text differs. See the
-    /// module documentation for why it exists.
-    fn write_makepkg_conf(&self) -> Result<PathBuf> {
-        let path = self.paths.cache.join("makepkg.conf");
-        std::fs::create_dir_all(&self.paths.cache).map_err(|e| {
-            Error::from_source(
-                SourceKind::Aur,
-                format!("Could not create {}: {e}.", self.paths.cache.display()),
-            )
-        })?;
-        if std::fs::read_to_string(&path).ok().as_deref() != Some(MAKEPKG_CONF) {
-            std::fs::write(&path, MAKEPKG_CONF).map_err(|e| {
-                Error::from_source(
-                    SourceKind::Aur,
-                    format!("Could not write {}: {e}.", path.display()),
-                )
-            })?;
+        );
+        // makepkg reads PKGDEST from the environment before its
+        // configuration, so this wins over a PKGDEST in makepkg.conf.
+        make.command
+            .env
+            .push(("PKGDEST".to_string(), out.display().to_string()));
+        steps.push(make);
+        for as_dep in [false, true] {
+            let names: Vec<&str> = build
+                .names
+                .iter()
+                .filter(|(_, d)| *d == as_dep)
+                .map(|(n, _)| n.as_str())
+                .collect();
+            if names.is_empty() {
+                continue;
+            }
+            let mut args = vec!["-U".to_string(), "--noconfirm".to_string()];
+            if as_dep {
+                args.push("--asdeps".to_string());
+            }
+            args.extend(names.iter().map(|n| allow::built_selector(&out, n)));
+            steps.push(Self::step(
+                format!("Installing {}", join_and(&names)),
+                "pacman",
+                args,
+                None,
+                true,
+                2,
+            ));
         }
-        Ok(path)
+        steps.push(Self::step(
+            format!("Removing the build output of {base}"),
+            "rm",
+            vec![
+                "-rf".to_string(),
+                "--".to_string(),
+                out.display().to_string(),
+            ],
+            None,
+            false,
+            1,
+        ));
+        steps
     }
 
     fn update_all_steps(&self) -> Result<Vec<Step>> {
-        let title = "Updating AUR packages".to_string();
-        match self.helper() {
-            Helper::Paru(_) => Ok(vec![self.helper_step(
-                "paru",
-                &["-Sua", "--noconfirm", "--sudo", "pkexec", "--skipreview"],
-                None,
-                title,
-            )]),
-            Helper::Yay(_) => Ok(vec![self.helper_step(
-                "yay",
-                &["-Sua", "--noconfirm", "--sudo", "pkexec"],
-                None,
-                title,
-            )]),
-            Helper::Makepkg => {
-                let mut steps = Vec::new();
-                for update in self.updates()? {
-                    let rpc = self.record(&update.name)?;
-                    steps.extend(self.builtin_steps(&rpc)?);
-                }
-                Ok(steps)
-            }
-            Helper::None => Err(no_builder()),
+        let names: Vec<String> = self.updates()?.into_iter().map(|u| u.package.id).collect();
+        if names.is_empty() {
+            return Ok(Vec::new());
         }
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        self.build_steps(&names)
+    }
+}
+
+/// What [`Aur::resolve`] found: what to install from the repositories, and
+/// what to build, in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resolution {
+    pub repo: Vec<String>,
+    pub builds: Vec<Build>,
+}
+
+/// One package base to build, with the names to install from it and
+/// whether each is installed as a dependency.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Build {
+    pub base: String,
+    pub names: Vec<(String, bool)>,
+}
+
+struct Walk<'a> {
+    dbs: &'a Dbs,
+    repo: Vec<String>,
+    order: Vec<(RpcPackage, bool)>,
+    visiting: HashSet<String>,
+    planned: HashSet<String>,
+}
+
+/// What every build needs and a fresh Arch install may not have.
+const BUILD_TOOLS: [&str; 2] = ["base-devel", "git"];
+
+/// Fetches whichever of the keys in `$@` the user's keyring lacks.
+const IMPORT_KEYS: &str = "missing=''; for k in \"$@\"; do gpg --batch --list-keys \"$k\" >/dev/null 2>&1 || missing=\"$missing $k\"; done; [ -z \"$missing\" ] || gpg --batch --recv-keys $missing";
+
+/// The `validpgpkeys` of a `.SRCINFO`, kept only when they are the
+/// hexadecimal fingerprints makepkg requires.
+pub fn validpgpkeys(srcinfo: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in srcinfo.lines() {
+        let Some((key, value)) = line.trim().split_once('=') else {
+            continue;
+        };
+        if key.trim() != "validpgpkeys" {
+            continue;
+        }
+        let value = value.trim().to_ascii_uppercase();
+        if (16..=40).contains(&value.len())
+            && value.chars().all(|c| c.is_ascii_hexdigit())
+            && !out.contains(&value)
+        {
+            out.push(value);
+        }
+    }
+    out
+}
+
+fn srcinfo_url(base: &str) -> String {
+    format!(
+        "https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h={}",
+        urlencode(base)
+    )
+}
+
+/// "a", "a and b", "a, b and c".
+fn join_and(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
     }
 }
 
@@ -929,16 +1083,16 @@ impl Source for Aur {
         if !self.system.is_arch_like() {
             return unavailable("The AUR needs an Arch-based system.");
         }
-        match self.helper().detail() {
-            Some(detail) => SourceStatus {
-                kind: SourceKind::Aur,
-                available: true,
-                reason: None,
-                detail: Some(detail),
-                searchable: false,
-                setup: None,
-            },
-            None => unavailable(NO_BUILDER),
+        // makepkg comes with pacman, and base-devel and git are installed by
+        // the first build that needs them, so an Arch system can always
+        // build.
+        SourceStatus {
+            kind: SourceKind::Aur,
+            available: true,
+            reason: None,
+            detail: Some("makepkg".to_string()),
+            searchable: false,
+            setup: None,
         }
     }
 
@@ -1049,7 +1203,7 @@ impl Source for Aur {
         match op {
             Op::Install { package } | Op::Update { package } => {
                 let name = self.own(package)?;
-                self.build_steps(name)
+                self.build_steps(&[name])
             }
             Op::Remove { package } => {
                 let name = self.own(package)?;
@@ -1073,34 +1227,17 @@ impl Source for Aur {
     }
 }
 
-/// What `makepkg --config` is pointed at. It replays the chain makepkg
-/// reads on its own (`source_makepkg_config`: the system file, its `.d`,
-/// then the user's override, which makepkg skips once `--config` is given)
-/// and sets `PACMAN_AUTH` last so nothing in that chain can undo it.
-const MAKEPKG_CONF: &str = "\
-# Written by Brokey before every AUR build. Edits here are lost.
-# makepkg reads PACMAN_AUTH from its configuration and not from the
-# environment, so this file reads what makepkg would have read on its own
-# and then makes every pacman call go through pkexec. The build itself
-# stays in the user session.
-source /etc/makepkg.conf
-if [[ -d /etc/makepkg.conf.d ]]; then
-	for c in /etc/makepkg.conf.d/*.conf; do
-		if [[ -r $c ]]; then
-			source \"$c\"
-		fi
-	done
-fi
-if [[ -r \"${XDG_CONFIG_HOME:-$HOME/.config}/pacman/makepkg.conf\" ]]; then
-	source \"${XDG_CONFIG_HOME:-$HOME/.config}/pacman/makepkg.conf\"
-elif [[ -r \"$HOME/.makepkg.conf\" ]]; then
-	source \"$HOME/.makepkg.conf\"
-fi
-PACMAN_AUTH=(pkexec)
-";
+/// What an installed version-control package's page says, since its
+/// version is whatever the last local build produced and the AUR's
+/// `pkgver` is usually older: Brokey cannot tell when upstream has new
+/// commits, so it says so instead of letting "no updates" stand.
+pub const VCS_NOTE: &str = "Brokey cannot tell when this package has new commits upstream, because its version comes from the last build. Rebuild it to get the latest.";
 
-fn no_builder() -> Error {
-    Error::from_source(SourceKind::Aur, NO_BUILDER)
+fn note_vcs(pkg: &mut Package) {
+    if is_vcs(&pkg.name) {
+        pkg.facts
+            .push(("Updates".to_string(), VCS_NOTE.to_string()));
+    }
 }
 
 fn pkgbuild_url(base: &str) -> String {
@@ -1334,43 +1471,9 @@ mod tests {
     }
 
     #[test]
-    fn helper_version_lines_parse() {
-        assert_eq!(
-            parse_version_line("paru v2.1.0 +git - libalpm v16.0.1\n").as_deref(),
-            Some("2.1.0")
-        );
-        assert_eq!(
-            parse_version_line("yay v12.4.2 - libalpm v15.0.0").as_deref(),
-            Some("12.4.2")
-        );
-        assert_eq!(parse_version_line("paru"), None);
-        assert_eq!(parse_version_line("usage: something"), None);
-    }
-
-    #[test]
     fn votes_read_as_english() {
         assert_eq!(votes_label(0), "0 votes");
         assert_eq!(votes_label(1), "1 vote");
         assert_eq!(votes_label(1257), "1257 votes");
-    }
-
-    #[test]
-    fn helper_detail_names_the_program() {
-        assert_eq!(
-            Helper::Paru("2.1.0".into()).detail().as_deref(),
-            Some("paru 2.1.0")
-        );
-        assert_eq!(Helper::Yay(String::new()).detail().as_deref(), Some("yay"));
-        assert_eq!(Helper::Makepkg.detail().as_deref(), Some("makepkg"));
-        assert_eq!(Helper::None.detail(), None);
-    }
-
-    #[test]
-    fn the_makepkg_conf_sets_pkexec_last() {
-        let last = MAKEPKG_CONF.lines().last().unwrap();
-        assert_eq!(last, "PACMAN_AUTH=(pkexec)");
-        assert!(MAKEPKG_CONF.contains("source /etc/makepkg.conf\n"));
-        assert!(MAKEPKG_CONF.contains("/etc/makepkg.conf.d/*.conf"));
-        assert!(MAKEPKG_CONF.contains("pacman/makepkg.conf"));
     }
 }

@@ -1,5 +1,5 @@
 // A believable machine for the page to run against in a plain browser: the
-// development machine itself (CachyOS, pacman, paru, no Flatpak, no snapd),
+// development machine itself (CachyOS, pacman, no Flatpak, no snapd),
 // thirty applications with editions across sources, updates, a plan runner
 // that talks the way the real one does. Icons and screenshots are the real
 // Flathub URLs so screenshots of the page show real pictures. Flatpak and Snap
@@ -82,7 +82,7 @@ const SYSTEM: SystemInfo = {
 
 const SOURCES: SourceStatus[] = [
   { kind: "pacman", available: true, reason: null, detail: "core, extra, multilib, cachyos", searchable: true, setup: null },
-  { kind: "aur", available: true, reason: null, detail: "paru 2.1.0", searchable: true, setup: null },
+  { kind: "aur", available: true, reason: null, detail: "makepkg", searchable: true, setup: null },
   {
     kind: "flatpak",
     available: false,
@@ -907,6 +907,19 @@ function nameOf(ref: PackageRef): string {
   return ref.source === "github" ? (ref.id.split("/").pop() ?? ref.id) : ref.id;
 }
 
+/** What the AUR source plans for one name: the system brought up to date, a build as the user, the install through the helper. */
+function aurBuild(id: string): Step[] {
+  const cmd = (program: string, ...args: string[]) => ({ program, args, env: [] as [string, string][], cwd: null });
+  const out = `/home/me/.cache/brokey/aur/out/${id}`;
+  return [
+    { source: "aur", title: "Updating the system before building", command: cmd("pacman", "-Syu", "--noconfirm", "--needed"), needs_root: true, weight: 3 },
+    { source: "aur", title: `Fetching ${id}`, command: cmd("git", "clone", "--depth", "1", `https://aur.archlinux.org/${id}.git`, `/home/me/.cache/brokey/aur/${id}`), needs_root: false, weight: 1 },
+    { source: "aur", title: `Building ${id}`, command: cmd("makepkg", "--force", "--clean", "--noconfirm"), needs_root: false, weight: 8 },
+    { source: "aur", title: `Installing ${id}`, command: cmd("pacman", "-U", "--noconfirm", `${out}/${id}-*.pkg.tar*`), needs_root: true, weight: 2 },
+    { source: "aur", title: `Removing the build output of ${id}`, command: cmd("rm", "-rf", "--", out), needs_root: false, weight: 1 },
+  ];
+}
+
 function stepsFor(op: Op): Step[] {
   const cmd = (program: string, ...args: string[]) => ({ program, args, env: [] as [string, string][], cwd: null });
   switch (op.op) {
@@ -916,7 +929,7 @@ function stepsFor(op: Op): Step[] {
         case "pacman":
           return [{ source: "pacman", title: `Installing ${name} and updating the system`, command: cmd("pacman", "-Syu", "--noconfirm", "--needed", op.package.id), needs_root: true, weight: 3 }];
         case "aur":
-          return [{ source: "aur", title: `Building ${name} from the AUR`, command: cmd("paru", "-S", "--noconfirm", "--sudo", "pkexec", op.package.id), needs_root: false, weight: 5 }];
+          return aurBuild(op.package.id);
         case "flatpak":
           return [{ source: "flatpak", title: `Installing ${name} from Flathub`, command: cmd("flatpak", "install", "-y", "--noninteractive", "--system", "flathub", op.package.id), needs_root: false, weight: 3 }];
         case "github":
@@ -944,7 +957,7 @@ function stepsFor(op: Op): Step[] {
         ];
       }
       if (op.package.source === "aur") {
-        return [{ source: "aur", title: `Updating ${name}`, command: cmd("paru", "-S", "--noconfirm", "--sudo", "pkexec", op.package.id), needs_root: false, weight: 5 }];
+        return aurBuild(op.package.id);
       }
       if (op.package.source === "flatpak") {
         return [{ source: "flatpak", title: `Updating ${name}`, command: cmd("flatpak", "update", "-y", "--noninteractive", op.package.id), needs_root: false, weight: 3 }];
@@ -956,7 +969,7 @@ function stepsFor(op: Op): Step[] {
         case "pacman":
           return [{ source: "pacman", title: "Updating the system", command: cmd("pacman", "-Syu", "--noconfirm"), needs_root: true, weight: 8 }];
         case "aur":
-          return [{ source: "aur", title: "Updating AUR packages", command: cmd("paru", "-Sua", "--noconfirm", "--sudo", "pkexec"), needs_root: false, weight: 6 }];
+          return aurBuild("bauh");
         case "flatpak":
           return [{ source: "flatpak", title: "Updating Flatpak applications", command: cmd("flatpak", "update", "-y", "--noninteractive"), needs_root: false, weight: 4 }];
         default:
@@ -978,7 +991,7 @@ function stepsFor(op: Op): Step[] {
           ];
         case "snap":
           return [
-            { source: "snap", title: "Building snapd from the AUR", command: cmd("paru", "-S", "--noconfirm", "--needed", "--sudo", "pkexec", "--skipreview", "snapd"), needs_root: false, weight: 5 },
+            ...aurBuild("snapd").map((s) => ({ ...s, source: "snap" as SourceKind })),
             { source: "snap", title: "Starting the snapd service", command: cmd("systemctl", "enable", "--now", "snapd.socket"), needs_root: true, weight: 1 },
             { source: "snap", title: "Linking /snap", command: cmd("ln", "-sfn", "/var/lib/snapd/snap", "/snap"), needs_root: true, weight: 1 },
           ];
@@ -1047,7 +1060,7 @@ export async function plan(ops: Op[]): Promise<PlanPreview> {
       }
     }
   }
-  if (built.steps.some((s) => s.command.program === "paru" && s.title.startsWith("Building"))) {
+  if (built.steps.some((s) => s.command.program === "makepkg")) {
     notices.push("AUR packages are built on this machine as your user. A large build can take several minutes.");
   }
   return { plan: built, notices };
@@ -1139,7 +1152,7 @@ function logLines(step: Step): string[] {
   // A setup step speaks as the program it runs, not as the source it sets up.
   const program = step.command.program;
   const voice: SourceKind | "other" =
-    program === "pacman" ? "pacman" : program === "paru" ? "aur" : program === "flatpak" ? (step.command.args[0] === "remote-add" ? "other" : "flatpak") : "other";
+    program === "pacman" ? "pacman" : program === "makepkg" ? "aur" : program === "flatpak" ? (step.command.args[0] === "remote-add" ? "other" : "flatpak") : "other";
   switch (voice) {
     case "pacman":
       return [
@@ -1207,7 +1220,7 @@ async function run(status: PlanStatus) {
     running.set(id, step);
     emit({ event: "step_started", plan: id, step: i, title: step.title });
     const lines = logLines(step);
-    const known = step.command.program !== "paru";
+    const known = step.command.program !== "makepkg";
     const failing = fails(step);
     const stopAt = failing ? Math.min(lines.length, 4) : lines.length;
     for (let n = 0; n < stopAt; n += 1) {
@@ -1389,7 +1402,6 @@ let settings: Settings = {
   // A searchable source is wanted even before its tool is here: the search lists it and an install sets it up.
   enabled_sources: SOURCES.filter((s) => s.available || s.searchable).map((s) => s.kind),
   show_packages: false,
-  aur_helper: "paru",
   flatpak_scope: "system",
   check_updates_on_start: true,
   self_update_check: true,

@@ -54,6 +54,7 @@ fn heroic_record(kind: AssetKind) -> InstallRecord {
         asset: "Heroic-2.22.1-linux-x86_64.AppImage".to_string(),
         version: "2.22.1".to_string(),
         kind,
+        pkgname: None,
     }
 }
 
@@ -219,6 +220,7 @@ fn plans_per_asset_kind() {
             home,
             native,
             has_curl,
+            has_libfuse2: true,
         })
     };
 
@@ -228,7 +230,8 @@ fn plans_per_asset_kind() {
         true,
     )
     .unwrap();
-    assert_eq!(pacman.len(), 2);
+    // Download, check against the digest GitHub published, install.
+    assert_eq!(pacman.len(), 3);
     assert_eq!(pacman[0].command.program, "curl");
     assert_eq!(
         pacman[0].title,
@@ -249,26 +252,40 @@ fn plans_per_asset_kind() {
             "https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher/releases/download/v2.22.1/Heroic-2.22.1-linux-x64.pacman"
         ]
     );
-    assert_eq!(pacman[1].command.program, "pacman");
-    assert_eq!(pacman[1].command.args, vec!["-U", "--noconfirm", path]);
-    assert!(pacman[1].needs_root);
-    assert_eq!(pacman[1].title, "Installing HeroicGamesLauncher");
+    assert_eq!(pacman[1].command.program, "sh");
+    assert_eq!(pacman[1].title, "Checking Heroic-2.22.1-linux-x64.pacman");
+    assert_eq!(
+        pacman[1].command.args,
+        vec![
+            "-c",
+            github::CHECK_SCRIPT,
+            "sh",
+            "66ed041a93ac2817b744d3d0985194adfa408c8d35f64d9a8967fa5e2a58f2c1",
+            path
+        ]
+    );
+    assert!(!pacman[1].needs_root);
+    assert_eq!(pacman[2].command.program, "pacman");
+    assert_eq!(pacman[2].command.args, vec!["-U", "--noconfirm", path]);
+    assert!(pacman[2].needs_root);
+    assert_eq!(pacman[2].title, "Installing HeroicGamesLauncher");
     assert!(pacman.iter().all(|s| s.source == SourceKind::Github));
 
     let deb = steps_for("Heroic-2.22.1-linux-amd64.deb", Some(AssetKind::Deb), true).unwrap();
-    assert_eq!(deb[1].command.program, "apt-get");
-    assert_eq!(deb[1].command.args[..2], ["install", "-y"]);
-    assert!(deb[1].command.args[2].ends_with("Heroic-2.22.1-linux-amd64.deb"));
-    assert!(deb[1].needs_root);
+    assert_eq!(deb[1].command.program, "sh");
+    assert_eq!(deb[2].command.program, "apt-get");
+    assert_eq!(deb[2].command.args[..2], ["install", "-y"]);
+    assert!(deb[2].command.args[2].ends_with("Heroic-2.22.1-linux-amd64.deb"));
+    assert!(deb[2].needs_root);
     assert_eq!(
-        deb[1].command.env,
+        deb[2].command.env,
         vec![("DEBIAN_FRONTEND".to_string(), "noninteractive".to_string())]
     );
 
     let rpm = steps_for("Heroic-2.22.1-linux-x86_64.rpm", Some(AssetKind::Rpm), true).unwrap();
-    assert_eq!(rpm[1].command.program, "dnf");
-    assert_eq!(rpm[1].command.args[..2], ["install", "-y"]);
-    assert!(rpm[1].needs_root);
+    assert_eq!(rpm[2].command.program, "dnf");
+    assert_eq!(rpm[2].command.args[..2], ["install", "-y"]);
+    assert!(rpm[2].needs_root);
 
     let appimage = steps_for(
         "Heroic-2.22.1-linux-x86_64.AppImage",
@@ -276,16 +293,69 @@ fn plans_per_asset_kind() {
         true,
     )
     .unwrap();
-    assert_eq!(appimage[1].command.program, "install");
+    assert_eq!(appimage.len(), 3, "libfuse 2 is there, so nothing is added");
+    assert_eq!(appimage[2].command.program, "install");
     assert_eq!(
-        appimage[1].command.args,
+        appimage[2].command.args,
         vec![
             "-Dm755",
             "/home/me/.cache/brokey/downloads/Heroic-2.22.1-linux-x86_64.AppImage",
             "/home/me/.local/bin/HeroicGamesLauncher"
         ]
     );
-    assert!(!appimage[1].needs_root);
+    assert!(!appimage[2].needs_root);
+
+    // Without libfuse 2 on an Arch machine, fuse2 is installed first, the
+    // way the pacman source installs a package.
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == "Heroic-2.22.1-linux-x86_64.AppImage")
+        .unwrap();
+    let chosen = github::pick_asset(
+        std::slice::from_ref(asset),
+        Some(Arch::X86_64),
+        Some(AssetKind::Pacman),
+    )
+    .unwrap();
+    let without_fuse = |native: Option<AssetKind>| {
+        github::install_steps(&InstallTarget {
+            name: "HeroicGamesLauncher",
+            chosen: &chosen,
+            downloads,
+            home,
+            native,
+            has_curl: true,
+            has_libfuse2: false,
+        })
+        .unwrap()
+    };
+    let on_arch = without_fuse(Some(AssetKind::Pacman));
+    assert_eq!(on_arch.len(), 4);
+    assert_eq!(on_arch[0].command.program, "pacman");
+    assert_eq!(
+        on_arch[0].command.args,
+        ["-Syu", "--noconfirm", "--needed", "fuse2"]
+    );
+    assert_eq!(
+        on_arch[0].command.env,
+        vec![("LC_ALL".to_string(), "C.UTF-8".to_string())]
+    );
+    assert!(on_arch[0].needs_root);
+    assert_eq!(
+        brokey_core::transaction::allow::check_step(
+            &on_arch[0],
+            &brokey_core::transaction::allow::Allowed::system()
+        ),
+        Ok(()),
+        "the helper allows installing fuse2"
+    );
+    assert_eq!(on_arch[1].command.program, "curl");
+    assert_eq!(on_arch[3].command.program, "install");
+    // Elsewhere the package's name varies by release, so nothing is added.
+    let on_debian = without_fuse(Some(AssetKind::Deb));
+    assert_eq!(on_debian.len(), 3);
+    assert_eq!(on_debian[0].command.program, "curl");
 
     let archive = steps_for(
         "Heroic-2.22.1-linux-x64.tar.xz",
@@ -330,6 +400,7 @@ fn plans_per_asset_kind() {
         name: "heroic.flatpak".to_string(),
         size: 5,
         browser_download_url: "https://example.invalid/heroic.flatpak".to_string(),
+        digest: None,
     };
     let chosen =
         github::pick_asset(&[flatpak], Some(Arch::X86_64), Some(AssetKind::Pacman)).unwrap();
@@ -340,12 +411,16 @@ fn plans_per_asset_kind() {
         home,
         native: Some(AssetKind::Pacman),
         has_curl: true,
+        has_libfuse2: true,
     })
     .unwrap();
+    // No digest, so no check: the download and the install, as before.
+    assert_eq!(steps.len(), 2);
     assert_eq!(steps[1].command.program, "flatpak");
+    // `--reinstall`, or an update of a bundle already installed is refused.
     assert_eq!(
-        steps[1].command.args[..4],
-        ["install", "-y", "--noninteractive", "--user"]
+        steps[1].command.args[..5],
+        ["install", "-y", "--noninteractive", "--user", "--reinstall"]
     );
     assert!(!steps[1].needs_root);
 }
@@ -429,9 +504,10 @@ fn an_install_plan_comes_from_a_remembered_release_and_never_the_network() {
             package: reference.clone(),
         })
         .unwrap();
-    assert_eq!(steps.len(), 2);
+    assert_eq!(steps.len(), 3);
     assert_eq!(steps[0].command.program, "curl");
-    assert_eq!(steps[1].command.program, "pacman");
+    assert_eq!(steps[1].command.program, "sh");
+    assert_eq!(steps[2].command.program, "pacman");
     assert!(
         steps[0].command.args[5].starts_with(dir.path().join("cache/downloads").to_str().unwrap())
     );
@@ -449,7 +525,7 @@ fn an_install_plan_comes_from_a_remembered_release_and_never_the_network() {
             package: reference.clone(),
         })
         .unwrap();
-    assert_eq!(steps[1].command.program, "apt-get");
+    assert_eq!(steps[2].command.program, "apt-get");
 
     let fedora = source(&system("ID=fedora\n"), dir.path());
     fedora.remember_release(HEROIC_ID, release.clone());
@@ -458,7 +534,7 @@ fn an_install_plan_comes_from_a_remembered_release_and_never_the_network() {
             package: reference.clone(),
         })
         .unwrap();
-    assert_eq!(steps[1].command.program, "dnf");
+    assert_eq!(steps[2].command.program, "dnf");
 
     // Update all: a recorded 2.0.0 with 2.22.1 known is one download and install.
     arch.record_install(InstallRecord {
@@ -471,7 +547,7 @@ fn an_install_plan_comes_from_a_remembered_release_and_never_the_network() {
             source: SourceKind::Github,
         })
         .unwrap();
-    assert_eq!(all.len(), 2);
+    assert_eq!(all.len(), 3);
     arch.record_install(heroic_record(AssetKind::Pacman))
         .unwrap();
     assert!(

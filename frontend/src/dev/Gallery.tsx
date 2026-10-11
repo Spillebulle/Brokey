@@ -242,27 +242,6 @@ export function Gallery() {
                   />
                 </div>
               </div>
-              <div className="bk-setting">
-                <div className="bk-setting-text">
-                  <span className="bk-setting-label">AUR helper</span>
-                  <span className="bk-setting-note">paru 2.1.0 was found on this machine.</span>
-                </div>
-                <div className="bk-setting-control">
-                  <Dropdown
-                    name="AUR helper"
-                    alone
-                    form
-                    value={settings?.aur_helper ?? "auto"}
-                    onChange={(v) => void saveSettings({ aur_helper: v })}
-                    options={[
-                      { value: "auto", label: "Whichever is installed" },
-                      { value: "paru", label: "paru" },
-                      { value: "yay", label: "yay" },
-                      { value: "builtin", label: "Built in (makepkg)" },
-                    ]}
-                  />
-                </div>
-              </div>
               <div className="bk-inline bk-wrap">
                 <Checkbox checked={tick} onChange={setTick}>
                   Include hidden packages

@@ -1578,16 +1578,24 @@ fn flatpak_remote_add(args: &[&str]) -> Result<(), String> {
     }
 }
 
-/// `systemctl enable --now snapd.socket`, exactly: setting snapd up is the
+/// The second unit setting snapd up may enable: the one that loads snapd's
+/// AppArmor profiles, which Arch's package ships disabled and a strictly
+/// confined snap cannot start without when AppArmor is on.
+#[cfg(unix)]
+pub const SNAPD_APPARMOR_UNIT: &str = "snapd.apparmor.service";
+
+/// `systemctl enable --now snapd.socket` or `systemctl enable --now
+/// snapd.apparmor.service`, exactly, one unit each: setting snapd up is the
 /// only reason the helper touches a unit.
 #[cfg(unix)]
 fn systemctl(args: &[&str]) -> Result<(), String> {
-    if args == ["enable", "--now", SNAPD_SOCKET_UNIT] {
-        Ok(())
-    } else {
-        Err(format!(
-            "systemctl may only run enable --now {SNAPD_SOCKET_UNIT}."
-        ))
+    match args {
+        ["enable", "--now", unit] if [SNAPD_SOCKET_UNIT, SNAPD_APPARMOR_UNIT].contains(unit) => {
+            Ok(())
+        }
+        _ => Err(format!(
+            "systemctl may only run enable --now {SNAPD_SOCKET_UNIT} or {SNAPD_APPARMOR_UNIT}."
+        )),
     }
 }
 
@@ -1730,6 +1738,43 @@ fn package_file(value: &str, extension: &str, allowed: &Allowed) -> Result<(), S
                 .join(", ")
         ))
     }
+}
+
+/// What a plan writes in place of a package file makepkg has not built
+/// yet: `<dir>/<name>-*.pkg.tar*`. The file's version is only known once
+/// the build has run (a VCS package's comes from its sources), so the AUR
+/// source names the package and the directory, and the runner swaps the
+/// selector for the newest file of exactly that package name in that
+/// directory just before the root stretch that installs it. The helper only
+/// ever sees the real path, and checks it like any other.
+pub const BUILT_MARK: &str = "-*.pkg.tar*";
+
+/// The selector for `name`'s package in `dir`.
+pub fn built_selector(dir: &Path, name: &str) -> String {
+    format!("{}/{name}{BUILT_MARK}", dir.display())
+}
+
+/// The directory and package name a selector stands for.
+pub fn parse_built_selector(arg: &str) -> Option<(&Path, &str)> {
+    let file = arg.strip_suffix(BUILT_MARK)?;
+    let (dir, name) = file.rsplit_once('/')?;
+    (!dir.is_empty() && !name.is_empty()).then(|| (Path::new(dir), name))
+}
+
+/// The package name in a package file's name,
+/// `<name>-<pkgver>-<pkgrel>-<arch>.pkg.tar.<ext>`, which is how a `-debug`
+/// package beside the one asked for is told apart from it. `None` for a
+/// signature or anything else that is not a package.
+pub fn built_package_name(file_name: &str) -> Option<&str> {
+    let (stem, ext) = file_name.split_once(".pkg.tar")?;
+    if ext.ends_with(".sig") {
+        return None;
+    }
+    let mut cut = stem;
+    for _ in 0..3 {
+        cut = &cut[..cut.rfind('-')?];
+    }
+    (!cut.is_empty()).then_some(cut)
 }
 
 #[cfg(unix)]
@@ -1910,6 +1955,7 @@ mod tests {
             ],
         );
         ok("systemctl", &["enable", "--now", "snapd.socket"]);
+        ok("systemctl", &["enable", "--now", "snapd.apparmor.service"]);
         ok("ln", &["-sfn", "/var/lib/snapd/snap", "/snap"]);
         ok("snap", &["wait", "system", "seed.loaded"]);
     }
@@ -2004,6 +2050,11 @@ mod tests {
             vec!["enable", "--now", "snapd.service"],
             vec!["enable", "--now", "sshd.socket"],
             vec!["enable", "--now", "snapd.socket", "sshd.service"],
+            vec!["enable", "--now", "snapd.socket", "snapd.apparmor.service"],
+            vec!["enable", "snapd.apparmor.service"],
+            vec!["disable", "--now", "snapd.apparmor.service"],
+            vec!["enable", "--now", "snapd.apparmor"],
+            vec!["enable", "--now", "apparmor.service"],
             vec!["start", "snapd.socket"],
             vec!["disable", "--now", "snapd.socket"],
             vec!["enable", "--now", "--force", "snapd.socket"],
@@ -2013,7 +2064,9 @@ mod tests {
         ] {
             let err = refused("systemctl", &args);
             assert!(
-                err.ends_with("systemctl may only run enable --now snapd.socket."),
+                err.ends_with(
+                    "systemctl may only run enable --now snapd.socket or snapd.apparmor.service."
+                ),
                 "{err}"
             );
         }

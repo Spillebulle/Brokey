@@ -134,13 +134,16 @@ impl ProgressParser for Pacman {
     }
 }
 
-/// `(n/m) rest` at the start of a line.
+/// `(n/m) rest` at the start of a line. pacman pads `n` to the width of `m`
+/// (`( 1/12)`, `printf`'s `%*zu` in its `callback.c`), so both numbers are
+/// trimmed before they are read; without that a transaction of ten or more
+/// packages drew an empty rail until its tenth.
 fn counted(line: &str) -> Option<(u32, u32, &str)> {
     let inner = line.strip_prefix('(')?;
     let (count, rest) = inner.split_once(") ")?;
     let (done, total) = count.split_once('/')?;
-    let done: u32 = done.parse().ok()?;
-    let total: u32 = total.parse().ok()?;
+    let done: u32 = done.trim().parse().ok()?;
+    let total: u32 = total.trim().parse().ok()?;
     if total == 0 || done > total {
         return None;
     }
@@ -387,6 +390,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_padded_count_is_read() {
+        assert_eq!(
+            counted("( 1/12) installing foo"),
+            Some((1, 12, "installing foo"))
+        );
+        assert_eq!(
+            counted("(  7/100) upgrading bar"),
+            Some((7, 100, "upgrading bar"))
+        );
+        let r = read(&mut Pacman, "( 3/12) upgrading linux-cachyos").unwrap();
+        assert!((r.fraction.unwrap() - 3.0 / 12.0).abs() < 1e-6);
+        assert_eq!(r.message.as_deref(), Some("Upgrading linux-cachyos"));
     }
 
     #[test]

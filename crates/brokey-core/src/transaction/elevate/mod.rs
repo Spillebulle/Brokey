@@ -1,7 +1,7 @@
 //! How an elevated `brokey-helper` is started and spoken to.
 //!
 //! The runner does not care how the privilege was obtained. It needs three
-//! things: somewhere to write one JSON Plan and possibly a cancel line,
+//! things: somewhere to write JSON plans, one per line, and possibly a cancel line,
 //! somewhere to read one JSON Event per line, and an exit code at the end.
 //! Linux gets them from `pkexec`'s standard streams. Windows cannot:
 //! `ShellExecuteEx` is the only call that elevates and it cannot redirect

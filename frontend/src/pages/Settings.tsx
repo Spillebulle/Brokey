@@ -11,7 +11,7 @@ import * as api from "../api";
 import { Button, Dropdown, Figure, Notice, Segmented, Skeleton, Toggle, toast, type DropdownOption } from "../components";
 import { ICON } from "../components/icons";
 import { useShell } from "../shell/store";
-import { SOURCE_KINDS, sourceLabel, type AurHelper, type SelfUpdate, type Settings, type SourceKind, type SourceSetup, type Theme } from "../types";
+import { SOURCE_KINDS, sourceLabel, type SelfUpdate, type Settings, type SourceKind, type SourceSetup, type Theme } from "../types";
 import { useBusy } from "./system/busy";
 import { ThemeCard } from "./system/ThemeCard";
 import "./system/system.css";
@@ -24,7 +24,6 @@ const DEFAULTS: Settings = {
   theme: "system",
   enabled_sources: [...SOURCE_KINDS],
   show_packages: false,
-  aur_helper: "auto",
   flatpak_scope: "system",
   check_updates_on_start: true,
   self_update_check: true,
@@ -36,13 +35,6 @@ const THEMES: { theme: Theme; name: string }[] = [
   { theme: "dark", name: "Dark" },
   { theme: "light", name: "Light" },
   { theme: "system", name: "System" },
-];
-
-const AUR_HELPERS: DropdownOption<AurHelper>[] = [
-  { value: "auto", label: "Automatic" },
-  { value: "paru", label: "paru" },
-  { value: "yay", label: "yay" },
-  { value: "builtin", label: "Built-in makepkg" },
 ];
 
 const INTERVALS = [15, 30, 60, 180];
@@ -285,11 +277,6 @@ export function SettingsPage() {
                 return [<Setting key={kind} label={label} note={status.detail ?? undefined} control={<Toggle label={label} on={on} onChange={(v) => setSource(kind, v)} />} />];
               })
             }
-            <Setting
-              label="AUR helper"
-              note="Automatic uses paru or yay when one is installed, else the built-in makepkg."
-              control={<Dropdown name="AUR helper" alone form options={AUR_HELPERS} value={settings.aur_helper} onChange={(v) => void save({ aur_helper: v })} />}
-            />
             <Setting
               label="Flatpak installation"
               note="System asks for your password; User installs into your home."

@@ -1,7 +1,8 @@
 //! The one part of Brokey that runs as root, or as Administrator. It reads
-//! one JSON plan on the first line of its input, checks every step against
-//! the closed list in `brokey_core::transaction::allow` before running any,
-//! runs them one after another, and writes one JSON `Event` per line back.
+//! JSON plans from its input, one per line, checks every step of each
+//! against the closed list in `brokey_core::transaction::allow` before
+//! running any of it, runs them one after another, and writes one JSON
+//! `Event` per line back. Every plan ends with its own `PlanFinished`.
 //! It has no network code, no search and no idea what a package is; the
 //! runner in `brokey-core` does the thinking, and this binary stays small
 //! enough to read in one sitting, which is the point of it.
@@ -9,16 +10,22 @@
 //! Sub-commands:
 //!
 //! - `run`: as above. Refuses to start unless it is privileged (exit 4), so
-//!   a confused caller cannot use it to run things as the user. After the
-//!   plan line, a line reading `cancel` stops it after the step that is
-//!   running: a privileged child cannot be killed by the user, and killing a
-//!   package manager mid-transaction is the one thing worse than waiting.
+//!   a confused caller cannot use it to run things as the user. A line
+//!   reading `cancel` stops it after the step that is running: a privileged
+//!   child cannot be killed by the user, and killing a package manager
+//!   mid-transaction is the one thing worse than waiting. The runner keeps
+//!   one helper for a whole plan and writes it a sub-plan for each stretch
+//!   of root steps, with the user's own steps (an AUR build, a download) run
+//!   in between, so the plan costs one password however long those take.
+//!   The helper waits for the next sub-plan until its input closes, and
+//!   stops at the first one that fails or is cancelled.
 //! - `check`: validates the plan on stdin and prints `ok`. Works as anyone;
 //!   this is the runner's dry run and the tests' way in.
 //! - `--version`.
 //!
-//! Exit codes: 0 finished, 1 a step failed or the run was cancelled, 2 the
-//! plan could not be read, 3 the plan was refused, 4 not privileged.
+//! Exit codes: 0 every plan finished, 1 a step failed or the run was
+//! cancelled, 2 a plan could not be read or none arrived, 3 a plan was
+//! refused, 4 not privileged.
 //!
 //! One body for both platforms, with three things that genuinely differ.
 //!
@@ -254,29 +261,83 @@ fn every_step_needs_root(plan: &Plan) -> Result<(), String> {
     ))
 }
 
-/// `run_with` once the caller is known to be privileged: read the plan,
-/// refuse it if the closed list or [`every_step_needs_root`] says so, then
-/// run its steps in order. Separate from the privilege check so that a test
-/// can drive the refusal paths, which a test could not otherwise do without
-/// being elevated.
-fn serve(mut reader: impl BufRead + Send + 'static, mut writer: impl Write) -> i32 {
-    let mut first = String::new();
-    if let Err(e) = reader.read_line(&mut first) {
+/// `run_with` once the caller is known to be privileged: read plans until
+/// the input closes, refusing each one the closed list or
+/// [`every_step_needs_root`] says no to, and running the steps of the rest
+/// in order. Separate from the privilege check so that a test can drive the
+/// refusal paths, which a test could not otherwise do without being
+/// elevated.
+///
+/// The input is read on a thread of its own so a `cancel` line is seen
+/// while a step is running, not only between plans.
+fn serve(reader: impl BufRead + Send + 'static, mut writer: impl Write) -> i32 {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel::<std::io::Result<String>>();
+    {
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            for line in reader.lines() {
+                match line {
+                    Ok(line) if line.trim() == "cancel" => cancel.store(true, Ordering::SeqCst),
+                    Ok(line) if line.trim().is_empty() => {}
+                    Ok(line) => {
+                        if tx.send(Ok(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
+                }
+            }
+        });
+    }
+    let mut served = 0usize;
+    for line in rx {
+        let line = match line {
+            Ok(line) => line,
+            Err(e) => {
+                emit(
+                    &mut writer,
+                    &Event::PlanFinished {
+                        plan: String::new(),
+                        ok: false,
+                        message: format!("The helper could not read the plan: {e}."),
+                    },
+                );
+                return EXIT_BAD_INPUT;
+            }
+        };
+        let code = serve_plan(&line, &cancel, &mut writer);
+        if code != EXIT_OK {
+            return code;
+        }
+        served += 1;
+    }
+    if served == 0 {
         emit(
             &mut writer,
             &Event::PlanFinished {
                 plan: String::new(),
                 ok: false,
-                message: format!("The helper could not read the plan: {e}."),
+                message: "The helper could not read the plan: nothing arrived.".to_string(),
             },
         );
         return EXIT_BAD_INPUT;
     }
-    let plan: Plan = match serde_json::from_str(&first) {
+    EXIT_OK
+}
+
+/// One plan line: parse it, refuse it or run it, and end with its
+/// `PlanFinished`. The exit code the helper would stop with, `EXIT_OK` to
+/// wait for the next plan.
+fn serve_plan(line: &str, cancel: &AtomicBool, writer: &mut impl Write) -> i32 {
+    let plan: Plan = match serde_json::from_str(line) {
         Ok(plan) => plan,
         Err(e) => {
             emit(
-                &mut writer,
+                writer,
                 &Event::PlanFinished {
                     plan: String::new(),
                     ok: false,
@@ -288,7 +349,7 @@ fn serve(mut reader: impl BufRead + Send + 'static, mut writer: impl Write) -> i
     };
     if let Err(message) = every_step_needs_root(&plan) {
         emit(
-            &mut writer,
+            writer,
             &Event::PlanFinished {
                 plan: plan.id.clone(),
                 ok: false,
@@ -299,7 +360,7 @@ fn serve(mut reader: impl BufRead + Send + 'static, mut writer: impl Write) -> i
     }
     if let Err(message) = allow::validate_with(&plan, &allowed()) {
         emit(
-            &mut writer,
+            writer,
             &Event::PlanFinished {
                 plan: plan.id.clone(),
                 ok: false,
@@ -308,21 +369,10 @@ fn serve(mut reader: impl BufRead + Send + 'static, mut writer: impl Write) -> i
         );
         return EXIT_REFUSED;
     }
-    let cancel = Arc::new(AtomicBool::new(false));
-    {
-        let cancel = cancel.clone();
-        std::thread::spawn(move || {
-            for line in reader.lines().map_while(Result::ok) {
-                if line.trim() == "cancel" {
-                    cancel.store(true, Ordering::SeqCst);
-                }
-            }
-        });
-    }
     for (index, step) in plan.steps.iter().enumerate() {
         if cancel.load(Ordering::SeqCst) {
             emit(
-                &mut writer,
+                writer,
                 &Event::PlanFinished {
                     plan: plan.id.clone(),
                     ok: false,
@@ -332,17 +382,17 @@ fn serve(mut reader: impl BufRead + Send + 'static, mut writer: impl Write) -> i
             return EXIT_STEP_FAILED;
         }
         emit(
-            &mut writer,
+            writer,
             &Event::StepStarted {
                 plan: plan.id.clone(),
                 step: index,
                 title: step.title.clone(),
             },
         );
-        let outcome = run_step(&plan.id, index, step, &mut writer);
+        let outcome = run_step(&plan.id, index, step, writer);
         match outcome {
             Ok(()) => emit(
-                &mut writer,
+                writer,
                 &Event::StepFinished {
                     plan: plan.id.clone(),
                     step: index,
@@ -352,7 +402,7 @@ fn serve(mut reader: impl BufRead + Send + 'static, mut writer: impl Write) -> i
             ),
             Err(message) => {
                 emit(
-                    &mut writer,
+                    writer,
                     &Event::StepFinished {
                         plan: plan.id.clone(),
                         step: index,
@@ -361,7 +411,7 @@ fn serve(mut reader: impl BufRead + Send + 'static, mut writer: impl Write) -> i
                     },
                 );
                 emit(
-                    &mut writer,
+                    writer,
                     &Event::PlanFinished {
                         plan: plan.id.clone(),
                         ok: false,
@@ -373,7 +423,7 @@ fn serve(mut reader: impl BufRead + Send + 'static, mut writer: impl Write) -> i
         }
     }
     emit(
-        &mut writer,
+        writer,
         &Event::PlanFinished {
             plan: plan.id.clone(),
             ok: true,
@@ -834,6 +884,34 @@ mod tests {
             events.contains(PRIVILEGE),
             "the refusal names the privilege: {events}"
         );
+    }
+
+    /// Nothing on the input is a plan that could not be read, not a
+    /// success: a runner that closed the pipe before writing has a bug, and
+    /// the exit code is how it finds out.
+    #[test]
+    fn no_plan_at_all_is_bad_input() {
+        let mut out = Vec::new();
+        assert_eq!(serve(std::io::Cursor::new(""), &mut out), EXIT_BAD_INPUT);
+        let events = String::from_utf8(out).expect("events are UTF-8");
+        assert!(events.contains("nothing arrived"), "{events}");
+    }
+
+    /// The helper stops at the first plan it refuses, and never reads the
+    /// one after it: a runner that sent a second plan after a refusal has
+    /// already been told the first failed.
+    #[test]
+    fn the_first_refused_plan_ends_the_session() {
+        let one = serde_json::to_string(&refusable_plan()).expect("a plan is JSON");
+        let mut second = refusable_plan();
+        second.id = "second".to_string();
+        let two = serde_json::to_string(&second).expect("a plan is JSON");
+        let mut out = Vec::new();
+        let code = serve(std::io::Cursor::new(format!("{one}\n{two}\n")), &mut out);
+        assert_eq!(code, EXIT_REFUSED);
+        let events = String::from_utf8(out).expect("events are UTF-8");
+        assert_eq!(events.matches("plan_finished").count(), 1, "{events}");
+        assert!(!events.contains("\"second\""), "{events}");
     }
 
     /// The sentence itself, so the copy rules are checked on it rather than

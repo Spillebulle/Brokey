@@ -17,6 +17,7 @@ reqwest = { workspace = true }
 quick-xml = { workspace = true }
 flate2 = { workspace = true }
 ruzstd = { workspace = true }
+lzma-rs = { workspace = true }
 tar = { workspace = true }
 directories = { workspace = true }
 regex = { workspace = true }

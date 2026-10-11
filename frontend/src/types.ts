@@ -345,8 +345,6 @@ export interface PlanStatus {
 
 export type Theme = "dark" | "light" | "system";
 
-export type AurHelper = "auto" | "paru" | "yay" | "builtin";
-
 export type FlatpakScope = "system" | "user";
 
 export interface Settings {
@@ -354,7 +352,6 @@ export interface Settings {
   enabled_sources: SourceKind[];
   /** Show plain packages (libraries, tools) in search results, not only applications. */
   show_packages: boolean;
-  aur_helper: AurHelper;
   flatpak_scope: FlatpakScope;
   check_updates_on_start: boolean;
   self_update_check: boolean;

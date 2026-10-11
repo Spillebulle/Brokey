@@ -553,8 +553,10 @@ pub mod logic {
         let id = plan.id.clone();
         state.add_plan(plan.clone());
         // The runner is made here, before the thread, so its cancel token
-        // is on record by the time the id reaches the page.
-        let runner = Runner::new();
+        // is on record by the time the id reaches the page. Every runner
+        // shares one queue: two plans that both reach pacman would fight
+        // over its lock, so the second waits for the first and says so.
+        let runner = Runner::new().with_queue(plan_queue());
         state.set_cancel_token(&id, runner.cancel_token());
         let emit: Arc<dyn Fn(&Event) + Send + Sync> = Arc::new(emit);
         let worker_state = state.clone();
@@ -576,6 +578,13 @@ pub mod logic {
             emit(&event);
         }
         id
+    }
+
+    /// The one queue every plan in this process waits in.
+    fn plan_queue() -> std::sync::Arc<std::sync::Mutex<()>> {
+        static QUEUE: std::sync::OnceLock<std::sync::Arc<std::sync::Mutex<()>>> =
+            std::sync::OnceLock::new();
+        QUEUE.get_or_init(Default::default).clone()
     }
 
     /// What happens to every event a plan produces: recorded on the plan,

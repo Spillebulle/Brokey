@@ -67,38 +67,6 @@ impl Theme {
 
 /// Which program builds AUR packages. `Auto` takes paru, then yay, then the
 /// built-in makepkg path, whichever is first present.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AurHelper {
-    #[default]
-    Auto,
-    Paru,
-    Yay,
-    Builtin,
-}
-
-impl AurHelper {
-    pub const ALL: [AurHelper; 4] = [
-        AurHelper::Auto,
-        AurHelper::Paru,
-        AurHelper::Yay,
-        AurHelper::Builtin,
-    ];
-
-    pub const fn id(self) -> &'static str {
-        match self {
-            AurHelper::Auto => "auto",
-            AurHelper::Paru => "paru",
-            AurHelper::Yay => "yay",
-            AurHelper::Builtin => "builtin",
-        }
-    }
-
-    pub fn parse(id: &str) -> Option<AurHelper> {
-        AurHelper::ALL.into_iter().find(|h| h.id() == id)
-    }
-}
-
 /// Whether Flatpak installs go to the system installation (through the
 /// helper) or to the user's own (no password).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,10 +97,6 @@ impl Settings {
     pub fn preferences(&self) -> brokey_core::Preferences {
         brokey_core::Preferences {
             flatpak_user: self.flatpak_scope == FlatpakScope::User,
-            aur_helper: match self.aur_helper {
-                AurHelper::Auto => None,
-                other => Some(other.id().to_string()),
-            },
         }
     }
 }
@@ -149,7 +113,6 @@ pub struct Settings {
     /// Whether search shows plain packages beside applications. The page
     /// applies it; this only stores it.
     pub show_packages: bool,
-    pub aur_helper: AurHelper,
     pub flatpak_scope: FlatpakScope,
     pub check_updates_on_start: bool,
     /// Whether Brokey may ask GitHub about its own new versions without
@@ -173,7 +136,6 @@ impl Default for Settings {
             theme: Theme::System,
             enabled_sources: SourceKind::ALL.to_vec(),
             show_packages: false,
-            aur_helper: AurHelper::Auto,
             flatpak_scope: FlatpakScope::System,
             check_updates_on_start: true,
             self_update_check: true,
@@ -259,11 +221,10 @@ pub fn parse(text: &str) -> Settings {
                 }
             }
             "show_packages" => settings.show_packages = flag(value, settings.show_packages),
-            "aur_helper" => {
-                if let Some(h) = AurHelper::parse(&value.to_ascii_lowercase()) {
-                    settings.aur_helper = h;
-                }
-            }
+            // Retired in 0.1.6: Brokey builds AUR packages itself, so a
+            // choice of paru or yay no longer means anything. Read and
+            // dropped, rather than kept as an unknown line for ever.
+            "aur_helper" => {}
             "flatpak_scope" => {
                 if let Some(s) = FlatpakScope::parse(&value.to_ascii_lowercase()) {
                     settings.flatpak_scope = s;
@@ -351,7 +312,6 @@ pub fn render(settings: &Settings) -> String {
     let sources: Vec<&str> = settings.enabled_sources.iter().map(|k| k.id()).collect();
     out.push_str(&format!("enabled_sources = {}\n", sources.join(",")));
     out.push_str(&format!("show_packages = {}\n", settings.show_packages));
-    out.push_str(&format!("aur_helper = {}\n", settings.aur_helper.id()));
     out.push_str(&format!(
         "flatpak_scope = {}\n",
         settings.flatpak_scope.id()
@@ -393,7 +353,6 @@ mod tests {
         assert_eq!(s.theme, Theme::System);
         assert_eq!(s.enabled_sources, SourceKind::ALL.to_vec());
         assert!(!s.show_packages);
-        assert_eq!(s.aur_helper, AurHelper::Auto);
         assert_eq!(s.flatpak_scope, FlatpakScope::System);
         assert!(s.check_updates_on_start);
         assert!(s.self_update_check);
@@ -407,7 +366,6 @@ mod tests {
             theme: Theme::Light,
             enabled_sources: vec![SourceKind::Pacman, SourceKind::Aur, SourceKind::Github],
             show_packages: true,
-            aur_helper: AurHelper::Paru,
             flatpak_scope: FlatpakScope::User,
             check_updates_on_start: false,
             self_update_check: false,
@@ -433,11 +391,8 @@ mod tests {
 
     #[test]
     fn a_bad_value_leaves_the_default() {
-        let s = parse(
-            "theme = purple\naur_helper = pacaur\nflatpak_scope = everywhere\nshow_packages = maybe\n",
-        );
+        let s = parse("theme = purple\nflatpak_scope = everywhere\nshow_packages = maybe\n");
         assert_eq!(s.theme, Theme::System);
-        assert_eq!(s.aur_helper, AurHelper::Auto);
         assert_eq!(s.flatpak_scope, FlatpakScope::System);
         assert!(!s.show_packages);
         assert!(
@@ -514,7 +469,6 @@ mod tests {
             "theme",
             "enabled_sources",
             "show_packages",
-            "aur_helper",
             "flatpak_scope",
             "check_updates_on_start",
             "self_update_check",
@@ -567,15 +521,16 @@ mod tests {
         let mut s = Settings::default();
         assert_eq!(s.preferences(), brokey_core::Preferences::default());
         s.flatpak_scope = FlatpakScope::User;
-        s.aur_helper = AurHelper::Yay;
-        let p = s.preferences();
-        assert!(p.flatpak_user);
-        assert_eq!(p.aur_helper.as_deref(), Some("yay"));
-        s.aur_helper = AurHelper::Auto;
-        assert_eq!(
-            s.preferences().aur_helper,
-            None,
-            "automatic stays a lazy look on PATH"
-        );
+        assert!(s.preferences().flatpak_user);
+    }
+
+    /// paru and yay are no longer used, so a file from 0.1.5 that chose one
+    /// reads without complaint and the line is gone on the next save.
+    #[test]
+    fn the_retired_aur_helper_line_is_dropped() {
+        let s = parse("aur_helper = paru\nshow_packages = true\n");
+        assert!(s.show_packages);
+        assert!(s.unknown.is_empty());
+        assert!(!render(&s).contains("aur_helper"));
     }
 }

@@ -1,9 +1,27 @@
 //! Executes a plan. Root steps go to `brokey-helper`, however `elevate`
-//! starts it on this platform, one helper run per maximal stretch of
-//! consecutive root steps; session steps run here as the user. Every line
+//! starts it on this platform; session steps run here as the user. Every line
 //! either child prints becomes an `Event::Log`, and is read by the progress
 //! parser for the step's program so the activity panel can say "Installing
-//! foo" with a fraction when the tool stated one.
+//! foo" with a fraction when the tool stated one, and by a
+//! [`Transcript`] so a failure says why and a finished plan says what the
+//! user should know.
+//!
+//! **One helper per plan, and so one password.** The helper is started at
+//! the first root step and kept until the plan ends: each later stretch of
+//! root steps is written to the same helper as another sub-plan, however
+//! long the session steps between them take. An AUR build is the case this
+//! is for: dependencies through the helper, then a build as the user that
+//! can run for an hour, then the install through the helper again. Starting
+//! a second helper after the build would ask again whenever polkit's
+//! `auth_admin_keep` had lapsed in the meantime, which for a long build is
+//! always. A plan with no root step never starts the helper and never asks.
+//!
+//! **One plan at a time.** Two plans that both reach pacman would fight
+//! over its lock, and the second would fail at once. A runner given a
+//! queue ([`Runner::with_queue`]) waits for the plan before it, saying so;
+//! the application gives every runner the same one. And a root stretch that
+//! reaches pacman waits while somebody else's pacman (Pamac, a terminal)
+//! holds `db.lck`, rather than failing with "unable to lock database".
 //!
 //! A new privileged operation is a new entry in `allow.rs` with a test,
 //! never a second call site.
@@ -19,6 +37,7 @@
 use crate::model::*;
 use crate::transaction::CancelToken;
 use crate::transaction::allow::{self, Allowed};
+use crate::transaction::diagnose::{self, Transcript};
 use crate::transaction::elevate;
 use crate::transaction::progress::{self, ProgressParser};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -26,10 +45,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as Process, Stdio};
-use std::sync::mpsc;
-use std::time::Duration;
-#[cfg(unix)]
-use std::time::Instant;
+use std::sync::{Arc, Mutex, TryLockError, mpsc};
+use std::time::{Duration, Instant};
 
 /// Receives events as a plan runs.
 pub trait Sink: Send {
@@ -58,8 +75,13 @@ pub const NOT_AUTHORISED: &str = "You are not authorised to install packages on 
 /// nobody was asked, so nothing was refused. Seen on Pop!_OS, where pkexec
 /// falls back to its own textual agent and then cannot open `/dev/tty`
 /// because a window has none.
+///
+/// On a window manager with no agent installed at all (a bare Sway, i3 or
+/// Hyprland), logging out changes nothing, so the sentence names both.
 pub const NO_AUTH_AGENT: &str = "Nothing on this desktop offered to ask for your password, so the helper was never started. \
-     Log out and back in, which starts the session's authentication agent again.";
+     If your desktop normally asks, log out and back in to start its authentication agent again. \
+     On a window manager such as Sway, i3 or Hyprland, install a polkit authentication agent \
+     (polkit-gnome or hyprpolkitagent, say), start it with your session, and try again.";
 /// And 127 for this, which is further from the sentence above still: the
 /// password was taken and polkit could not say whose session it belonged to.
 pub const NO_POLKIT_SESSION: &str = "This desktop session could not be authenticated, so the helper was never started. The polkit \
@@ -83,6 +105,19 @@ pub const CANCELLING_SESSION: &str =
 /// The word written to the helper's stdin to stop it between steps.
 pub const CANCEL_LINE: &str = "cancel";
 
+/// Shown while a plan waits for the one before it.
+pub const WAITING_FOR_PLAN: &str = "Waiting for the change before this one to finish.";
+
+/// Shown while somebody else's pacman holds its database lock.
+pub const WAITING_FOR_PACMAN: &str =
+    "Waiting for another package manager to finish. pacman's database is in use.";
+
+/// How long a plan waits for somebody else's pacman before giving up and
+/// saying what to do. Long enough for a system upgrade in a terminal; a
+/// lock left by a crash never goes away by itself, so there has to be an
+/// end.
+const PACMAN_LOCK_PATIENCE: Duration = Duration::from_secs(10 * 60);
+
 /// Where a packaged helper lives, in the order they are tried.
 #[cfg(unix)]
 pub const HELPER_PATHS: [&str; 2] = [
@@ -95,6 +130,8 @@ pub struct Runner {
     wrapper: Vec<String>,
     cancel: CancelToken,
     allowed: Allowed,
+    queue: Option<Arc<Mutex<()>>>,
+    pacman_lock: Option<PathBuf>,
 }
 
 impl Default for Runner {
@@ -124,6 +161,8 @@ impl Runner {
             wrapper,
             cancel: CancelToken::new(),
             allowed,
+            queue: None,
+            pacman_lock: pacman_lock_file(),
         }
     }
 
@@ -163,6 +202,21 @@ impl Runner {
         self
     }
 
+    /// Run one plan at a time with every other runner holding the same
+    /// queue: this one waits, saying so, until the plan before it ends.
+    pub fn with_queue(mut self, queue: Arc<Mutex<()>>) -> Runner {
+        self.queue = Some(queue);
+        self
+    }
+
+    /// The file whose presence means pacman is busy, or `None` to never
+    /// wait for it. `Runner::new` reads it from `pacman.conf`'s `DBPath` on
+    /// a machine that has pacman.
+    pub fn with_pacman_lock(mut self, lock: Option<PathBuf>) -> Runner {
+        self.pacman_lock = lock;
+        self
+    }
+
     pub fn helper(&self) -> Option<&Path> {
         self.helper.as_deref()
     }
@@ -181,7 +235,14 @@ impl Runner {
             plan: plan.id.clone(),
             steps: plan.steps.len(),
         });
-        let outcome = self.execute_inner(plan, sink);
+        let queue = self.queue.clone();
+        let outcome = match queue.as_deref() {
+            Some(queue) => match self.wait_for_turn(queue, plan, sink) {
+                Ok(_turn) => self.execute_inner(plan, sink),
+                Err(outcome) => outcome,
+            },
+            None => self.execute_inner(plan, sink),
+        };
         sink.event(Event::PlanFinished {
             plan: plan.id.clone(),
             ok: outcome.ok,
@@ -190,7 +251,114 @@ impl Runner {
         outcome
     }
 
+    /// Take the queue, waiting while another plan holds it. The guard is
+    /// the turn; dropping it lets the next plan go.
+    fn wait_for_turn<'q>(
+        &self,
+        queue: &'q Mutex<()>,
+        plan: &Plan,
+        sink: &mut dyn Sink,
+    ) -> Result<std::sync::MutexGuard<'q, ()>, Outcome> {
+        let mut said = false;
+        loop {
+            match queue.try_lock() {
+                Ok(guard) => return Ok(guard),
+                // A plan that panicked while holding the queue has ended all
+                // the same; the next one may go.
+                Err(TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+                Err(TryLockError::WouldBlock) => {}
+            }
+            if self.cancel.is_cancelled() {
+                return Err(Outcome {
+                    ok: false,
+                    message: CANCELLED.to_string(),
+                });
+            }
+            if !said {
+                said = true;
+                sink.event(Event::Progress {
+                    plan: plan.id.clone(),
+                    step: 0,
+                    fraction: None,
+                    message: Some(WAITING_FOR_PLAN.to_string()),
+                });
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+
+    /// Wait while somebody else's pacman holds its lock, before a root
+    /// stretch that runs pacman. `Err` is the plan's failure: cancelled, or
+    /// the lock outlasted [`PACMAN_LOCK_PATIENCE`].
+    fn wait_for_pacman(
+        &self,
+        plan: &Plan,
+        run: &Run,
+        state: &ProgressState,
+        sink: &mut dyn Sink,
+    ) -> Result<(), String> {
+        let Some(lock) = &self.pacman_lock else {
+            return Ok(());
+        };
+        let uses_pacman = plan.steps[run.first..run.first + run.len]
+            .iter()
+            .any(|s| matches!(s.command.program.as_str(), "pacman" | "chwd"));
+        if !uses_pacman {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let mut said = false;
+        while lock.exists() {
+            if self.cancel.is_cancelled() {
+                return Err(CANCELLED.to_string());
+            }
+            if started.elapsed() > PACMAN_LOCK_PATIENCE {
+                return Err(format!(
+                    "{} did not start. {}",
+                    plan.steps[run.first].title,
+                    diagnose::LOCKED
+                ));
+            }
+            if !said {
+                said = true;
+                emit_progress(
+                    sink,
+                    &plan.id,
+                    run.first,
+                    state,
+                    Some(WAITING_FOR_PACMAN.to_string()),
+                );
+            }
+            std::thread::sleep(POLL * 10);
+        }
+        Ok(())
+    }
+
     fn execute_inner(&self, plan: &Plan, sink: &mut dyn Sink) -> Outcome {
+        let mut session: Option<HelperSession> = None;
+        let mut transcript = Transcript::new();
+        let outcome = self.execute_steps(plan, sink, &mut session, &mut transcript);
+        if let Some(session) = session {
+            session.close();
+        }
+        if !outcome.ok {
+            return outcome;
+        }
+        let mut message = outcome.message;
+        for line in transcript.afterword() {
+            message.push(' ');
+            message.push_str(&line);
+        }
+        Outcome { ok: true, message }
+    }
+
+    fn execute_steps(
+        &self,
+        plan: &Plan,
+        sink: &mut dyn Sink,
+        session: &mut Option<HelperSession>,
+        transcript: &mut Transcript,
+    ) -> Outcome {
         let fail = |message: String| Outcome { ok: false, message };
         if plan.steps.is_empty() {
             return Outcome {
@@ -219,9 +387,16 @@ impl Runner {
             if self.cancel.is_cancelled() {
                 return fail(CANCELLED.to_string());
             }
+            if run.root
+                && let Err(message) = self.wait_for_pacman(plan, run, &state, sink)
+            {
+                return fail(message);
+            }
             let result = match &helper {
-                Some(helper) if run.root => self.run_helper(plan, run, helper, &mut state, sink),
-                _ => self.run_session(plan, run.first, &mut state, sink),
+                Some(helper) if run.root => {
+                    self.run_helper(plan, run, helper, &mut state, sink, session, transcript)
+                }
+                _ => self.run_session(plan, run.first, &mut state, sink, transcript),
             };
             if let Err(message) = result {
                 return fail(message);
@@ -241,10 +416,12 @@ impl Runner {
         index: usize,
         state: &mut ProgressState,
         sink: &mut dyn Sink,
+        transcript: &mut Transcript,
     ) -> Result<(), String> {
         let step = &plan.steps[index];
         let id = plan.id.clone();
         state.start(index);
+        transcript.begin_step();
         sink.event(Event::StepStarted {
             plan: id.clone(),
             step: index,
@@ -289,6 +466,7 @@ impl Runner {
         loop {
             match lines.recv_timeout(POLL) {
                 Ok(line) => {
+                    transcript.line(&line.text);
                     sink.event(Event::Log {
                         plan: id.clone(),
                         step: index,
@@ -329,6 +507,7 @@ impl Runner {
         }
         if status.success() {
             state.finish(index);
+            transcript.step_succeeded(&step.command.program);
             sink.event(Event::StepFinished {
                 plan: id.clone(),
                 step: index,
@@ -339,10 +518,12 @@ impl Runner {
             return Ok(());
         }
         let message = match status.code() {
-            Some(code) => format!(
-                "{} failed with exit code {code}. The log has the details.",
-                step.title
-            ),
+            Some(code) => transcript.failure(&step.title).unwrap_or_else(|| {
+                format!(
+                    "{} failed with exit code {code}. The log has the details.",
+                    step.title
+                )
+            }),
             None => format!("{} was stopped by a signal.", step.title),
         };
         sink.event(Event::StepFinished {
@@ -354,9 +535,13 @@ impl Runner {
         Err(message)
     }
 
-    /// One helper invocation for a stretch of root steps. The helper's own
-    /// events come back on its stdout with step numbers local to the
-    /// sub-plan; they are renumbered to the plan's and forwarded.
+    /// One stretch of root steps, written to the plan's helper as a
+    /// sub-plan. The helper is started here if this is the plan's first
+    /// root stretch, which is the one password prompt the plan costs, and
+    /// kept in `session` for the stretches after it. Its events come back
+    /// with step numbers local to the sub-plan; they are renumbered to the
+    /// plan's and forwarded.
+    #[allow(clippy::too_many_arguments)]
     fn run_helper(
         &self,
         plan: &Plan,
@@ -364,56 +549,37 @@ impl Runner {
         helper: &Path,
         state: &mut ProgressState,
         sink: &mut dyn Sink,
+        session: &mut Option<HelperSession>,
+        transcript: &mut Transcript,
     ) -> Result<(), String> {
         let id = plan.id.clone();
-        let sub = sub_plan(plan, run);
+        let mut sub = sub_plan(plan, run);
+        resolve_built(&mut sub)?;
         let json = serde_json::to_string(&sub)
             .map_err(|e| format!("The plan could not be encoded: {e}."))?;
-        sink.event(Event::AuthRequired { plan: id.clone() });
-        let program = elevation_program(&self.wrapper, helper)?;
-        let mut elevated = elevate::start(helper, &self.wrapper)
-            .map_err(|e| format!("Could not start {program}: {e}."))?;
-        // The plan is written on its own thread. pkexec reads nothing until
-        // the dialog has been answered, so a plan larger than the pipe buffer
-        // would block this loop before the first event arrived if it were
-        // written here. The same thread owns the cancel line, so stdin has
-        // one owner and closes when the thread ends.
-        let (cancel_tx, cancel_rx) = mpsc::channel::<()>();
-        if let Some(mut stdin) = elevated.input.take() {
-            std::thread::spawn(move || {
-                let written = stdin
-                    .write_all(json.as_bytes())
-                    .and_then(|()| stdin.write_all(b"\n"))
-                    .and_then(|()| stdin.flush());
-                if let Err(e) = written {
-                    // The helper exits before reading when it is not root or
-                    // pkexec refused; the exit code says which, so this is
-                    // only logged.
-                    log::debug!("could not write the plan to the helper: {e}");
-                    return;
-                }
-                if cancel_rx.recv().is_ok() {
-                    let _ = stdin
-                        .write_all(CANCEL_LINE.as_bytes())
-                        .and_then(|()| stdin.write_all(b"\n"))
-                        .and_then(|()| stdin.flush());
-                }
-            });
+        if session.is_none() {
+            sink.event(Event::AuthRequired { plan: id.clone() });
+            let program = elevation_program(&self.wrapper, helper)?;
+            let elevated = elevate::start(helper, &self.wrapper)
+                .map_err(|e| format!("Could not start {program}: {e}."))?;
+            *session = Some(HelperSession::new(elevated));
         }
-        let lines = &elevated.lines;
+        let live = session.as_mut().expect("started above");
+        live.send(ToHelper::Plan(json));
         let mut current = run.first;
         let mut parser: Box<dyn ProgressParser> =
             progress::parser_for(&plan.steps[run.first].command.program);
         let mut helper_said: Option<(bool, String)> = None;
-        let mut stderr_text = String::new();
+        let mut diagnosed: Option<String> = None;
         let mut cancel_sent = false;
         loop {
-            match lines.recv_timeout(POLL) {
+            match live.elevated.lines.recv_timeout(POLL) {
                 Ok(line) if line.stderr => {
-                    if stderr_text.len() < 4096 {
-                        stderr_text.push_str(&line.text);
-                        stderr_text.push('\n');
+                    if live.stderr_text.len() < 4096 {
+                        live.stderr_text.push_str(&line.text);
+                        live.stderr_text.push('\n');
                     }
+                    transcript.line(&line.text);
                     sink.event(Event::Log {
                         plan: id.clone(),
                         step: current,
@@ -425,6 +591,7 @@ impl Runner {
                     Ok(Event::StepStarted { step, title, .. }) => {
                         current = run.first + step;
                         state.start(current);
+                        transcript.begin_step();
                         parser = progress::parser_for(
                             plan.steps
                                 .get(current)
@@ -442,6 +609,7 @@ impl Runner {
                         step, line, stderr, ..
                     }) => {
                         let step = run.first + step;
+                        transcript.line(&line);
                         sink.event(Event::Log {
                             plan: id.clone(),
                             step,
@@ -457,8 +625,19 @@ impl Runner {
                         step, ok, message, ..
                     }) => {
                         let step = run.first + step;
+                        let mut message = message;
                         if ok {
                             state.finish(step);
+                            if let Some(s) = plan.steps.get(step) {
+                                transcript.step_succeeded(&s.command.program);
+                            }
+                        } else if let Some(better) = plan
+                            .steps
+                            .get(step)
+                            .and_then(|s| transcript.failure(&s.title))
+                        {
+                            diagnosed = Some(better.clone());
+                            message = Some(better);
                         }
                         sink.event(Event::StepFinished {
                             plan: id.clone(),
@@ -481,7 +660,8 @@ impl Runner {
                         emit_progress(sink, &id, step, state, message);
                     }
                     Ok(Event::PlanFinished { ok, message, .. }) => {
-                        helper_said = Some((ok, message))
+                        helper_said = Some((ok, message));
+                        break;
                     }
                     Ok(Event::PlanStarted { .. } | Event::AuthRequired { .. }) => {}
                     Err(_) => sink.event(Event::Log {
@@ -496,41 +676,142 @@ impl Runner {
             }
             if !cancel_sent && self.cancel.is_cancelled() {
                 cancel_sent = true;
-                let _ = cancel_tx.send(());
+                live.send(ToHelper::Cancel);
                 emit_progress(sink, &id, current, state, Some(CANCELLING_ROOT.to_string()));
             }
         }
-        drop(cancel_tx);
-        let exit = elevated
-            .wait()
-            .map_err(|e| format!("Could not wait for the helper: {e}."))?;
-        match (exit, helper_said) {
-            (Some(0), Some((true, _))) | (Some(0), None) => {
-                // A helper that exited cleanly finished every step, whether
-                // or not each `StepFinished` arrived intact.
+        match helper_said {
+            Some((true, _)) => {
                 for index in run.first..run.first + run.len {
                     state.finish(index);
                 }
                 Ok(())
             }
-            (Some(126), _) => Err(AUTH_CANCELLED.to_string()),
-            (Some(127), _) => Err(pkexec_refusal(&stderr_text)),
-            (_, Some((false, message))) => Err(message),
-            (Some(4), _) => Err(format!(
-                "The helper refused to run because it was not started as root. {}",
-                first_line(&stderr_text)
-            )
-            .trim_end()
-            .to_string()),
-            (Some(code), _) => Err(format!(
-                "The helper stopped with exit code {code}. {}",
-                first_line(&stderr_text)
-            )
-            .trim_end()
-            .to_string()),
-            (None, _) => Err("The helper was stopped by a signal.".to_string()),
+            Some((false, message)) => Err(diagnosed.unwrap_or(message)),
+            // The helper went away without finishing this sub-plan: pkexec
+            // refused or was dismissed, or the helper itself stopped. Its
+            // exit code says which. The session is over either way.
+            None => {
+                let mut ended = session.take().expect("started above");
+                let exit = ended
+                    .wait()
+                    .map_err(|e| format!("Could not wait for the helper: {e}."))?;
+                let stderr_text = std::mem::take(&mut ended.stderr_text);
+                Err(match exit {
+                    Some(126) => AUTH_CANCELLED.to_string(),
+                    Some(127) => pkexec_refusal(&stderr_text),
+                    Some(4) => format!(
+                        "The helper refused to run because it was not started as root. {}",
+                        first_line(&stderr_text)
+                    )
+                    .trim_end()
+                    .to_string(),
+                    Some(code) => format!(
+                        "The helper stopped with exit code {code} before it finished. {}",
+                        first_line(&stderr_text)
+                    )
+                    .trim_end()
+                    .to_string(),
+                    None => "The helper was stopped by a signal.".to_string(),
+                })
+            }
         }
     }
+}
+
+/// What the runner writes to its helper.
+enum ToHelper {
+    /// One sub-plan, as a JSON line.
+    Plan(String),
+    /// [`CANCEL_LINE`].
+    Cancel,
+}
+
+/// A helper started for this plan and still listening. Writing happens on
+/// a thread of its own: pkexec reads nothing until its dialog has been
+/// answered, so a plan larger than the pipe buffer would block the reading
+/// loop before the first event arrived if it were written there. The same
+/// thread owns the helper's input, so the input has one owner and closes,
+/// which the helper reads as "no more plans", when the thread ends.
+struct HelperSession {
+    elevated: elevate::Elevated,
+    to_helper: Option<mpsc::Sender<ToHelper>>,
+    writer: Option<std::thread::JoinHandle<()>>,
+    stderr_text: String,
+}
+
+impl HelperSession {
+    fn new(mut elevated: elevate::Elevated) -> HelperSession {
+        let (tx, rx) = mpsc::channel::<ToHelper>();
+        let writer = elevated.input.take().map(|mut input| {
+            std::thread::spawn(move || {
+                for message in rx {
+                    let text = match message {
+                        ToHelper::Plan(json) => json,
+                        ToHelper::Cancel => CANCEL_LINE.to_string(),
+                    };
+                    let written = input
+                        .write_all(text.as_bytes())
+                        .and_then(|()| input.write_all(b"\n"))
+                        .and_then(|()| input.flush());
+                    if let Err(e) = written {
+                        // The helper exits before reading when it is not
+                        // root or pkexec refused; the exit code says which,
+                        // so this is only logged.
+                        log::debug!("could not write to the helper: {e}");
+                        return;
+                    }
+                }
+            })
+        });
+        HelperSession {
+            elevated,
+            to_helper: Some(tx),
+            writer,
+            stderr_text: String::new(),
+        }
+    }
+
+    fn send(&self, message: ToHelper) {
+        if let Some(tx) = &self.to_helper {
+            let _ = tx.send(message);
+        }
+    }
+
+    /// Close the helper's input and wait for it to exit.
+    fn wait(&mut self) -> std::io::Result<Option<i32>> {
+        self.to_helper = None;
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+        // Drain what is left so the helper never blocks on a full pipe
+        // while it finishes.
+        while self.elevated.lines.recv().is_ok() {}
+        self.elevated.wait()
+    }
+
+    /// The plan is over: tell the helper there is nothing more, and reap it.
+    fn close(mut self) {
+        if let Err(e) = self.wait() {
+            log::debug!("could not wait for the helper: {e}");
+        }
+    }
+}
+
+/// `db.lck` in the `DBPath` this machine's `pacman.conf` names, when this
+/// machine has pacman at all.
+#[cfg(unix)]
+fn pacman_lock_file() -> Option<PathBuf> {
+    let conf = std::fs::read_to_string("/etc/pacman.conf").ok()?;
+    let db = crate::sources::linux::pacman::options(&conf)
+        .db_path
+        .unwrap_or_else(|| PathBuf::from("/var/lib/pacman/"));
+    Some(db.join("db.lck"))
+}
+
+#[cfg(not(unix))]
+fn pacman_lock_file() -> Option<PathBuf> {
+    None
 }
 
 const POLL: Duration = Duration::from_millis(50);
@@ -558,6 +839,42 @@ pub fn split_runs(steps: &[Step]) -> Vec<Run> {
         }
     }
     runs
+}
+
+/// Swap every built-package selector ([`allow::BUILT_MARK`]) in a pacman
+/// step for the newest file of exactly that package in that directory.
+/// Done here, as the user and just before the stretch that installs it,
+/// because the file only exists once the build before it has run.
+pub fn resolve_built(plan: &mut Plan) -> Result<(), String> {
+    for step in &mut plan.steps {
+        if step.command.program != "pacman" {
+            continue;
+        }
+        for arg in &mut step.command.args {
+            let Some((dir, name)) = allow::parse_built_selector(arg) else {
+                continue;
+            };
+            let newest = std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| {
+                    e.file_name().to_str().and_then(allow::built_package_name) == Some(name)
+                })
+                .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+            match newest {
+                Some(entry) => *arg = entry.path().display().to_string(),
+                None => {
+                    return Err(format!(
+                        "{} could not start, because the build left no package named {name} in {}.                          The package's PKGBUILD may name it differently; the log of the build                          above shows what it made.",
+                        step.title,
+                        dir.display()
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn sub_plan(plan: &Plan, run: &Run) -> Plan {
@@ -1142,6 +1459,90 @@ mod tests {
     }
 
     #[test]
+    fn a_built_package_is_named_by_its_file_and_debug_packages_are_not_it() {
+        assert_eq!(
+            allow::built_package_name("foo-1.0-1-x86_64.pkg.tar.zst"),
+            Some("foo")
+        );
+        assert_eq!(
+            allow::built_package_name("foo-git-r12.abc123-1-x86_64.pkg.tar.zst"),
+            Some("foo-git")
+        );
+        assert_eq!(
+            allow::built_package_name("foo-debug-1.0-1-x86_64.pkg.tar.zst"),
+            Some("foo-debug")
+        );
+        assert_eq!(
+            allow::built_package_name("foo-1:2.0-3-any.pkg.tar.xz"),
+            Some("foo")
+        );
+        assert_eq!(
+            allow::built_package_name("foo-1.0-1-x86_64.pkg.tar.zst.sig"),
+            None
+        );
+        assert_eq!(allow::built_package_name("notes.txt"), None);
+        assert_eq!(allow::built_package_name("x-1.pkg.tar.zst"), None);
+        let selector =
+            allow::built_selector(Path::new("/home/me/.cache/brokey/aur/out/foo"), "foo");
+        assert_eq!(
+            selector,
+            "/home/me/.cache/brokey/aur/out/foo/foo-*.pkg.tar*"
+        );
+        assert_eq!(
+            allow::parse_built_selector(&selector),
+            Some((Path::new("/home/me/.cache/brokey/aur/out/foo"), "foo"))
+        );
+        assert_eq!(
+            allow::parse_built_selector("/var/cache/pacman/pkg/foo-1-1-any.pkg.tar.zst"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_selector_becomes_the_newest_file_of_exactly_that_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str| std::fs::write(dir.path().join(name), b"x").unwrap();
+        write("foo-1.0-1-x86_64.pkg.tar.zst");
+        write("foo-1.0-1-x86_64.pkg.tar.zst.sig");
+        write("foo-debug-1.0-1-x86_64.pkg.tar.zst");
+        write("foobar-1.0-1-x86_64.pkg.tar.zst");
+        let mut install = step(true, 1);
+        install.command.program = "pacman".to_string();
+        install.command.args = vec![
+            "-U".to_string(),
+            "--noconfirm".to_string(),
+            allow::built_selector(dir.path(), "foo"),
+        ];
+        let mut plan = Plan {
+            id: "p".to_string(),
+            ops: Vec::new(),
+            steps: vec![install.clone()],
+        };
+        resolve_built(&mut plan).unwrap();
+        assert_eq!(
+            plan.steps[0].command.args[2],
+            dir.path()
+                .join("foo-1.0-1-x86_64.pkg.tar.zst")
+                .display()
+                .to_string()
+        );
+
+        install.command.args[2] = allow::built_selector(dir.path(), "missing");
+        install.title = "Installing missing".to_string();
+        let mut plan = Plan {
+            id: "p".to_string(),
+            ops: Vec::new(),
+            steps: vec![install],
+        };
+        let e = resolve_built(&mut plan).unwrap_err();
+        assert!(
+            e.starts_with("Installing missing could not start, because the build left no package named missing"),
+            "{e}"
+        );
+        assert!(e.ends_with('.'));
+    }
+
+    #[test]
     fn the_sentences_follow_the_copy_rules() {
         for s in [
             HELPER_MISSING,
@@ -1152,6 +1553,8 @@ mod tests {
             CANCELLED,
             CANCELLING_ROOT,
             CANCELLING_SESSION,
+            WAITING_FOR_PLAN,
+            WAITING_FOR_PACMAN,
         ] {
             assert!(s.ends_with('.'), "{s}");
             assert!(!s.contains('\u{2014}'), "{s}");

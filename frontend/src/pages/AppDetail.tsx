@@ -1,4 +1,4 @@
-import { Check, ChevronLeft, ChevronRight, Download, ExternalLink, Package, Play, Trash } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Download, ExternalLink, Package, Play, RotateCw, Trash } from "lucide-react";
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import { startOps } from "../activity/flow";
 import { openPackage, useLaunch, useLaunchTarget } from "../activity/launch";
@@ -113,7 +113,8 @@ function facts(p: Pkg): Fact[] {
   }
   const taken = new Set(out.map((f) => f.key.toLowerCase()));
   for (const [key, value] of p.facts) {
-    if (key === "PKGBUILD" || taken.has(key.toLowerCase())) continue;
+    // The PKGBUILD has its own block, and Updates is drawn beside Rebuild.
+    if (key === "PKGBUILD" || key === "Updates" || taken.has(key.toLowerCase())) continue;
     out.push({ key, value, mono: looksNumeric(value) });
   }
   return out;
@@ -178,6 +179,9 @@ function Detail({ app }: { app: App }) {
   const backdrop = shots[0] ?? null;
   const description = pkg.description ?? editions.find((e) => e.package.description)?.package.description ?? null;
   const pkgbuild = pkg.facts.find(([k]) => k === "PKGBUILD")?.[1] ?? null;
+  // An installed version-control package (foo-git) whose version only
+  // changes when it is built: the source says so, and Rebuild is the update.
+  const rebuildNote = pkg.installed ? (pkg.facts.find(([k]) => k === "Updates")?.[1] ?? null) : null;
   const homepage = pkg.homepage ?? editions.find((e) => e.package.homepage)?.package.homepage ?? null;
   const busyOp = busy.get(editionKey(chosen)) ?? null;
   const setupSentence = setupNote(pkg.source, statuses);
@@ -196,6 +200,9 @@ function Detail({ app }: { app: App }) {
   };
   const remove = () => {
     void startOps([{ op: "remove", package: refOf(chosen) }], `Remove ${app.name}`);
+  };
+  const rebuild = () => {
+    void startOps([{ op: "update", package: refOf(chosen) }], `Rebuild ${app.name}`);
   };
   const split = async () => {
     try {
@@ -281,6 +288,17 @@ function Detail({ app }: { app: App }) {
                     <Badge tone="good" icon={<Check {...ICON_MARK} aria-hidden="true" />} title={pkg.installed_version ? `Version ${pkg.installed_version} is on this machine.` : "This edition is on this machine."}>
                       Installed
                     </Badge>
+                    {rebuildNote ? (
+                      busyOp === "update" ? (
+                        <Button disabled disabledReason="It is being rebuilt. The activity panel shows progress.">
+                          Rebuilding…
+                        </Button>
+                      ) : (
+                        <Button icon={<RotateCw {...ICON} aria-hidden="true" />} onClick={rebuild} title="Builds the latest commits and installs the result.">
+                          Rebuild
+                        </Button>
+                      )
+                    ) : null}
                     {busyOp === "remove" ? (
                       <Button disabled disabledReason="It is being removed. The activity panel shows progress.">
                         Removing…
@@ -306,6 +324,11 @@ function Detail({ app }: { app: App }) {
                   </Button>
                 ) : null}
               </div>
+              {rebuildNote ? (
+                <div className="bk-appdetail-note">
+                  <span className="bk-hero-note">{rebuildNote}</span>
+                </div>
+              ) : null}
               {pkg.installed && launcherNotice ? (
                 <div className="bk-appdetail-note">
                   <span className="bk-hero-note">Your launcher does not list it until you log out and back in once. Open works now.</span>

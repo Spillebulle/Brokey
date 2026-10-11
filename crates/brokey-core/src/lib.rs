@@ -205,8 +205,6 @@ pub struct Preferences {
     /// Flatpak installs, and the Flathub remote a setup adds, go to the
     /// user's own installation rather than the system one.
     pub flatpak_user: bool,
-    /// "paru", "yay" or "builtin"; `None` picks whichever is installed.
-    pub aur_helper: Option<String>,
 }
 
 impl Store {

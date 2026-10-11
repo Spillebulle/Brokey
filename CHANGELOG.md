@@ -2,6 +2,21 @@
 
 Newest first. Each section is the release's notes, published verbatim.
 
+## 0.1.6
+
+- An install asks for your password once, and only when it needs to. Brokey keeps one helper for the whole change, so an AUR build that takes an hour between installing its dependencies and installing the result no longer asks a second or third time.
+- AUR packages are built by Brokey itself rather than by paru or yay, which asked for the password on their own outside Brokey's list of what may run as root. Brokey finds dependencies that are themselves on the AUR and builds them first, imports the keys a package's sources are signed with, installs only the package you asked for from a split package, and installs base-devel and git the first time a build needs them. The AUR helper setting is gone.
+- An AUR build brings the system up to date first, as a repository install always has, instead of installing dependencies from package lists that may be weeks old.
+- A failed install says why: pacman's database is in use, a mirror could not be reached, two packages conflict and which one to remove, a file is already on disk, the keyring is out of date, a package has left the repositories, the disk is full, or a build failed. Before, nearly every failure read "failed with exit code 1".
+- Changes run one at a time. A second install waits for the first, and an install waits while Pamac or a terminal is using pacman, instead of failing at once with "unable to lock database".
+- Before an install from the Arch repositories or the AUR, the confirm step says how many pending system updates come with it, and that a restart follows when the kernel or a graphics driver is among them. After a change, Brokey says when a restart is needed and when an update saved a configuration file as .pacnew beside yours.
+- The progress bar moves from the first package of a large pacman transaction. It used to stay empty until the tenth.
+- A -git package's page says that Brokey cannot tell when it has new commits, and has a Rebuild button that builds the latest.
+- When nothing on the desktop can ask for a password, the message says to install a polkit agent on a window manager such as Sway, i3 or Hyprland, where logging out changes nothing.
+- One unreadable repository database no longer takes every pacman search and update down with it: that repository is left out, and the source says so. Databases compressed with xz are read.
+- Snap on Arch enables snapd's AppArmor service when AppArmor is on, and a classic snap is no longer installed as a strict one when the Snap Store cannot be reached; Brokey says so instead.
+- Installing from GitHub releases checks each download against the checksum GitHub publishes, installs fuse2 when an AppImage needs it, can update a Flatpak bundle in place, and a package installed this way is no longer also listed under the AUR.
+
 ## 0.1.5
 
 - Windows joins the platforms Brokey installs, updates and removes software on, through winget, Add or remove programs, Chocolatey and Scoop. The window never elevates: it builds the plan and a helper runs the privileged steps, costing one prompt per stretch that needs Administrator.

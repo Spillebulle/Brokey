@@ -354,6 +354,11 @@ struct Loaded {
     local: LocalDb,
     entries: Vec<Entry>,
     options: Options,
+    /// The repositories whose database could not be read, with why, in
+    /// `pacman.conf` order. Each is left out and the rest answer: one
+    /// truncated or oddly compressed file used to fail search, the
+    /// installed list and updates for every repository at once.
+    broken: Vec<(String, String)>,
 }
 
 impl Loaded {
@@ -442,6 +447,22 @@ impl Pacman {
                 return Vec::new();
             }
         };
+        if !loaded.broken.is_empty() {
+            // Every installed package from a repository that could not be
+            // read would look foreign, and the AUR source would list the
+            // lot as its own and offer to rebuild them. Nothing is claimed
+            // until the list reads again.
+            log::warn!(
+                "pacman: not listing foreign packages while {} cannot be read",
+                loaded
+                    .broken
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            return Vec::new();
+        }
         let mut out: Vec<ForeignPackage> = loaded
             .local
             .packages
@@ -628,7 +649,7 @@ impl Pacman {
                 .iter()
                 .map(|(name, system, cache)| {
                     scope.spawn(move || {
-                        let system = system.as_ref().map(|p| SyncDb::load(name, p)).transpose()?;
+                        let system = system.as_ref().map(|p| SyncDb::load(name, p)).transpose();
                         let cache = match cache.as_ref().map(|p| (p, SyncDb::load(name, p))) {
                             Some((_, Ok(db))) => Some(db),
                             Some((path, Err(e))) => {
@@ -646,7 +667,7 @@ impl Pacman {
                             }
                             None => None,
                         };
-                        Ok::<_, Error>((system.map(Arc::new), cache.map(Arc::new)))
+                        (system.map(|db| db.map(Arc::new)), cache.map(Arc::new))
                     })
                 })
                 .collect();
@@ -669,13 +690,24 @@ impl Pacman {
         let mut system_dbs = Vec::new();
         let mut fresh_dbs = Vec::new();
         let mut any_fresh = false;
-        for result in results {
-            let (system, cache) = result.map_err(|e| {
-                self.error(format!(
-                    "Could not read a package list ({}). Refresh the package lists to download it again.",
-                    e.message
-                ))
-            })?;
+        let mut broken = Vec::new();
+        for ((name, path, _), (system, cache)) in plan.iter().zip(results) {
+            let system = match system {
+                Ok(db) => db,
+                Err(e) => {
+                    // Left out, not fatal. Its packages are missing from
+                    // search until the list is downloaded again, which
+                    // `status` says; `foreign_packages` refuses to guess
+                    // while it is so.
+                    log::warn!(
+                        "pacman: leaving {name} out, {} could not be read: {}",
+                        path.as_deref().unwrap_or(Path::new("?")).display(),
+                        e.message
+                    );
+                    broken.push((name.clone(), e.message));
+                    None
+                }
+            };
             if cache.is_some() {
                 any_fresh = true;
             }
@@ -708,7 +740,19 @@ impl Pacman {
             local,
             entries,
             options,
+            broken,
         })
+    }
+
+    /// The repositories the last load had to leave out, and why, without
+    /// loading: `status` is asked often and must stay a handful of `stat`s,
+    /// and a load in progress is not waited for. Empty before the first
+    /// load, which every search and listing makes.
+    fn broken_repositories(&self) -> Vec<(String, String)> {
+        match self.dbs.try_lock() {
+            Ok(guard) => guard.as_ref().map(|l| l.broken.clone()).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
     }
 
     fn entries(&self, view: &View) -> Vec<Entry> {
@@ -894,16 +938,27 @@ impl Source for Pacman {
             };
         }
         let conf = std::fs::read_to_string(&self.paths.conf).unwrap_or_default();
+        let broken = self.broken_repositories();
         let present: Vec<String> = repos(&conf, &self.paths.sync_dir, &read_includes)
             .into_iter()
             .filter(|(_, path)| path.is_file())
             .map(|(name, _)| name)
+            .filter(|name| !broken.iter().any(|(b, _)| b == name))
             .collect();
-        let detail = if present.is_empty() {
+        let mut detail = if present.is_empty() {
             "no package lists yet".to_string()
         } else {
             present.join(", ")
         };
+        for (name, why) in &broken {
+            detail.push_str(&format!(
+                ". {name} is left out because its package list could not be read ({}); refresh the package lists to download it again",
+                why.trim_end_matches('.')
+            ));
+        }
+        if !broken.is_empty() {
+            detail.push('.');
+        }
         SourceStatus {
             kind,
             available: true,
@@ -1412,12 +1467,15 @@ fn fetch(
     Ok(Fetched::Body(bytes, last_modified))
 }
 
-/// gzip, zstd, or a plain tar with its `ustar` mark. A captive portal's
-/// HTML page is none of these and must not be cached as a database.
+/// gzip, zstd, xz, or a plain tar with its `ustar` mark: what `alpmdb`
+/// reads. A captive portal's HTML page is none of these and must not be
+/// cached as a database.
 fn looks_like_db(bytes: &[u8]) -> bool {
-    bytes.starts_with(&[0x1f, 0x8b])
-        || bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
-        || bytes.get(257..262) == Some(b"ustar")
+    use super::alpmdb::Compression;
+    matches!(
+        Compression::of(bytes),
+        Compression::Gzip | Compression::Zstd | Compression::Xz
+    ) || bytes.get(257..262) == Some(b"ustar")
 }
 
 /// Write the download beside its final name and rename, so a reader never
@@ -1679,6 +1737,11 @@ mod tests {
     fn a_database_is_told_from_a_captive_portal_page() {
         assert!(looks_like_db(&[0x1f, 0x8b, 0x08, 0x00]));
         assert!(looks_like_db(&[0x28, 0xb5, 0x2f, 0xfd, 0x00]));
+        assert!(looks_like_db(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 0x00]));
+        assert!(
+            !looks_like_db(b"BZh91AY&SY"),
+            "bzip2 is not read, so not kept"
+        );
         let mut tar = vec![0u8; 512];
         tar[257..262].copy_from_slice(b"ustar");
         assert!(looks_like_db(&tar));
@@ -1775,6 +1838,119 @@ mod tests {
             id: "paru".to_string(),
         };
         assert!(pacman.plan(&Op::Install { package: foreign }).is_err());
+    }
+
+    /// A gzip-compressed sync database of `(directory, desc)` entries.
+    fn gz_db(entries: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Write;
+        let mut builder = tar::Builder::new(Vec::new());
+        for (dir, desc) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(desc.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("{dir}/desc"), desc.as_bytes())
+                .unwrap();
+        }
+        let tar = builder.into_inner().unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&tar).unwrap();
+        gz.finish().unwrap()
+    }
+
+    #[test]
+    fn one_unreadable_database_leaves_its_repository_out_and_the_rest_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("pacman.conf"),
+            "[options]
+[core]
+Server = https://m.example/$repo
+[extra]
+Server = https://m.example/$repo
+",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("sync")).unwrap();
+        let bash = "%NAME%
+bash
+
+%VERSION%
+5.2.037-1
+
+%DESC%
+The GNU Bourne Again shell
+";
+        let gimp = "%NAME%
+gimp
+
+%VERSION%
+3.0.4-1
+
+%DESC%
+GNU Image Manipulation Program
+";
+        std::fs::write(
+            root.join("sync/core.db"),
+            gz_db(&[("bash-5.2.037-1", bash)]),
+        )
+        .unwrap();
+        // Cut off half-way, as an interrupted download leaves it.
+        let mut cut = gz_db(&[("gimp-3.0.4-1", gimp)]);
+        cut.truncate(cut.len() / 2);
+        std::fs::write(root.join("sync/extra.db"), cut).unwrap();
+        for (name, desc) in [("bash-5.2.037-1", bash), ("gimp-3.0.4-1", gimp)] {
+            std::fs::create_dir_all(root.join("local").join(name)).unwrap();
+            std::fs::write(root.join("local").join(name).join("desc"), desc).unwrap();
+        }
+        let pacman = Pacman::with_paths(
+            Paths {
+                conf: root.join("pacman.conf"),
+                sync_dir: root.join("sync"),
+                local_dir: root.join("local"),
+                cache_dir: root.join("cache"),
+                pacman: Some(std::env::current_exe().unwrap()),
+            },
+            Arc::new(Catalogue::default()),
+        );
+
+        let found = pacman.search(&Query::new("bash")).unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].installed);
+        assert!(pacman.installed().is_ok());
+        assert!(pacman.updates().is_ok());
+        // gimp's repository could not be read, so it is not claimed as
+        // foreign: the AUR source would otherwise list it as its own.
+        assert!(pacman.foreign_packages().is_empty());
+
+        let status = pacman.status();
+        assert!(status.available);
+        let detail = status.detail.unwrap();
+        assert!(
+            detail.starts_with(
+                "core. extra is left out because its package list could not be read ("
+            ),
+            "{detail}"
+        );
+        assert!(
+            detail.ends_with("; refresh the package lists to download it again."),
+            "{detail}"
+        );
+
+        // Downloaded again, it is read again.
+        std::fs::write(root.join("sync/extra.db"), gz_db(&[("gimp-3.0.4-1", gimp)])).unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(root.join("sync/extra.db"))
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_eq!(pacman.search(&Query::new("gimp")).unwrap().len(), 1);
+        assert_eq!(pacman.status().detail.as_deref(), Some("core, extra"));
+        assert!(pacman.foreign_packages().is_empty(), "gimp is from extra");
     }
 
     #[test]

@@ -50,13 +50,7 @@ fn linux_all(
     preferences: &crate::Preferences,
 ) -> Vec<Box<dyn Source>> {
     use linux::*;
-    let mut aur = aur::Aur::new(system, client.clone(), catalogue.clone());
-    // Automatic stays lazy: the helper is looked for on first use. A named
-    // choice is applied now, falling back to what is installed when the
-    // named one is not, so the setting never points at a missing program.
-    if let Some(choice) = preferences.aur_helper.as_deref() {
-        aur = aur.with_helper(aur::Helper::choose(choice));
-    }
+    let aur = aur::Aur::new(system, client.clone(), catalogue.clone());
     let mut flatpak = flatpak::Flatpak::new(system, client.clone());
     if preferences.flatpak_user {
         flatpak.installation = flatpak::Installation::User;

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/brokey-core", "crates/brokey-helper", "crates/brokey"]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
@@ -27,6 +27,9 @@ reqwest = { version = "0.13", default-features = false, features = ["blocking", 
 quick-xml = "0.42"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 ruzstd = "0.9"
+# xz, for a sync database or an Arch package compressed the older way. Pure
+# Rust, like the two above, so cross-compiling needs no liblzma.
+lzma-rs = "0.3"
 tar = "0.4"
 directories = "6"
 regex = "1"

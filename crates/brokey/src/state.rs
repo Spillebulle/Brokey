@@ -624,11 +624,5 @@ mod tests {
             !state.has_store(),
             "the Flatpak installation is read when the store is built"
         );
-
-        *state.inner.store.write().unwrap() = Some(Arc::new(empty()));
-        let mut helper = state.settings();
-        helper.aur_helper = crate::settings::AurHelper::Builtin;
-        state.set_settings(helper).unwrap();
-        assert!(!state.has_store(), "so is the AUR helper");
     }
 }

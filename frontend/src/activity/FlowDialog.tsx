@@ -32,35 +32,26 @@ function commandLine(step: Step): string {
 
 /**
  * Whether a step that does not run through the helper still raises a password
- * prompt of its own: an AUR build installs what it built through pkexec, a
- * system-wide Flatpak and fwupd ask polkit themselves.
+ * prompt of its own: a system-wide Flatpak and fwupd ask polkit themselves.
+ * An AUR build does not: makepkg builds as the user and the helper installs
+ * what it built.
  */
 function asksItself(step: Step): boolean {
   if (step.needs_root) return false;
   const { program, args } = step.command;
-  if (program === "paru" || program === "yay" || program === "makepkg") return true;
   if (program === "flatpak") return !args.includes("--user");
   return program === "fwupdmgr";
 }
 
 /**
- * How many password prompts the plan raises: one for each run of consecutive
- * root steps (the runner starts the helper once per run) and one for each step
- * that asks for itself. The dialog promises no fewer than this.
+ * How many password prompts the plan raises: one for the helper if any step
+ * needs root (the runner starts it once and keeps it for the whole plan,
+ * however long the steps between take) and one for each step that asks for
+ * itself. The dialog promises no fewer than this.
  */
 export function promptCount(steps: Step[]): number {
-  let count = 0;
-  let inRootRun = false;
-  for (const step of steps) {
-    if (step.needs_root) {
-      if (!inRootRun) count += 1;
-      inRootRun = true;
-    } else {
-      inRootRun = false;
-      if (asksItself(step)) count += 1;
-    }
-  }
-  return count;
+  const helper = steps.some((s) => s.needs_root) ? 1 : 0;
+  return helper + steps.filter(asksItself).length;
 }
 
 /**
@@ -72,7 +63,7 @@ function promptSentence(count: number, windows: boolean): string {
   const word = windows ? "to allow this" : "for your password";
   if (count === 0) return windows ? "Nothing here needs Administrator." : "Nothing here needs your password.";
   if (count === 1) return `You will be asked ${word} once.`;
-  return `You may be asked ${word} ${count} times: once for each group of steps marked below.`;
+  return `You may be asked ${word} ${count} times: once for the steps marked as needing it, and once for each step that asks itself.`;
 }
 
 function StepRow({ step, elevated }: { step: Step; elevated: { badge: string; title: string } }) {

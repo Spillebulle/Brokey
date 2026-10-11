@@ -11,9 +11,12 @@
 //!
 //! What this source installs is recorded nowhere else on the machine, so it
 //! keeps its own list in `github-installs.json` under the data directory.
-//! [`Github::record_install`] appends to it. The transaction runner is meant
-//! to call that after a successful plan and does not yet, so `installed()`
-//! is empty until it does.
+//! The runner tells the source when a plan has finished
+//! ([`Source::finished`]), and a successful install or update is written
+//! there then, a removal forgotten. An Arch package installed this way is
+//! foreign to pacman, so the record also keeps the name pacman knows it by,
+//! and [`pacman_names_installed_by_github`] is how the AUR source learns
+//! not to claim it.
 //!
 //! `plan` does no network: it builds steps from the release a search or a
 //! details call already fetched, so a plan for a repository nobody has
@@ -25,7 +28,7 @@ use crate::model::*;
 use crate::system::{self, Dirs};
 use crate::{Error, Op, Query, Result, Source};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -89,6 +92,21 @@ pub struct Asset {
     pub name: String,
     pub size: u64,
     pub browser_download_url: String,
+    /// `"sha256:<hex>"`, which GitHub computes for every asset uploaded
+    /// since June 2025 and leaves out (or null) for older ones.
+    pub digest: Option<String>,
+}
+
+impl Asset {
+    /// The SHA-256 GitHub published for this asset, as 64 lower-case hex
+    /// digits, or `None` when there is none or it is not that shape. The
+    /// shape is checked because the digits become an argument of the step
+    /// that checks the download.
+    pub fn sha256(&self) -> Option<String> {
+        let hex = self.digest.as_deref()?.trim().strip_prefix("sha256:")?;
+        (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| hex.to_ascii_lowercase())
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -347,6 +365,71 @@ pub struct InstallRecord {
     /// The release tag with its leading v stripped.
     pub version: String,
     pub kind: AssetKind,
+    /// For an Arch package, the name pacman installed it under, read from
+    /// the downloaded file's `.PKGINFO` once the install worked. `None` for
+    /// every other kind, and in a record written before this was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pkgname: Option<String>,
+}
+
+/// The name in `<data>` the records are kept under.
+pub fn records_path(data: &Path) -> PathBuf {
+    data.join("github-installs.json")
+}
+
+/// Every install recorded in the file at `path`. A file that is missing is
+/// no installs; one that will not parse is logged and treated as empty
+/// rather than failing every listing.
+pub fn read_records(path: &Path) -> Vec<InstallRecord> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    match serde_json::from_str(&text) {
+        Ok(records) => records,
+        Err(e) => {
+            log::warn!("{} is not readable and is ignored: {e}", path.display());
+            Vec::new()
+        }
+    }
+}
+
+/// The package name in an Arch package's file name, which `makepkg` writes
+/// as `<name>-<pkgver>-<pkgrel>-<arch>.pkg.tar<.ext>`. `None` for any other
+/// shape, `.pacman` among them: electron-builder names that file after the
+/// release, not after the package inside it.
+pub fn pkgname_from_file_name(file: &str) -> Option<String> {
+    let stem = [".pkg.tar.zst", ".pkg.tar.xz", ".pkg.tar.gz", ".pkg.tar"]
+        .iter()
+        .find_map(|ext| file.strip_suffix(ext))?;
+    let mut parts = stem.rsplitn(4, '-');
+    let (_arch, _pkgrel, _pkgver, name) =
+        (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    super::alpmdb::is_package_name(name).then(|| name.to_string())
+}
+
+/// The pacman names of every Arch package these records say GitHub
+/// installed: the `.PKGINFO` name where it was read, else the one in the
+/// file name. pacman sees such a package as foreign, the same as one built
+/// from the AUR, so the AUR source takes these out of its installed list
+/// and never offers to rebuild them from a different upstream. A `.pacman`
+/// file recorded before names were read has no name to give and is missing
+/// here.
+pub fn pacman_names(records: &[InstallRecord]) -> HashSet<String> {
+    records
+        .iter()
+        .filter(|r| r.kind == AssetKind::Pacman)
+        .filter_map(|r| {
+            r.pkgname
+                .clone()
+                .or_else(|| pkgname_from_file_name(&r.asset))
+        })
+        .collect()
+}
+
+/// [`pacman_names`] for the records under `data`, the store's data
+/// directory (`Dirs::new().data` on a real machine).
+pub fn pacman_names_installed_by_github(data: &Path) -> HashSet<String> {
+    pacman_names(&read_records(&records_path(data)))
 }
 
 /// The package for a repository whose latest release has a Linux asset.
@@ -423,7 +506,34 @@ pub struct InstallTarget<'a> {
     pub home: &'a Path,
     pub native: Option<AssetKind>,
     pub has_curl: bool,
+    /// Whether `libfuse.so.2` is on the machine ([`has_libfuse2`]), which a
+    /// type 2 AppImage needs to mount itself and start.
+    pub has_libfuse2: bool,
 }
+
+/// Where `libfuse.so.2` is on Arch (and Fedora's 64-bit lib directory, and
+/// Debian's multiarch one). Arch's `fuse3` does not provide it; `fuse2`
+/// does, and is not installed by default.
+pub const LIBFUSE2: [&str; 3] = [
+    "/usr/lib/libfuse.so.2",
+    "/usr/lib64/libfuse.so.2",
+    "/usr/lib/x86_64-linux-gnu/libfuse.so.2",
+];
+
+/// Whether any of [`LIBFUSE2`] is present.
+pub fn has_libfuse2() -> bool {
+    LIBFUSE2.iter().any(|p| Path::new(p).exists())
+}
+
+/// The check run on a download whose asset carries a digest, as `sh -c`
+/// with the expected digits as `$1` and the file as `$2`. Through a shell
+/// because the comparison needs a pipe or a check file and a step is one
+/// argv with no stdin; the digits and the path are passed as arguments,
+/// never written into the script, so neither is ever parsed as shell. The
+/// file is read on stdin so its name needs no escaping for `sha256sum`'s
+/// check-file format, and a file that does not match is deleted, so a
+/// retry downloads it again rather than finding it there.
+pub const CHECK_SCRIPT: &str = r#"sum=$(sha256sum < "$2") || exit 1; [ "${sum%% *}" = "$1" ] && exit 0; rm -f -- "$2"; echo "The download does not match the checksum GitHub published for it, so it was not installed and has been deleted. Try again; if it happens again, the file on GitHub is not the one its release describes." >&2; exit 1"#;
 
 /// The file the asset is downloaded to. The name comes from GitHub, so
 /// only its last path component is used.
@@ -478,7 +588,34 @@ pub fn install_steps(target: &InstallTarget) -> Result<Vec<Step>> {
     }
     let path = download_path(target.downloads, &asset.name);
     let path_str = path.to_string_lossy().into_owned();
-    let mut steps = vec![step(
+    let mut steps = Vec::new();
+    if kind == AssetKind::AppImage
+        && !target.has_libfuse2
+        && target.native == Some(AssetKind::Pacman)
+    {
+        // A type 2 AppImage mounts itself through libfuse 2 and without it
+        // fails to start with a line about FUSE that names no package. The
+        // install is the pacman source's own shape, a whole-system
+        // upgrade with the name, because a bare -S is the partial upgrade
+        // Arch does not support. Other distributions package it under
+        // names that vary by release (libfuse2, libfuse2t64, fuse-libs),
+        // so nothing is added there.
+        let mut fuse = step(
+            "Installing fuse2, which AppImages need to start, and updating the system".to_string(),
+            "pacman",
+            ["-Syu", "--noconfirm", "--needed", "fuse2"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            true,
+            3,
+        );
+        fuse.command
+            .env
+            .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+        steps.push(fuse);
+    }
+    steps.push(step(
         format!("Downloading {}", asset.name),
         "curl",
         ["-L", "-sS", "--fail", "--create-dirs", "-o", &path_str, url]
@@ -487,7 +624,22 @@ pub fn install_steps(target: &InstallTarget) -> Result<Vec<Step>> {
             .collect(),
         false,
         4,
-    )];
+    ));
+    if let Some(sha256) = asset.sha256() {
+        steps.push(step(
+            format!("Checking {}", asset.name),
+            "sh",
+            vec![
+                "-c".to_string(),
+                CHECK_SCRIPT.to_string(),
+                "sh".to_string(),
+                sha256,
+                path_str.clone(),
+            ],
+            false,
+            1,
+        ));
+    }
     let title = format!("Installing {}", target.name);
     let s = |args: &[&str], needs_root: bool, weight: u32, program: &str| {
         step(
@@ -508,8 +660,18 @@ pub fn install_steps(target: &InstallTarget) -> Result<Vec<Step>> {
             st
         }
         AssetKind::Rpm => s(&["install", "-y", &path_str], true, 4, "dnf"),
+        // `--reinstall` because an update is the same command on a newer
+        // bundle, and without it flatpak refuses an application that is
+        // already installed. A session step, so not the helper's list.
         AssetKind::Flatpak => s(
-            &["install", "-y", "--noninteractive", "--user", &path_str],
+            &[
+                "install",
+                "-y",
+                "--noninteractive",
+                "--user",
+                "--reinstall",
+                &path_str,
+            ],
             false,
             4,
             "flatpak",
@@ -596,34 +758,20 @@ impl Github {
             catalogue,
             machine: Arch::of_machine(&system.arch),
             native: AssetKind::native(system),
-            installs: data.join("github-installs.json"),
+            installs: records_path(data),
             downloads: cache.join("downloads"),
             cache: cache.join("github"),
             known: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Every install this source recorded. A file that will not parse is
-    /// logged and treated as empty rather than failing every listing.
+    /// Every install this source recorded; see [`read_records`].
     pub fn records(&self) -> Vec<InstallRecord> {
-        let Ok(text) = std::fs::read_to_string(&self.installs) else {
-            return Vec::new();
-        };
-        match serde_json::from_str(&text) {
-            Ok(records) => records,
-            Err(e) => {
-                log::warn!(
-                    "{} is not readable and is ignored: {e}",
-                    self.installs.display()
-                );
-                Vec::new()
-            }
-        }
+        read_records(&self.installs)
     }
 
     /// Remember an install so `installed()` and `updates()` know about it.
-    /// Meant for the transaction runner after a successful plan; not wired
-    /// there yet.
+    /// [`Source::finished`] calls it after a plan that worked.
     pub fn record_install(&self, record: InstallRecord) -> Result<()> {
         let mut records = self.records();
         records.retain(|r| r.repo != record.repo);
@@ -805,6 +953,7 @@ impl Github {
             home: &home,
             native: self.native,
             has_curl: system::which("curl").is_some(),
+            has_libfuse2: has_libfuse2(),
         })
     }
 }
@@ -1048,6 +1197,18 @@ impl Source for Github {
                 let Some(chosen) = self.choose(&release) else {
                     return;
                 };
+                // The file is still where the plan downloaded it. Reading
+                // its metadata runs nothing; it is how a `.pacman` file is
+                // known by the name pacman gave it.
+                let pkgname = (chosen.kind == AssetKind::Pacman)
+                    .then(|| {
+                        super::alpmdb::package_file_name(&download_path(
+                            &self.downloads,
+                            &chosen.asset.name,
+                        ))
+                        .or_else(|| pkgname_from_file_name(&chosen.asset.name))
+                    })
+                    .flatten();
                 self.record_install(InstallRecord {
                     repo: package.id.clone(),
                     name: package
@@ -1059,6 +1220,7 @@ impl Source for Github {
                     asset: chosen.asset.name.clone(),
                     version: strip_v(&release.tag_name),
                     kind: chosen.kind,
+                    pkgname,
                 })
             }
             Op::Remove { package } => self.forget_install(&package.id),
@@ -1138,6 +1300,7 @@ mod tests {
             name: name.to_string(),
             size: 1,
             browser_download_url: format!("https://example.invalid/{name}"),
+            digest: None,
         }
     }
 
@@ -1193,6 +1356,184 @@ mod tests {
         assert!(!valid_repo_id("neovim"));
         assert!(!valid_repo_id("a/b/c"));
         assert!(!valid_repo_id("../etc"));
+    }
+
+    #[test]
+    fn a_digest_is_used_only_when_it_is_a_sha256() {
+        let with = |digest: Option<&str>| Asset {
+            digest: digest.map(str::to_string),
+            ..asset("tool.AppImage")
+        };
+        let hex = "66ED041A93AC2817B744D3D0985194ADFA408C8D35F64D9A8967FA5E2A58F2C1";
+        assert_eq!(
+            with(Some(&format!("sha256:{hex}"))).sha256(),
+            Some(hex.to_ascii_lowercase())
+        );
+        assert_eq!(with(None).sha256(), None);
+        assert_eq!(with(Some(&format!("sha512:{hex}"))).sha256(), None);
+        assert_eq!(with(Some("sha256:abc")).sha256(), None);
+        assert_eq!(
+            with(Some(&format!("sha256:{}", "g".repeat(64)))).sha256(),
+            None
+        );
+        assert_eq!(
+            with(Some(&format!("sha256:$(reboot){}", &hex[9..]))).sha256(),
+            None,
+            "only hex digits ever reach the check's argv"
+        );
+        // GitHub sends null for an asset uploaded before digests existed.
+        let old: Asset = serde_json::from_str(
+            r#"{"name":"a.AppImage","size":1,"browser_download_url":"u","digest":null}"#,
+        )
+        .unwrap();
+        assert_eq!(old.sha256(), None);
+    }
+
+    #[test]
+    fn the_check_accepts_the_right_file_and_deletes_the_wrong_one() {
+        if system::which("sha256sum").is_none() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a file with spaces.AppImage");
+        let check = |sum: &str| {
+            std::process::Command::new("sh")
+                .args(["-c", CHECK_SCRIPT, "sh", sum, file.to_str().unwrap()])
+                .output()
+                .unwrap()
+        };
+        std::fs::write(&file, b"abc").unwrap();
+        let good = check("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert!(good.status.success());
+        assert!(file.exists());
+        let bad = check(&"0".repeat(64));
+        assert!(!bad.status.success());
+        assert!(!file.exists(), "a file that does not match is not kept");
+        let said = String::from_utf8_lossy(&bad.stderr);
+        assert!(
+            said.starts_with("The download does not match the checksum GitHub published"),
+            "{said}"
+        );
+        assert!(!said.contains('\u{2014}'));
+        assert!(
+            !check(&"0".repeat(64)).status.success(),
+            "a missing file fails"
+        );
+    }
+
+    #[test]
+    fn pacman_names_come_from_the_record_or_the_file_name() {
+        assert_eq!(
+            pkgname_from_file_name("brokey-0.1.5-1-x86_64.pkg.tar.zst").as_deref(),
+            Some("brokey")
+        );
+        assert_eq!(
+            pkgname_from_file_name("lib32-gcc-libs-14.2.1+r730-1-x86_64.pkg.tar.xz").as_deref(),
+            Some("lib32-gcc-libs")
+        );
+        assert_eq!(
+            pkgname_from_file_name("Heroic-2.22.1-linux-x64.pacman"),
+            None
+        );
+        assert_eq!(pkgname_from_file_name("x86_64.pkg.tar.zst"), None);
+        assert_eq!(pkgname_from_file_name("Tool-1-1-any.pkg.tar.zst"), None);
+
+        let record = |asset: &str, kind: AssetKind, pkgname: Option<&str>| InstallRecord {
+            repo: format!("someone/{asset}"),
+            name: asset.to_string(),
+            asset: asset.to_string(),
+            version: "1".to_string(),
+            kind,
+            pkgname: pkgname.map(str::to_string),
+        };
+        let names = pacman_names(&[
+            record(
+                "Heroic-2.22.1-linux-x64.pacman",
+                AssetKind::Pacman,
+                Some("heroic"),
+            ),
+            record("brokey-0.1.5-1-x86_64.pkg.tar.zst", AssetKind::Pacman, None),
+            // Recorded before names were read: nothing to go on.
+            record("Old-1.0-linux-x64.pacman", AssetKind::Pacman, None),
+            record("tool-1.0-1-x86_64.pkg.tar.zst", AssetKind::AppImage, None),
+        ]);
+        assert_eq!(
+            names,
+            HashSet::from(["heroic".to_string(), "brokey".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_record_written_before_pkgname_existed_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            records_path(dir.path()),
+            r#"[{"repo":"o/brokey","name":"brokey","asset":"brokey-0.1.5-1-x86_64.pkg.tar.zst","version":"0.1.5","kind":"pacman"}]"#,
+        )
+        .unwrap();
+        let records = read_records(&records_path(dir.path()));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].pkgname, None);
+        assert_eq!(
+            pacman_names_installed_by_github(dir.path()),
+            HashSet::from(["brokey".to_string()])
+        );
+        assert!(pacman_names_installed_by_github(&dir.path().join("nowhere")).is_empty());
+        // A record without a name leaves the key out rather than writing null.
+        let text = serde_json::to_string(&records[0]).unwrap();
+        assert!(!text.contains("pkgname"), "{text}");
+    }
+
+    #[test]
+    fn a_finished_install_records_the_name_pacman_gave_the_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut system = crate::system::from_os_release("ID=cachyos\nID_LIKE=arch\n");
+        system.arch = "x86_64".to_string();
+        let source = Github::with_dirs(
+            &system,
+            Arc::new(Client::new(dir.path().join("http"))),
+            Arc::new(Catalogue::default()),
+            &dir.path().join("data"),
+            &dir.path().join("cache"),
+        );
+        let release = Release {
+            tag_name: "v2.22.1".to_string(),
+            assets: vec![asset("Heroic-2.22.1-linux-x64.pacman")],
+            ..Release::default()
+        };
+        source.remember_release("Heroic-Games-Launcher/HeroicGamesLauncher", release);
+        // The file as the plan's download left it: fpm's xz, .PKGINFO first.
+        let pkginfo = "pkgname = heroic\npkgver = 2.22.1-1\n";
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(pkginfo.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, ".PKGINFO", pkginfo.as_bytes())
+            .unwrap();
+        let tar = builder.into_inner().unwrap();
+        let mut xz = Vec::new();
+        lzma_rs::xz_compress(&mut &tar[..], &mut xz).unwrap();
+        let downloads = dir.path().join("cache/downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::write(downloads.join("Heroic-2.22.1-linux-x64.pacman"), xz).unwrap();
+
+        let op = Op::Install {
+            package: PackageRef {
+                source: SourceKind::Github,
+                id: "Heroic-Games-Launcher/HeroicGamesLauncher".to_string(),
+            },
+        };
+        source.finished(&op, true);
+        let records = source.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AssetKind::Pacman);
+        assert_eq!(records[0].pkgname.as_deref(), Some("heroic"));
+        assert_eq!(
+            pacman_names_installed_by_github(&dir.path().join("data")),
+            HashSet::from(["heroic".to_string()])
+        );
     }
 
     #[test]

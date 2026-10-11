@@ -58,6 +58,21 @@ pub const SNAP_DESKTOP_DIR: &str = "/var/lib/snapd/desktop/applications";
 /// Arch and Fedora, which do not put a directory in `/`.
 const MOUNT_DIRS: [&str; 2] = ["/snap", "/var/lib/snapd/snap"];
 
+/// Where the kernel says whether AppArmor is enabled: `Y` or `N`.
+pub const APPARMOR_ENABLED: &str = "/sys/module/apparmor/parameters/enabled";
+
+/// The unit that loads snapd's AppArmor profiles at boot. Arch's snapd
+/// package ships it disabled, like the socket; with AppArmor on and the
+/// profiles not loaded, snapd refuses to run a strictly confined snap.
+pub const SNAPD_APPARMOR_UNIT: &str = "snapd.apparmor.service";
+
+/// Whether the kernel has AppArmor on, from the text of
+/// [`APPARMOR_ENABLED`]. A kernel built without it has no such file, which
+/// is `None` and off.
+pub fn apparmor_enabled(contents: Option<&str>) -> bool {
+    contents.is_some_and(|c| c.trim_start().starts_with('Y'))
+}
+
 /// The public Snap Store API, which answers without snapd.
 pub const STORE_API: &str = "https://api.snapcraft.io/v2/snaps";
 
@@ -899,6 +914,9 @@ pub struct Snap {
     /// add `--classic` without a round trip. `plan` receives only a
     /// reference, never the package with its Confinement fact.
     confinement: Mutex<HashMap<String, String>>,
+    /// Whether the kernel has AppArmor on, which on Arch decides whether
+    /// setting snapd up enables [`SNAPD_APPARMOR_UNIT`] as well.
+    apparmor: bool,
 }
 
 impl Snap {
@@ -906,12 +924,16 @@ impl Snap {
     /// is not running; a result found that way is installable because the
     /// plan sets snapd up first.
     pub fn new(system: &SystemInfo, client: Arc<Client>) -> Snap {
+        let apparmor = apparmor_enabled(std::fs::read_to_string(APPARMOR_ENABLED).ok().as_deref());
         Snap::with_transport(system, Box::new(SocketTransport::new()))
             .with_store(Box::new(LiveSnapStore::new(client)))
+            .with_apparmor(apparmor)
     }
 
     /// A source over another transport. The public store is an offline
-    /// script until [`Snap::with_store`] says otherwise.
+    /// script until [`Snap::with_store`] says otherwise, and AppArmor is
+    /// off until [`Snap::with_apparmor`] says otherwise, so a test does not
+    /// depend on the kernel of the machine it runs on.
     pub fn with_transport(system: &SystemInfo, transport: Box<dyn Transport>) -> Snap {
         Snap {
             transport,
@@ -922,7 +944,15 @@ impl Snap {
             mount_dirs: Mutex::new(MOUNT_DIRS.iter().map(PathBuf::from).collect()),
             mount_dir_known: AtomicBool::new(false),
             confinement: Mutex::new(HashMap::new()),
+            apparmor: false,
         }
+    }
+
+    /// Say whether the kernel has AppArmor on instead of reading
+    /// [`APPARMOR_ENABLED`].
+    pub fn with_apparmor(mut self, enabled: bool) -> Snap {
+        self.apparmor = enabled;
+        self
     }
 
     /// Ask this store when snapd is not running.
@@ -965,9 +995,10 @@ impl Snap {
     }
 
     /// The root steps that make an installed snapd usable: its socket
-    /// enabled and started, the `/snap` link where the distribution mounts
-    /// snaps elsewhere, and a wait for snapd to finish seeding, which it
-    /// does once on first start and refuses installs until it has.
+    /// enabled and started, on Arch with AppArmor on its AppArmor profiles
+    /// loaded too, the `/snap` link where the distribution mounts snaps
+    /// elsewhere, and a wait for snapd to finish seeding, which it does once
+    /// on first start and refuses installs until it has.
     pub fn start_steps(&self) -> Vec<Step> {
         let mut steps = vec![root_step(
             "Starting snapd".to_string(),
@@ -975,6 +1006,19 @@ impl Snap {
             &["enable", "--now", "snapd.socket"],
             1,
         )];
+        if self.system.is_arch_like() && self.apparmor {
+            // The Arch wiki's second step after the socket. Without it a
+            // strictly confined snap installs and then will not start,
+            // because its profile was never loaded. Debian and Ubuntu
+            // enable the unit from the package itself; Fedora confines
+            // with SELinux and has AppArmor off.
+            steps.push(root_step(
+                "Loading snapd's AppArmor profiles".to_string(),
+                "systemctl",
+                &["enable", "--now", SNAPD_APPARMOR_UNIT],
+                1,
+            ));
+        }
         if self.system.is_arch_like() || self.system.is_fedora_like() {
             // Arch and Fedora mount snaps under /var/lib/snapd/snap, but a
             // classic snap is built against /snap and refuses to install
@@ -1115,17 +1159,20 @@ impl Snap {
     }
 
     /// Whether `snap install` needs `--classic`, from what this source has
-    /// already seen, else from one store lookup. Unknown is treated as
-    /// strict: `snap install` then says exactly why it refused, which beats
-    /// installing without a sandbox on a guess.
-    fn is_classic(&self, name: &str) -> bool {
+    /// already seen, else from one store lookup. A name the store does not
+    /// know is planned strictly, and `snap install` then says it has no such
+    /// snap. A store that could not be asked is an error: planning strictly
+    /// on a guess made a classic snap fail half-way through the plan, after
+    /// snapd had been set up, with snapd's own sentence about `--classic`
+    /// rather than the real cause.
+    fn is_classic(&self, name: &str) -> Result<bool> {
         if let Some(c) = self
             .confinement
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(name)
         {
-            return c == "classic";
+            return Ok(c == "classic");
         }
         let found = if self.transport.presence() == Presence::Socket {
             self.find_one(name)
@@ -1135,12 +1182,15 @@ impl Snap {
         match found {
             Ok(Some(info)) => {
                 self.package(&info, None, &[]);
-                info.confinement == "classic"
+                Ok(info.confinement == "classic")
             }
-            Ok(None) => false,
+            Ok(None) => Ok(false),
             Err(e) => {
                 log::warn!("could not read {name}'s confinement from the Snap Store: {e}");
-                false
+                Err(snap_error(format!(
+                    "The Snap Store could not be reached to check how {name} is confined ({}). Check the connection and try again.",
+                    e.message.trim_end_matches('.')
+                )))
             }
         }
     }
@@ -1406,7 +1456,7 @@ impl Source for Snap {
             Op::Install { package } => {
                 let name = self.own(package)?;
                 let mut args = vec!["install", name];
-                if self.is_classic(name) {
+                if self.is_classic(name)? {
                     args.push("--classic");
                 }
                 Ok(vec![step(
@@ -1474,6 +1524,92 @@ impl Source for Snap {
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn apparmor_is_on_only_when_the_kernel_says_y() {
+        assert!(apparmor_enabled(Some(
+            "Y
+"
+        )));
+        assert!(apparmor_enabled(Some("Y")));
+        assert!(!apparmor_enabled(Some(
+            "N
+"
+        )));
+        assert!(!apparmor_enabled(Some("")));
+        assert!(
+            !apparmor_enabled(None),
+            "a kernel without AppArmor has no file"
+        );
+    }
+
+    fn start_commands(os_release: &str, apparmor: bool) -> Vec<String> {
+        let system = crate::system::from_os_release(os_release);
+        let snap = Snap::with_transport(
+            &system,
+            Box::new(SocketTransport::at(Path::new("/nonexistent/snapd.socket"))),
+        )
+        .with_apparmor(apparmor);
+        snap.start_steps()
+            .iter()
+            .map(|step| {
+                assert!(step.needs_root, "{}", step.title);
+                assert_eq!(
+                    crate::transaction::allow::check_step(
+                        step,
+                        &crate::transaction::allow::Allowed::system()
+                    ),
+                    Ok(()),
+                    "the helper allows {}",
+                    step.title
+                );
+                format!("{} {}", step.command.program, step.command.args.join(" "))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn on_arch_with_apparmor_on_setting_snapd_up_loads_its_profiles_too() {
+        assert_eq!(
+            start_commands(
+                "ID=cachyos
+ID_LIKE=arch
+",
+                true
+            ),
+            [
+                "systemctl enable --now snapd.socket",
+                "systemctl enable --now snapd.apparmor.service",
+                "ln -sfn /var/lib/snapd/snap /snap",
+                "snap wait system seed.loaded",
+            ]
+        );
+        assert_eq!(
+            start_commands(
+                "ID=cachyos
+ID_LIKE=arch
+",
+                false
+            ),
+            [
+                "systemctl enable --now snapd.socket",
+                "ln -sfn /var/lib/snapd/snap /snap",
+                "snap wait system seed.loaded",
+            ]
+        );
+        // Debian's package enables the unit itself.
+        assert_eq!(
+            start_commands(
+                "ID=debian
+",
+                true
+            ),
+            [
+                "systemctl enable --now snapd.socket",
+                "snap wait system seed.loaded",
+            ]
+        );
+    }
 
     #[test]
     fn a_content_length_body_reads_back() {

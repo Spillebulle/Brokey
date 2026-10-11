@@ -182,10 +182,17 @@ colour in this family means state.
   (steps in a plan, bytes of a download with a length). pacman and flatpak
   output is streamed as a log; the rail stays empty with a sentence beside it
   until a step count is known.
-- **AUR builds run as the user, never as root.** Dependencies from the
-  repositories are installed through the helper first; `makepkg` then runs
-  in the user session with `PACMAN_AUTH=(pkexec)` for the final `-U`. paru or
-  yay are used when present (`--sudo pkexec`), and the built-in path when not.
+- **AUR builds run as the user, never as root, and cost one password.** The
+  system is brought up to date and the repository dependencies installed
+  through the helper; `makepkg` then builds in the user session with no `-s`
+  and no `-i`, so it never elevates itself; the built package is installed
+  through the same helper. The runner keeps one helper for the whole plan,
+  so the build in between does not cost a second prompt. AUR dependencies
+  are resolved through the RPC and built first, signing keys named in a
+  base's `.SRCINFO` are imported as the user, and only the packages asked
+  for are installed from a split base. paru and yay are not used: both
+  elevate on their own, outside the helper's closed list. (Changed in 0.1.6;
+  before that paru or yay ran with `--sudo pkexec`.)
 - **Grouping never lies.** An edition joined by name match carries
   `confidence < 1` and the detail page says "matched by name" in `text-dim`
   beside it. A user can split a group from the detail page if the match is
