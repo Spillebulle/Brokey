@@ -96,6 +96,8 @@ fn fake_dbs(tmp: &Path, local: &[(&str, &str, &str)], sync: &[&str]) {
         "[options]\n[extra]\nInclude = /dev/null\n",
     )
     .unwrap();
+    // The directory exists even when nothing is installed, as pacman's does.
+    std::fs::create_dir_all(tmp.join("local")).unwrap();
     for (name, version, extra) in local {
         let dir = tmp.join("local").join(format!("{name}-{version}"));
         std::fs::create_dir_all(&dir).unwrap();
