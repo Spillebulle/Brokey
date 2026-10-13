@@ -20,17 +20,17 @@
 
 ## Install
 
-**Brokey 0.1.6.** Take the file for your system, or browse the
+**Brokey 0.1.7.** Take the file for your system, or browse the
 [release itself](https://github.com/Spillebulle/Brokey/releases/latest) for the
 notes and the checksums.
 
 | Your system | x86-64 | ARM64 |
 |---|---|---|
-| Arch, CachyOS, EndeavourOS, Manjaro | [`.pkg.tar.zst`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.6/brokey-bin-0.1.6-1-x86_64.pkg.tar.zst) | not built |
-| Debian, Ubuntu, Mint, Pop!_OS | [`.deb`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.6/brokey_0.1.6_amd64.deb) | [`.deb`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.6/brokey_0.1.6_arm64.deb) |
-| Fedora, RHEL, openSUSE | [`.rpm`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.6/brokey-0.1.6-1.x86_64.rpm) | [`.rpm`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.6/brokey-0.1.6-1.aarch64.rpm) |
-| Any other Linux | [AppImage](https://github.com/Spillebulle/Brokey/releases/download/v0.1.6/Brokey-0.1.6-x86_64.AppImage), one file with nothing to install | [AppImage](https://github.com/Spillebulle/Brokey/releases/download/v0.1.6/Brokey-0.1.6-aarch64.AppImage) |
-| Windows 11, Windows 10 | [`setup.exe`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.6/brokey-setup-0.1.6-x64.exe) | [`setup.exe`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.6/brokey-setup-0.1.6-arm64.exe) |
+| Arch, CachyOS, EndeavourOS, Manjaro | [`.pkg.tar.zst`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.7/brokey-bin-0.1.7-1-x86_64.pkg.tar.zst) | not built |
+| Debian, Ubuntu, Mint, Pop!_OS | [`.deb`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.7/brokey_0.1.7_amd64.deb) | [`.deb`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.7/brokey_0.1.7_arm64.deb) |
+| Fedora, RHEL, openSUSE | [`.rpm`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.7/brokey-0.1.7-1.x86_64.rpm) | [`.rpm`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.7/brokey-0.1.7-1.aarch64.rpm) |
+| Any other Linux | [AppImage](https://github.com/Spillebulle/Brokey/releases/download/v0.1.7/Brokey-0.1.7-x86_64.AppImage), one file with nothing to install | [AppImage](https://github.com/Spillebulle/Brokey/releases/download/v0.1.7/Brokey-0.1.7-aarch64.AppImage) |
+| Windows 11, Windows 10 | [`setup.exe`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.7/brokey-setup-0.1.7-x64.exe) | [`setup.exe`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.7/brokey-setup-0.1.7-arm64.exe) |
 
 The `.deb`, the `.rpm` and the Arch package add the
 [Spillebulle archive](https://spillebulle.github.io/packages/) as they install,
