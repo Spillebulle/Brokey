@@ -31,13 +31,20 @@ use std::path::{Path, PathBuf};
 pub const PACMAN_SOURCE_PACKAGE: &str = "brokey";
 pub const PACMAN_BIN_PACKAGE: &str = "brokey-bin";
 
-/// The files the family's `.deb` and `.rpm` write on install (style guide
-/// §18.2). Their presence is the difference between "your package manager
-/// has the new version" and "your package manager has never heard of it".
-/// `packaging/check.sh` is meant to fail if the scriptlets disagree with
-/// these paths.
+/// The files the family's `.deb`, `.rpm` and `-bin` pacman package write on
+/// install (style guide §18.2, `../Packages/ENROLMENT.md`). Their presence
+/// is the difference between "your package manager has the new version" and
+/// "your package manager has never heard of it". `packaging/check.sh` fails
+/// if the scriptlets disagree with these paths.
 pub const APT_ARCHIVE_SOURCE: &str = "/etc/apt/sources.list.d/spillebulle.sources";
 pub const RPM_ARCHIVE_SOURCE: &str = "/etc/yum.repos.d/spillebulle.repo";
+/// On pacman the archive is a section of `pacman.conf`, not a file of its
+/// own: [`PACMAN_ARCHIVE_SECTION`] there, including
+/// [`PACMAN_ARCHIVE_SETTINGS`]. The section is what pacman reads, so it is
+/// what [`detect`] looks for.
+pub const PACMAN_CONF: &str = "/etc/pacman.conf";
+pub const PACMAN_ARCHIVE_SECTION: &str = "[spillebulle]";
+pub const PACMAN_ARCHIVE_SETTINGS: &str = "/etc/pacman.d/spillebulle";
 
 /// How this copy got onto the machine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,9 +57,15 @@ pub enum Installation {
     /// whole update.
     AppImage { path: PathBuf },
     /// pacman's package: `brokey` from the AUR, which the AUR source
-    /// reports as an ordinary update, or `brokey-bin`, which is installed
-    /// from the release asset with `pacman -U`.
-    Pacman { package: String },
+    /// reports as an ordinary update, or `brokey-bin`, which pacman upgrades
+    /// from the Spillebulle archive when `archive` says the machine has it,
+    /// and which is otherwise installed from the release asset with
+    /// `pacman -U`.
+    Pacman {
+        package: String,
+        #[serde(default)]
+        archive: bool,
+    },
     /// dpkg's package. `archive` says whether this machine has the
     /// Spillebulle archive, in which case apt has the new version.
     Dpkg { archive: bool },
@@ -85,10 +98,17 @@ impl Installation {
         match self {
             Self::Flatpak => "a Flatpak bundle".to_string(),
             Self::AppImage { path } => format!("an AppImage at {}", path.display()),
-            Self::Pacman { package } if package == PACMAN_SOURCE_PACKAGE => {
+            Self::Pacman { package, .. } if package == PACMAN_SOURCE_PACKAGE => {
                 format!("the {package} package from the AUR")
             }
-            Self::Pacman { package } => format!("the {package} package"),
+            Self::Pacman {
+                package,
+                archive: true,
+            } => format!("the {package} package with the Spillebulle archive"),
+            Self::Pacman {
+                package,
+                archive: false,
+            } => format!("the {package} package without the Spillebulle archive"),
             Self::Dpkg { archive: true } => {
                 "a Debian package with the Spillebulle archive".to_string()
             }
@@ -146,6 +166,10 @@ pub struct Probe {
     pub exe: PathBuf,
     pub env: Vec<(String, String)>,
     pub exists: Box<dyn Fn(&Path) -> bool>,
+    /// The text of [`PACMAN_CONF`], `None` where it could not be read. The
+    /// one file whose contents matter: on pacman the archive is a section in
+    /// it rather than a file of its own.
+    pub pacman_conf: Option<String>,
 }
 
 impl Probe {
@@ -155,7 +179,14 @@ impl Probe {
             exe: std::env::current_exe().unwrap_or_default(),
             env: std::env::vars().collect(),
             exists: Box::new(path_exists),
+            pacman_conf: std::fs::read_to_string(PACMAN_CONF).ok(),
         }
+    }
+
+    /// This probe with `text` as the contents of [`PACMAN_CONF`], for tests.
+    pub fn with_pacman_conf(mut self, text: &str) -> Probe {
+        self.pacman_conf = Some(text.to_string());
+        self
     }
 
     /// A probe over fixed readings, for tests.
@@ -168,6 +199,7 @@ impl Probe {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             exists: Box::new(move |path| present.iter().any(|p| p == path)),
+            pacman_conf: None,
         }
     }
 
@@ -263,13 +295,19 @@ pub fn detect(probe: &Probe) -> Installation {
         // is tested first.
         let bin = format!("/var/lib/pacman/local/{PACMAN_BIN_PACKAGE}-*");
         let source = format!("/var/lib/pacman/local/{PACMAN_SOURCE_PACKAGE}-*");
+        let archive = probe
+            .pacman_conf
+            .as_deref()
+            .is_some_and(has_archive_section);
         return if probe.exists(&bin) {
             Installation::Pacman {
                 package: PACMAN_BIN_PACKAGE.to_string(),
+                archive,
             }
         } else if probe.exists(&source) {
             Installation::Pacman {
                 package: PACMAN_SOURCE_PACKAGE.to_string(),
+                archive,
             }
         } else {
             // pacman is here but has no record of us: a tarball unpacked
@@ -288,6 +326,17 @@ pub fn detect(probe: &Probe) -> Installation {
         };
     }
     Installation::Unknown
+}
+
+/// Whether a `pacman.conf` has the archive's section: a line that is
+/// [`PACMAN_ARCHIVE_SECTION`] once pacman's surrounding whitespace is
+/// trimmed. A commented-out section is not one, which is how somebody
+/// switches the archive off by hand. The `-bin` package's scriptlet appends
+/// exactly this line.
+pub fn has_archive_section(pacman_conf: &str) -> bool {
+    pacman_conf
+        .lines()
+        .any(|line| line.trim() == PACMAN_ARCHIVE_SECTION)
 }
 
 /// Where a copy is the user's own. `/usr/local` is here rather than in the
@@ -375,6 +424,39 @@ mod tests {
     }
 
     #[test]
+    fn the_archive_section_is_a_line_of_its_own() {
+        // As the scriptlet appends it, after the distribution's repositories.
+        let enrolled = "[options]\nArchitecture = auto\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n\n[spillebulle]\nInclude = /etc/pacman.d/spillebulle\n";
+        assert!(has_archive_section(enrolled));
+        assert!(has_archive_section("  [spillebulle]  \n"));
+        // Switched off by hand, never added, or only a namesake.
+        assert!(!has_archive_section(
+            "#[spillebulle]\n#Include = /etc/pacman.d/spillebulle\n"
+        ));
+        assert!(!has_archive_section(
+            "[core]\nInclude = /etc/pacman.d/mirrorlist\n"
+        ));
+        assert!(!has_archive_section("[spillebulle-testing]\n"));
+        assert!(!has_archive_section(
+            "Include = /etc/pacman.d/spillebulle\n"
+        ));
+        assert!(!has_archive_section(""));
+    }
+
+    #[test]
+    fn a_pre_archive_serialisation_reads_as_no_archive() {
+        let back: Installation =
+            serde_json::from_str(r#"{"kind":"pacman","package":"brokey-bin"}"#).expect("reads");
+        assert_eq!(
+            back,
+            Installation::Pacman {
+                package: "brokey-bin".into(),
+                archive: false,
+            }
+        );
+    }
+
+    #[test]
     fn the_id_is_what_serde_writes() {
         for installation in [
             Installation::Flatpak,
@@ -383,6 +465,11 @@ mod tests {
             },
             Installation::Pacman {
                 package: "brokey".into(),
+                archive: false,
+            },
+            Installation::Pacman {
+                package: "brokey-bin".into(),
+                archive: true,
             },
             Installation::Dpkg { archive: true },
             Installation::Rpm { archive: false },

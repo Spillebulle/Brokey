@@ -374,8 +374,8 @@ export interface SelfUpdateRelease {
 /**
  * How this copy was installed (`#[serde(tag = "kind", rename_all = "lowercase")]`):
  * flatpak, appimage (with its path), pacman (with the package, brokey or
- * brokey-bin), dpkg and rpm (with whether the Spillebulle archive is set up),
- * portable, unknown. `SelfUpdate.installation_label` is the sentence to draw.
+ * brokey-bin, and whether pacman.conf has the Spillebulle archive), dpkg and
+ * rpm (with whether the Spillebulle archive is set up), portable, unknown. `SelfUpdate.installation_label` is the sentence to draw.
  */
 export interface SelfUpdateInstallation {
   kind: "flatpak" | "appimage" | "pacman" | "dpkg" | "rpm" | "portable" | "unknown";

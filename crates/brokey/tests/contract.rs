@@ -719,9 +719,15 @@ fn everything_the_page_receives_matches_types_ts() {
         },
         Installation::Pacman {
             package: "brokey".into(),
+            archive: false,
         },
         Installation::Pacman {
             package: "brokey-bin".into(),
+            archive: false,
+        },
+        Installation::Pacman {
+            package: "brokey-bin".into(),
+            archive: true,
         },
         Installation::Dpkg { archive: true },
         Installation::Dpkg { archive: false },

@@ -237,7 +237,7 @@ pub fn remedy(
     let asset = |format: Format| find(assets, format, arch_known);
 
     match installation {
-        Installation::Pacman { package } if package == PACMAN_SOURCE_PACKAGE => {
+        Installation::Pacman { package, .. } if package == PACMAN_SOURCE_PACKAGE => {
             Remedy::UpdatesPage {
                 source: SourceKind::Aur,
                 package: package.clone(),
@@ -248,14 +248,31 @@ pub fn remedy(
             }
         }
 
-        Installation::Pacman { .. } => match asset(Format::PacmanPackage) {
+        // The archive carries the -bin package, so pacman upgrades it with
+        // everything else. `pacman -Syu` is the one command printed, and only
+        // here, where pacman.conf has the section that makes it true.
+        Installation::Pacman {
+            package,
+            archive: true,
+        } => Remedy::UpdatesPage {
+            source: SourceKind::Pacman,
+            package: package.clone(),
+            sentence: format!(
+                "Brokey {latest} is published. This copy updates through the Spillebulle archive, \
+                 so it appears in Updates after the next refresh of the package lists, and \
+                 sudo pacman -Syu installs it once the archive has it."
+            ),
+        },
+
+        Installation::Pacman { archive: false, .. } => match asset(Format::PacmanPackage) {
             Some(a) => Remedy::InstallAsset {
                 asset: a.name.clone(),
                 url: a.browser_download_url.clone(),
                 installer: Installer::PacmanU,
                 sentence: format!(
-                    "Brokey {latest} is not in a repository this machine uses. \
-                     Brokey will download {} and install it with pacman.",
+                    "This machine does not have the Spillebulle archive, so pacman has nothing newer to offer. \
+                     Brokey will download {} and install it with pacman. That package adds the archive, \
+                     and pacman keeps Brokey up to date from then on.",
                     a.name
                 ),
             },

@@ -1461,7 +1461,7 @@ const SELF_UPDATE: SelfUpdate = {
     url: "https://github.com/Spillebulle/Brokey/releases/tag/v0.2.0",
     newer: true,
   },
-  installation: { kind: "pacman", package: "brokey" },
+  installation: { kind: "pacman", package: "brokey", archive: false },
   installation_label: "the brokey package from the AUR",
   remedy: {
     kind: "updates_page",
@@ -1480,14 +1480,14 @@ function selfUpdate(): SelfUpdate {
     case "asset":
       return {
         ...SELF_UPDATE,
-        installation: { kind: "pacman", package: "brokey-bin" },
-        installation_label: "the brokey-bin package",
+        installation: { kind: "pacman", package: "brokey-bin", archive: false },
+        installation_label: "the brokey-bin package without the Spillebulle archive",
         remedy: {
           kind: "install_asset",
           asset: SELF_ASSET,
           url: `https://github.com/Spillebulle/Brokey/releases/download/v0.2.0/${SELF_ASSET}`,
           installer: "pacmanu",
-          sentence: `Brokey 0.2.0 is not in a repository this machine uses. Brokey will download ${SELF_ASSET} and install it with pacman.`,
+          sentence: `This machine does not have the Spillebulle archive, so pacman has nothing newer to offer. Brokey will download ${SELF_ASSET} and install it with pacman. That package adds the archive, and pacman keeps Brokey up to date from then on.`,
         },
       };
     case "none":

@@ -106,6 +106,7 @@ fn every_installation_is_detected_from_its_own_readings() {
             &["/var/lib/pacman", "/var/lib/pacman/local/brokey-*"],
             Installation::Pacman {
                 package: "brokey".into(),
+                archive: false,
             },
         ),
         // Both wildcards match a bin install, so the bin one has to win.
@@ -120,6 +121,23 @@ fn every_installation_is_detected_from_its_own_readings() {
             ],
             Installation::Pacman {
                 package: "brokey-bin".into(),
+                archive: false,
+            },
+        ),
+        // The archive's files without the section in pacman.conf have not
+        // pointed pacman anywhere; only the section is read.
+        (
+            "bin package with the settings file but no section",
+            "/usr/bin/brokey",
+            &home,
+            &[
+                "/var/lib/pacman",
+                "/var/lib/pacman/local/brokey-bin-*",
+                "/etc/pacman.d/spillebulle",
+            ],
+            Installation::Pacman {
+                package: "brokey-bin".into(),
+                archive: false,
             },
         ),
         (
@@ -227,6 +245,79 @@ fn every_installation_is_detected_from_its_own_readings() {
     }
 }
 
+/// On pacman the archive is a section of pacman.conf, read from the probe's
+/// copy of the file, never from the machine running the test.
+#[test]
+fn the_pacman_archive_is_the_section_in_pacman_conf() {
+    let home = no_env();
+    let bin = ["/var/lib/pacman", "/var/lib/pacman/local/brokey-bin-*"];
+    let aur = ["/var/lib/pacman", "/var/lib/pacman/local/brokey-*"];
+    // What brokey.install appends, after the distribution's repositories.
+    let enrolled = "[options]\nArchitecture = auto\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n\n[spillebulle]\nInclude = /etc/pacman.d/spillebulle\n";
+    let opted_out = "[core]\nInclude = /etc/pacman.d/mirrorlist\n\n#[spillebulle]\n#Include = /etc/pacman.d/spillebulle\n";
+    let plain = "[core]\nInclude = /etc/pacman.d/mirrorlist\n";
+
+    let cases: [(&str, &[&str], &str, Installation); 5] = [
+        (
+            "bin package, enrolled",
+            &bin,
+            enrolled,
+            Installation::Pacman {
+                package: "brokey-bin".into(),
+                archive: true,
+            },
+        ),
+        (
+            "bin package, section commented out",
+            &bin,
+            opted_out,
+            Installation::Pacman {
+                package: "brokey-bin".into(),
+                archive: false,
+            },
+        ),
+        (
+            "bin package, never enrolled",
+            &bin,
+            plain,
+            Installation::Pacman {
+                package: "brokey-bin".into(),
+                archive: false,
+            },
+        ),
+        (
+            "aur package, enrolled by another application",
+            &aur,
+            enrolled,
+            Installation::Pacman {
+                package: "brokey".into(),
+                archive: true,
+            },
+        ),
+        // A Debian machine with a pacman.conf lying about: the section means
+        // nothing to apt.
+        (
+            "debian with a pacman.conf",
+            &["/var/lib/dpkg/status"],
+            enrolled,
+            Installation::Dpkg { archive: false },
+        ),
+    ];
+    for (name, present, conf, expected) in cases {
+        let probe = Probe::fixed("/usr/bin/brokey", &home, present).with_pacman_conf(conf);
+        assert_eq!(detect(&probe), expected, "{name}");
+    }
+    // An unreadable pacman.conf is no archive.
+    let probe = Probe::fixed("/usr/bin/brokey", &home, &bin);
+    assert_eq!(
+        detect(&probe),
+        Installation::Pacman {
+            package: "brokey-bin".into(),
+            archive: false,
+        }
+    );
+}
+
 #[test]
 fn a_home_directory_is_read_from_the_environment_not_assumed() {
     // Without HOME nothing under /home is special.
@@ -332,9 +423,19 @@ fn every_installation() -> Vec<Installation> {
         },
         Installation::Pacman {
             package: "brokey".into(),
+            archive: false,
+        },
+        Installation::Pacman {
+            package: "brokey".into(),
+            archive: true,
         },
         Installation::Pacman {
             package: "brokey-bin".into(),
+            archive: false,
+        },
+        Installation::Pacman {
+            package: "brokey-bin".into(),
+            archive: true,
         },
         Installation::Dpkg { archive: true },
         Installation::Dpkg { archive: false },
@@ -362,7 +463,9 @@ fn every_asset_list() -> Vec<(&'static str, Vec<Asset>)> {
 fn has_archive(installation: &Installation) -> bool {
     matches!(
         installation,
-        Installation::Dpkg { archive: true } | Installation::Rpm { archive: true }
+        Installation::Dpkg { archive: true }
+            | Installation::Rpm { archive: true }
+            | Installation::Pacman { archive: true, .. }
     )
 }
 
@@ -391,11 +494,15 @@ fn named_files(sentence: &str) -> Vec<String> {
 /// a machine that has nowhere to upgrade from.
 #[test]
 fn no_upgrade_command_reaches_a_machine_without_an_archive() {
-    const FORBIDDEN: [&str; 5] = [
+    // `pacman -Syu` covers `pacman -Syu brokey` too: with no repository
+    // carrying Brokey, a system upgrade answers "nothing to do" and sounds
+    // as if it had checked.
+    const FORBIDDEN: [&str; 6] = [
         "apt install --only-upgrade",
-        "pacman -Syu brokey",
+        "apt upgrade",
+        "pacman -Syu",
         "flatpak update",
-        "dnf upgrade brokey",
+        "dnf upgrade",
         "already the newest",
     ];
     for installation in every_installation() {
@@ -496,6 +603,7 @@ fn each_installation_gets_the_rule_the_style_guide_settles() {
     let r = remedy(
         &Installation::Pacman {
             package: "brokey".into(),
+            archive: false,
         },
         &latest,
         x86,
@@ -511,32 +619,38 @@ fn each_installation_gets_the_rule_the_style_guide_settles() {
                 .into(),
         }
     );
-    // On any architecture, and with no assets: the AUR builds from source.
+    // On any architecture, and with no assets: the AUR builds from source,
+    // and the archive (which carries brokey-bin, not brokey) changes nothing.
     for arch in ARCHES {
-        let r = remedy(
-            &Installation::Pacman {
-                package: "brokey".into(),
-            },
-            &latest,
-            arch,
-            &[],
-        );
-        assert!(
-            matches!(
-                r,
-                Remedy::UpdatesPage {
-                    source: SourceKind::Aur,
-                    ..
-                }
-            ),
-            "{arch}: {r:?}"
-        );
+        for archive in [false, true] {
+            let r = remedy(
+                &Installation::Pacman {
+                    package: "brokey".into(),
+                    archive,
+                },
+                &latest,
+                arch,
+                &[],
+            );
+            assert!(
+                matches!(
+                    r,
+                    Remedy::UpdatesPage {
+                        source: SourceKind::Aur,
+                        ..
+                    }
+                ),
+                "{arch} {archive}: {r:?}"
+            );
+        }
     }
 
-    // The bin package is the release asset through pacman -U.
+    // Without the archive, the bin package is the release asset through
+    // pacman -U, which adds the archive.
     let r = remedy(
         &Installation::Pacman {
             package: "brokey-bin".into(),
+            archive: false,
         },
         &latest,
         x86,
@@ -547,11 +661,15 @@ fn each_installation_gets_the_rule_the_style_guide_settles() {
             asset,
             url,
             installer,
-            ..
+            sentence,
         } => {
             assert_eq!(asset, "brokey-bin-0.2.0-1-x86_64.pkg.tar.zst");
             assert!(url.ends_with("/brokey-bin-0.2.0-1-x86_64.pkg.tar.zst"));
             assert_eq!(*installer, Installer::PacmanU);
+            assert!(
+                sentence.contains("does not have the Spillebulle archive"),
+                "{sentence}"
+            );
         }
         other => panic!("{other:?}"),
     }
@@ -559,12 +677,43 @@ fn each_installation_gets_the_rule_the_style_guide_settles() {
     let r = remedy(
         &Installation::Pacman {
             package: "brokey-bin".into(),
+            archive: false,
         },
         &latest,
         "aarch64",
         &assets,
     );
     assert!(matches!(r, Remedy::Sentence { .. }), "{r:?}");
+
+    // With the archive, pacman has it: the Updates page, and the one command
+    // that is true there. On any architecture and with no assets, because
+    // nothing is downloaded.
+    for arch in ARCHES {
+        for (list, assets) in every_asset_list() {
+            let r = remedy(
+                &Installation::Pacman {
+                    package: "brokey-bin".into(),
+                    archive: true,
+                },
+                &latest,
+                arch,
+                &assets,
+            );
+            match &r {
+                Remedy::UpdatesPage {
+                    source,
+                    package,
+                    sentence,
+                } => {
+                    assert_eq!(*source, SourceKind::Pacman, "{arch} {list}");
+                    assert_eq!(package, "brokey-bin");
+                    assert!(sentence.contains("sudo pacman -Syu"), "{sentence}");
+                    assert!(named_files(sentence).is_empty(), "{sentence}");
+                }
+                other => panic!("{arch} {list}: {other:?}"),
+            }
+        }
+    }
 
     // With the archive, apt and dnf have it.
     let r = remedy(&Installation::Dpkg { archive: true }, &latest, x86, &assets);
@@ -703,7 +852,7 @@ fn a_release_that_built_x86_only_leaves_arm_with_a_sentence() {
     for installation in every_installation() {
         let r = remedy(&installation, &v("0.3.0"), "aarch64", &assets);
         if has_archive(&installation)
-            || matches!(installation, Installation::Pacman { ref package } if package == "brokey")
+            || matches!(installation, Installation::Pacman { ref package, .. } if package == "brokey")
         {
             assert!(
                 matches!(r, Remedy::UpdatesPage { .. }),
@@ -733,6 +882,7 @@ fn a_newer_release_carries_a_remedy_and_an_older_one_does_not() {
     let r = latest();
     let installation = Installation::Pacman {
         package: "brokey-bin".into(),
+        archive: false,
     };
 
     let s = assemble(&v("0.1.0"), Some(&r), installation.clone(), "x86_64", None);
@@ -744,7 +894,10 @@ fn a_newer_release_carries_a_remedy_and_an_older_one_does_not() {
     assert_eq!(l.published, r.published);
     assert!(s.remedy.as_ref().is_some_and(Remedy::is_actionable));
     assert_eq!(s.installation, installation);
-    assert_eq!(s.installation_label, "the brokey-bin package");
+    assert_eq!(
+        s.installation_label,
+        "the brokey-bin package without the Spillebulle archive"
+    );
     assert_eq!(s.error, None);
 
     // The same version: nothing to do, and the release is still shown.
@@ -812,6 +965,7 @@ fn an_install_asset_plans_a_download_and_a_root_install() {
         (
             Installation::Pacman {
                 package: "brokey-bin".into(),
+                archive: false,
             },
             "pacman",
             vec!["-U", "--noconfirm"],
@@ -906,6 +1060,7 @@ fn a_remedy_that_is_not_actionable_has_no_plan_and_says_why() {
     for installation in [
         Installation::Pacman {
             package: "brokey".into(),
+            archive: false,
         },
         Installation::Dpkg { archive: true },
         Installation::Flatpak,
