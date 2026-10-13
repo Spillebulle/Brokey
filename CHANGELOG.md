@@ -2,6 +2,12 @@
 
 Newest first. Each section is the release's notes, published verbatim.
 
+## 0.1.7
+
+- The Arch package adds the Spillebulle archive as it installs, so `sudo pacman -Syu` and the Updates page carry Brokey along with everything else on Arch, CachyOS, EndeavourOS and Manjaro. It appends a `[spillebulle]` section to the end of `/etc/pacman.conf`, after your distribution's repositories, writes `/etc/pacman.d/spillebulle` and trusts the archive's key with pacman-key. Removing Brokey leaves them in place for the other applications from the archive; `sudo touch /etc/pacman.d/spillebulle.disabled` before installing keeps the archive off.
+- On a machine with the archive, Brokey's own update notice says the new version arrives through pacman. Without it, Brokey still downloads the release's package and installs it with pacman, and that package adds the archive.
+- The .deb keeps the archive's key under its own name, `/usr/share/brokey/spillebulle-archive.gpg`, and writes the shared keyring to `/etc/apt/keyrings/spillebulle-archive.gpg`. A source written by an older package from the archive is pointed at the new keyring, so apt keeps working when that package is upgraded or removed.
+
 ## 0.1.6
 
 - An install asks for your password once, and only when it needs to. Brokey keeps one helper for the whole change, so an AUR build that takes an hour between installing its dependencies and installing the result no longer asks a second or third time.

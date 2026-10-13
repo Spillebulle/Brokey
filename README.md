@@ -32,11 +32,14 @@ notes and the checksums.
 | Any other Linux | [AppImage](https://github.com/Spillebulle/Brokey/releases/download/v0.1.6/Brokey-0.1.6-x86_64.AppImage), one file with nothing to install | [AppImage](https://github.com/Spillebulle/Brokey/releases/download/v0.1.6/Brokey-0.1.6-aarch64.AppImage) |
 | Windows 11, Windows 10 | [`setup.exe`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.6/brokey-setup-0.1.6-x64.exe) | [`setup.exe`](https://github.com/Spillebulle/Brokey/releases/download/v0.1.6/brokey-setup-0.1.6-arm64.exe) |
 
-The `.deb` and `.rpm` add the [Spillebulle archive](https://spillebulle.github.io/packages/)
-as they install, so `apt upgrade` or your usual system update carries Brokey
-along with everything else. The Arch package is in no repository, so Brokey
-updates it itself: it downloads the next release's package and installs it with
-pacman when you say so. An AUR package is coming.
+The `.deb`, the `.rpm` and the Arch package add the
+[Spillebulle archive](https://spillebulle.github.io/packages/) as they install,
+so `apt upgrade`, `sudo pacman -Syu` on Arch and CachyOS, or your usual system
+update carries Brokey along with everything else. On Arch the package appends a
+`[spillebulle]` section to `/etc/pacman.conf` and trusts the archive's key;
+removing Brokey leaves both for the other applications from the archive. The
+archive's page says how to add it by hand, and how to keep it off. An AUR
+package is coming.
 
 On Linux you need WebKitGTK 4.1 and polkit, which every desktop distribution
 ships and the packages pull in. Installing asks for your password through the
