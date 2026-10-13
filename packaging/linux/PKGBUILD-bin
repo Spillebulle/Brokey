@@ -23,6 +23,10 @@ optdepends=('paru: build AUR packages with paru'
             'fwupd: firmware updates'
             'chwd: driver profiles on CachyOS')
 options=('!strip' '!debug')
+# Enrols the machine in the Spillebulle archive, so pacman -Syu upgrades
+# Brokey from then on (../Packages/ENROLMENT.md). makepkg wants the file
+# beside this PKGBUILD; the release workflow copies it there.
+install=brokey.install
 source_x86_64=("brokey-${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
 source_aarch64=("brokey-${pkgver}-aarch64-unknown-linux-gnu.tar.gz")
 sha256sums_x86_64=('SKIP')
@@ -41,6 +45,10 @@ package() {
         install -Dm644 "$stage/icons/brokey-$size.png" \
             "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/$id.png"
     done
+    # The archive key under Brokey's own name; brokey.install trusts it. The
+    # release tarball carries packaging/ whole, so the key is in it.
+    install -Dm644 "$stage/packaging/linux/spillebulle-archive.asc" \
+        "$pkgdir/usr/share/brokey/spillebulle-archive.asc"
     install -Dm644 "$stage/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm644 "$stage/README.md" "$stage/CHANGELOG.md" -t "$pkgdir/usr/share/doc/brokey/"
 }

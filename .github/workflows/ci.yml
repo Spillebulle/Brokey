@@ -40,7 +40,9 @@ jobs:
           PY
       - name: Shell syntax
         run: |
-          for f in packaging/linux/build-packages.sh tools/*.sh; do bash -n "$f"; done
+          for f in packaging/check.sh packaging/linux/*.sh packaging/linux/brokey.install tools/*.sh; do
+            bash -n "$f"
+          done
       - name: Desktop entry
         run: |
           sudo apt-get update && sudo apt-get install -y desktop-file-utils
@@ -51,8 +53,11 @@ jobs:
   # The .deb beside another application from the archive. Every one of them
   # enrols the same keyring, and 0.1.2 would not install beside Umber because
   # both shipped it. Stand-in binaries: the packaging is under test, not them.
+  # The rest of ../Packages/ENROLMENT.md for apt is checked by the same
+  # script: the shared keyring, the source, the old path migrated, nothing
+  # overwritten, the opt-out, and apt reading the live archive.
   deb:
-    name: deb beside another app
+    name: deb enrols beside another app
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
@@ -67,6 +72,59 @@ jobs:
           packaging/linux/build-packages.sh 0.0.0 stub/brokey stub/brokey-helper amd64 dist
       - name: Install and remove in both orders
         run: sudo sh packaging/linux/test-deb-keyring.sh dist/brokey_0.0.0_amd64.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stub-rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  # The .rpm in a clean Fedora: the repo file and the key it names, and dnf
+  # reading the live archive with them.
+  rpm:
+    name: rpm enrols
+    needs: deb
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: stub-rpm
+          path: dist
+      - name: Install and check
+        run: |
+          set -eu
+          dnf install -y -q dist/brokey-*.rpm
+          test -s /etc/pki/rpm-gpg/RPM-GPG-KEY-spillebulle
+          grep -qx 'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-spillebulle' /etc/yum.repos.d/spillebulle.repo
+          grep -qx 'baseurl=https://spillebulle.github.io/packages/rpm/' /etc/yum.repos.d/spillebulle.repo
+          dnf -y -q makecache --repo spillebulle
+          dnf remove -y -q brokey
+          test -f /etc/yum.repos.d/spillebulle.repo
+
+  # The Arch package built the way the release builds it, from a tarball of
+  # the release's shape with stand-in binaries, then installed with its
+  # scriptlets in a clean container.
+  arch-package:
+    name: arch package enrols
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build
+        run: |
+          set -eu
+          stage=brokey-0.0.0-x86_64-unknown-linux-gnu
+          mkdir -p "staging/$stage"
+          printf '#!/bin/sh\n' > "staging/$stage/brokey"
+          cp "staging/$stage/brokey" "staging/$stage/brokey-helper"
+          chmod +x "staging/$stage/brokey" "staging/$stage/brokey-helper"
+          cp README.md CHANGELOG.md LICENSE "staging/$stage/"
+          cp -r packaging "staging/$stage/"
+          cp -r assets/icons "staging/$stage/icons"
+          tar czf "$stage.tar.gz" -C staging "$stage"
+          sh packaging/linux/build-arch-package.sh 0.0.0 "$stage.tar.gz" out
+      - name: Install and check
+        run: sh packaging/linux/test-arch-enrolment.sh out/brokey-bin-0.0.0-1-x86_64.pkg.tar.zst
 
   # The page: types, the build, and the design check (no raw hex, no em dash,
   # no web scale).

@@ -105,10 +105,13 @@ echo "==> building brokey_${version}_${arch}.deb"
 deb="$work/deb"
 stage_tree "$deb/usr"
 mkdir -p "$deb/DEBIAN"
-# The keyring is not in the package's file list. Every application from the
-# archive needs the same file at the same path, and dpkg refuses a second
-# package that ships a file another already owns, so Brokey would not install
-# beside Umber. The postinst writes it instead, like the source file below.
+# The key ships under Brokey's own name and the postinst copies it to the
+# shared keyring (../Packages/ENROLMENT.md). Every application from the
+# archive needs the shared file, and dpkg refuses a second package that ships
+# a path another already owns, so no package may own it.
+if [ -n "$archive_key" ]; then
+    install -Dm644 "$work/$ARCHIVE_KEYRING.gpg" "$deb/usr/share/brokey/spillebulle-archive.gpg"
+fi
 size=$(du -ks "$deb/usr" | cut -f1)
 cat > "$deb/DEBIAN/control" <<EOF2
 Package: brokey
@@ -135,39 +138,33 @@ if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database -q /usr/share/applications || true
 fi
 EOF2
-# The source file is written by the scriptlet, never shipped: a conffile is
-# removed on purge, and this file is shared with every application from the
-# archive. Created, never overwritten; a `.disabled` marker is honoured.
-#
-# The keyring the same way, written when missing. An older package from the
-# archive may still own it, and dpkg deletes it when that package is removed
-# or upgraded past shipping it; the file trigger runs this postinst again at
-# that moment, so the source never names a key that is gone.
+# The archive, exactly as ../Packages/ENROLMENT.md writes it: the shared
+# keyring and the source are written by the scriptlet, never shipped, because
+# a conffile is removed on purge and both are shared with every application
+# from the archive. Created, never overwritten, never removed; a `.disabled`
+# marker is honoured; no step fails the install. A source from before the
+# contract names /usr/share/keyrings/, which an upgrade of the package that
+# owned it removes, so it is pointed at the shared copy.
 if [ -n "$archive_key" ]; then
-    key_b64=$(base64 < "$work/$ARCHIVE_KEYRING.gpg")
-    cat >> "$deb/DEBIAN/postinst" <<EOF2
-
-keyring=/usr/share/keyrings/$ARCHIVE_KEYRING.gpg
-if [ ! -s "\$keyring" ]; then
-    mkdir -p /usr/share/keyrings
-    base64 -d > "\$keyring.new" <<'KEY'
-$key_b64
-KEY
-    chmod 644 "\$keyring.new"
-    mv "\$keyring.new" "\$keyring"
-fi
-EOF2
-    echo "interest-noawait /usr/share/keyrings/$ARCHIVE_KEYRING.gpg" > "$deb/DEBIAN/triggers"
-    cat >> "$deb/DEBIAN/postinst" <<EOF2
+    cat >> "$deb/DEBIAN/postinst" <<'EOF2'
 
 sources=/etc/apt/sources.list.d/spillebulle.sources
-if [ ! -e "\$sources" ] && [ ! -e "\$sources.disabled" ]; then
-    cat > "\$sources" <<'SOURCES'
-Types: deb
-URIs: $ARCHIVE_BASE/deb/
-Suites: ./
-Signed-By: /usr/share/keyrings/$ARCHIVE_KEYRING.gpg
-SOURCES
+keyring=/etc/apt/keyrings/spillebulle-archive.gpg
+if [ ! -e "$sources.disabled" ]; then
+    mkdir -p /etc/apt/keyrings || true
+    [ -e "$keyring" ] || install -m644 /usr/share/brokey/spillebulle-archive.gpg "$keyring" || true
+    # Packages from before this contract shipped the keyring at
+    # /usr/share/keyrings/, which an upgrade removes; point at the shared copy.
+    if [ -e "$sources" ] && grep -q '^Signed-By: /usr/share/keyrings/spillebulle-archive.gpg$' "$sources"; then
+        sed -i "s|^Signed-By: /usr/share/keyrings/spillebulle-archive.gpg\$|Signed-By: $keyring|" "$sources" || true
+    fi
+    if [ ! -e "$sources" ]; then
+        printf '%s\n' \
+            'Types: deb' \
+            'URIs: https://spillebulle.github.io/packages/deb/' \
+            'Suites: ./' \
+            "Signed-By: $keyring" > "$sources" || true
+    fi
 fi
 EOF2
 fi
@@ -221,7 +218,8 @@ fi
     if [ -n "$archive_key" ]; then
         echo "repo=/etc/yum.repos.d/spillebulle.repo"
         echo "if [ ! -e \"\$repo\" ] && [ ! -e \"\$repo.disabled\" ]; then"
-        echo "    cat > \"\$repo\" <<'REPO'"
+        # `|| :` because nothing here may fail the install (ENROLMENT.md).
+        echo "    cat > \"\$repo\" <<'REPO' || :"
         echo "[spillebulle]"
         echo "name=Spillebulle"
         echo "baseurl=$ARCHIVE_BASE/rpm/"

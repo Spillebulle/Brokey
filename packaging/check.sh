@@ -63,6 +63,76 @@ grep -rq "$HELPER" crates/brokey-core/src/transaction/ || \
     fail "the runner does not look for the helper at $HELPER"
 ok "packages and the runner agree on the helper path"
 
+# --- the house archive -------------------------------------------------------
+#
+# ../Packages/ENROLMENT.md. The path a scriptlet writes and the path the
+# updater looks for are one string written in two files in two languages that
+# never see each other. Get it wrong and nothing breaks: the packages install,
+# the updater runs, and it tells every user of the archive to download a file
+# by hand for ever (STYLE-GUIDE.md §18.2).
+build=packaging/linux/build-packages.sh
+install_script=packaging/linux/brokey.install
+pkgbuild_bin=packaging/linux/PKGBUILD-bin
+updater=crates/brokey-core/src/selfupdate/install.rs
+FPR=7A9EA69E033F3C3EF4F53EB4A72BC0FD5E061ADA
+
+[ -f packaging/linux/spillebulle-archive.asc ] || \
+    fail "packaging/linux/spillebulle-archive.asc is missing, so no package would enrol the machine; copy it byte for byte from the archive"
+[ -f "$install_script" ] || fail "no $install_script, so the Arch package would not enrol the machine"
+
+# Written by the scriptlet, looked for by the updater.
+for path in /etc/apt/sources.list.d/spillebulle.sources /etc/yum.repos.d/spillebulle.repo; do
+    grep -q "$path" "$build" || fail "$build never writes $path"
+    grep -q "\"$path\"" "$updater" || fail "the updater never looks for $path"
+done
+grep -qF "printf '\n[spillebulle]\nInclude = %s\n'" "$install_script" || \
+    fail "$install_script never appends a [spillebulle] section to pacman.conf"
+grep -q '"\[spillebulle\]"' "$updater" || fail "the updater never looks for a [spillebulle] section"
+grep -q '/etc/pacman.conf' "$install_script" || fail "$install_script never writes /etc/pacman.conf"
+grep -q '"/etc/pacman.conf"' "$updater" || fail "the updater never reads /etc/pacman.conf"
+grep -q 'local conf=/etc/pacman.d/spillebulle$' "$install_script" || \
+    fail "$install_script does not write the repository settings to /etc/pacman.d/spillebulle"
+grep -q '"/etc/pacman.d/spillebulle"' "$updater" || \
+    fail "the updater does not name /etc/pacman.d/spillebulle"
+ok "the scriptlets and the updater agree on where the archive is configured"
+
+# The key each package ships under its own name, and the path its scriptlet
+# copies or trusts it from.
+[ "$(grep -c '/usr/share/brokey/spillebulle-archive.gpg' "$build")" -ge 2 ] || \
+    fail "$build must both ship /usr/share/brokey/spillebulle-archive.gpg and copy it in the postinst"
+grep -q '/etc/apt/keyrings/spillebulle-archive.gpg' "$build" || \
+    fail "$build does not write the shared keyring /etc/apt/keyrings/spillebulle-archive.gpg"
+grep -q '/usr/share/brokey/spillebulle-archive.asc' "$install_script" || \
+    fail "$install_script does not trust /usr/share/brokey/spillebulle-archive.asc"
+grep -q 'usr/share/brokey/spillebulle-archive.asc' "$pkgbuild_bin" || \
+    fail "$pkgbuild_bin does not ship /usr/share/brokey/spillebulle-archive.asc"
+grep -q "local fpr=$FPR\$" "$install_script" || fail "$install_script does not name the archive key $FPR"
+ok "each package ships the key where its scriptlet looks for it"
+
+# makepkg runs the scriptlets only if the PKGBUILD names them and the file is
+# beside it when it builds.
+grep -q '^install=brokey.install$' "$pkgbuild_bin" || fail "$pkgbuild_bin does not say install=brokey.install"
+grep -q 'brokey.install' packaging/linux/build-arch-package.sh || \
+    fail "build-arch-package.sh does not put brokey.install beside the PKGBUILD"
+grep -q 'build-arch-package.sh' .github/workflows/release.yml || \
+    fail "the release workflow does not build the Arch package with build-arch-package.sh"
+for f in post_install post_upgrade; do
+    grep -q "^$f() {" "$install_script" || fail "$install_script has no $f"
+done
+if grep -Eq '^(pre|post)_remove\(\)' "$install_script"; then
+    fail "$install_script has a remove scriptlet; removing one application must never cut the others off"
+fi
+ok "the Arch package runs its scriptlets on install and upgrade, and none on removal"
+
+# The key is the archive's own. Only where gpg is installed; the fingerprint
+# is otherwise checked by CI, which installs the packages.
+if command -v gpg >/dev/null 2>&1; then
+    gpg --show-keys --with-colons packaging/linux/spillebulle-archive.asc 2>/dev/null | \
+        grep -q "^fpr:::::::::$FPR:" || \
+        fail "packaging/linux/spillebulle-archive.asc is not the key $FPR"
+    ok "the checked-in key is $FPR"
+fi
+
 # The version is stated in four places; the release test checks three of them
 # against Cargo.toml and this checks the fourth, the AppStream release list.
 version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)

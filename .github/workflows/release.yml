@@ -155,21 +155,16 @@ jobs:
         with:
           name: x86_64-unknown-linux-gnu
           path: dist
+      # The script puts brokey.install beside the PKGBUILD, which makepkg
+      # needs for the scriptlets that enrol the machine in the archive. CI
+      # builds and installs the package through the same script.
       - name: Build
         run: |
           set -eu
           pacman -Sy --noconfirm --needed git
           version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
-          useradd -m builder
-          work=/home/builder/build
-          install -d -o builder "$work"
-          cp packaging/linux/PKGBUILD-bin "$work/PKGBUILD"
-          cp "dist/brokey-${version}-x86_64-unknown-linux-gnu.tar.gz" "$work/"
-          sed -i "s/^pkgver=.*/pkgver=${version}/" "$work/PKGBUILD"
-          chown -R builder "$work"
-          su builder -c "cd $work && makepkg --noconfirm --nodeps"
-          mkdir -p out
-          cp "$work"/*.pkg.tar.zst out/
+          sh packaging/linux/build-arch-package.sh "$version" \
+            "dist/brokey-${version}-x86_64-unknown-linux-gnu.tar.gz" out
       - uses: actions/upload-artifact@v4
         with:
           name: arch-package
@@ -212,7 +207,7 @@ jobs:
             --notes-file notes.md \
             artifacts/*
 
-      # The apt and rpm archive rebuilds itself from the newest release of
+      # The apt, rpm and pacman archive rebuilds itself from the newest release of
       # every project it carries. Without the token it cannot be told, and
       # saying so out loud is the point of the shape below: this step used to
       # carry `if: env.ARCHIVE_DISPATCH_TOKEN != ''`, so on a machine with no
@@ -227,7 +222,7 @@ jobs:
         run: |
           set -eu
           if [ -z "${ARCHIVE_DISPATCH_TOKEN}" ]; then
-            echo "::warning title=The archive was not told::ARCHIVE_DISPATCH_TOKEN is not set, so https://spillebulle.github.io/packages/ still advertises the previous release and apt and dnf users will not see ${GITHUB_REF_NAME#v}. Run the Publish archive workflow in Spillebulle/packages by hand, or set the secret to a token that may dispatch to that repository and this becomes automatic."
+            echo "::warning title=The archive was not told::ARCHIVE_DISPATCH_TOKEN is not set, so https://spillebulle.github.io/packages/ still advertises the previous release and apt, dnf and pacman users will not see ${GITHUB_REF_NAME#v}. Run the Publish archive workflow in Spillebulle/packages by hand, or set the secret to a token that may dispatch to that repository and this becomes automatic."
             exit 0
           fi
           GH_TOKEN="$ARCHIVE_DISPATCH_TOKEN" gh api \
