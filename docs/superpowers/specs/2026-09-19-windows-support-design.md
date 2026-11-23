@@ -673,24 +673,33 @@ plan's own workspace is scratch and these outlive it.
   and does not elevate for an `HKCU` entry. So removing the same per-user
   application by the two routes prompts for Administrator on one and not the
   other. The privilege plan is where this is settled, because the answer
-  depends on how elevation is actually performed.
+  depends on how elevation is actually performed. Narrowed on 2026-11-23: a
+  winget install whose manifest permits user scope no longer elevates (see
+  the `--scope user` entry below), but an update or a removal through winget
+  still does.
 
 - **A per-user install performed under elevation lands in the wrong profile.**
   If UAC is satisfied by a different account than the signed-in user, a winget
   install that resolves to user scope installs into the administrator's
   profile. A property of the elevation mechanism, not of what `plan()`
-  returns, and so also the privilege plan's to answer.
+  returns, and so also the privilege plan's to answer. Narrowed on
+  2026-11-23 for installs: one Brokey chooses user scope for runs unelevated
+  in the user's own session, so it lands in the right profile. An install
+  that falls back to the elevated route, and every update, still can.
 
-- **Brokey has no equivalent of winget's name normaliser.** `norm_names2`
-  holds values winget produced by stripping versions, architectures and locale
-  tags as well as folding; `query::normalise` only folds to letters and
-  digits. It stored `python` for `Python 3.0` and `mozillafirefox` for
-  `Mozilla Firefox (en-US)`, where Brokey gives `python30` and
-  `mozillafirefoxenus`. Against a registry `DisplayName`, which almost always
-  carries a version, the two disagree, so the name rung of the
-  registry-to-catalogue join usually misses. It misses safely, and the exact
-  product-code rung carries software actually installed through winget.
-  Belongs with the metadata ladder.
+- **Brokey has no equivalent of winget's name normaliser.** Closed
+  2026-11-23. `winget/normalise.rs` ports `NameNormalization.cpp` from
+  `winget-cli` (its `Initial` normaliser, the only one it has), leaving out
+  only the patterns for Roblox, Bomgar and SAP package names. Against the
+  live catalogue's 16,496 package names it reproduces the stored
+  `norm_names2` value for all but one, a Tamil name whose combining marks
+  Rust and ICU classify differently; the old fold agreed for 15,334. The
+  catalogue also stores names with the architecture appended, `python(X64)`
+  and `python(X86)` and no other suffix, and the lookup accepts both. On the
+  development machine the registry entries joined to a winget package went
+  from 81 to 93 and the updates found from 53 to 58; every new join was
+  checked by hand. A name that folds to a version family (`python`) is still
+  refused as ambiguous.
 
 - **Whether a winget version family should collapse on the page.** Searching
   `python` shows fifteen rows, because `group.rs` never joins two packages
@@ -698,15 +707,38 @@ plan's own workspace is scratch and these outlive it.
   the same answer the AUR gets for `firefox-git` and `firefox-nightly`. But
   winget's index carries a real family signal rather than a heuristic, so
   Windows could collapse them in a way Linux cannot. A product decision,
-  not a correctness one.
+  not a correctness one. The recommendation recorded on 2026-11-23 is not to
+  collapse them into one row's editions, because Python 3.12 and 3.14 install
+  side by side and an edition picker reads as "the same thing from somewhere
+  else"; if anything, a search row could fold the older members of a family
+  under the newest behind a "15 versions" disclosure, keyed on the shared
+  `norm_names2` and `norm_publishers2` values, which is what the catalogue
+  itself treats as the family.
 
-- **`--scope user` is not chosen per package.** This spec asks for per-user
-  where the manifest permits it. Knowing what the manifest permits means
-  fetching manifests, which is the metadata ladder.
+- **The Installed page listed an application twice when its Add/Remove
+  Programs name carried its version.** Closed 2026-11-23. winget's
+  `Advanced IP Scanner` and the registry's `Advanced IP Scanner 2.5.1` share
+  no name key, so `group.rs` kept them apart. An installed winget package now
+  carries the `Registry key` fact of the entry it was matched to, the entry
+  carries the same fact, and `group.rs` joins two packages from different
+  sources that name the same key, as exactly as an AppStream id and recorded
+  as `MatchedBy::Registry`. The development machine's Installed page went from
+  224 rows to 178. Chocolatey and Scoop could carry the same fact when they
+  learn which entry their packages left.
 
-- **`refresh_index()` is left at its default for winget.** `catalogue()`
-  refetches when the cached copy is over a day old, so the index does
-  refresh, but pressing refresh does not force it.
+- **`--scope user` is not chosen per package.** Closed 2026-11-23. An
+  install reads the package's installer manifest through the same cache as
+  the detail page's locale manifest, and when every architecture it lists
+  has a `Scope: user` installer, its own or the manifest's default, it plans
+  `winget install --scope user` without elevating. Every architecture rather
+  than this machine's, because winget chooses which installer runs. A failed
+  fetch or a machine-only manifest keeps the elevated install. Updates and
+  removals do not choose a scope: winget finds what is installed.
+
+- **`refresh_index()` is left at its default for winget.** Closed
+  2026-11-23. It downloads the catalogue whatever its age, as pacman's
+  refreshes its databases, and a download that fails or is not a catalogue
+  leaves the cached copy answering.
 
 - **`NO_BOOTSTRAP` is unreachable.** `Source::setup` returns `Option<Setup>`
   and `None` cannot carry a reason, so `transaction/plan.rs` renders
