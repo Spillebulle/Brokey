@@ -10,6 +10,7 @@ import { openUrl as openerOpenUrl } from "@tauri-apps/plugin-opener";
 import type {
   DriversReport,
   Event,
+  FeaturesReport,
   Op,
   Package,
   PackageRef,
@@ -119,6 +120,10 @@ export function active_plans(): Promise<PlanStatus[]> {
 
 export function drivers(): Promise<DriversReport> {
   return inTauri ? call("drivers") : mock().then((m) => m.drivers());
+}
+
+export function features(): Promise<FeaturesReport> {
+  return inTauri ? call("features") : mock().then((m) => m.features());
 }
 
 export function settings_get(): Promise<Settings> {

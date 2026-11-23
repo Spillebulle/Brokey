@@ -1,4 +1,4 @@
-import { Cpu, HardDrive, Package, RefreshCw, Search, Settings } from "lucide-react";
+import { Blocks, Cpu, HardDrive, Package, RefreshCw, Search, Settings } from "lucide-react";
 import type { ReactNode } from "react";
 import pkg from "../../../package.json";
 import { isLive, selectActivePlan, useActivity } from "../activity/store";
@@ -20,10 +20,11 @@ const SOFTWARE: NavItem[] = [
   { view: "updates", label: "Updates", icon: <RefreshCw {...ICON} aria-hidden="true" /> },
 ];
 
-const MACHINE: NavItem[] = [
-  { view: "drivers", label: "Drivers", icon: <Cpu {...ICON} aria-hidden="true" /> },
-  { view: "settings", label: "Settings", icon: <Settings {...ICON} aria-hidden="true" /> },
-];
+const SETTINGS: NavItem = { view: "settings", label: "Settings", icon: <Settings {...ICON} aria-hidden="true" /> };
+
+/** Linux has drivers and firmware; on Windows, Windows Update keeps those and the slot is Windows's optional features. */
+const MACHINE: NavItem[] = [{ view: "drivers", label: "Drivers", icon: <Cpu {...ICON} aria-hidden="true" /> }, SETTINGS];
+const MACHINE_WINDOWS: NavItem[] = [{ view: "features", label: "Features", icon: <Blocks {...ICON} aria-hidden="true" /> }, SETTINGS];
 
 /** Desktop shell (§6.1): 34 px menu bar, 240 px dock sidebar, content over window, 26 px status bar. */
 export function Shell({ children }: { children: ReactNode }) {
@@ -71,6 +72,7 @@ function NavRow({ item, on, count }: { item: NavItem; on: boolean; count?: numbe
 function Sidebar() {
   const nav = useShell(selectNav);
   const updateCount = useShell((s) => s.updateCount);
+  const windows = useShell(selectIsWindows);
   return (
     <nav className="bk-sidebar" aria-label="Pages">
       <div className="bk-nav">
@@ -79,7 +81,7 @@ function Sidebar() {
           <NavRow key={item.view} item={item} on={nav === item.view} count={item.view === "updates" ? updateCount : undefined} />
         ))}
         <div className="bk-eyebrow bk-nav-eyebrow">Machine</div>
-        {MACHINE.map((item) => (
+        {(windows ? MACHINE_WINDOWS : MACHINE).map((item) => (
           <NavRow key={item.view} item={item} on={nav === item.view} />
         ))}
       </div>

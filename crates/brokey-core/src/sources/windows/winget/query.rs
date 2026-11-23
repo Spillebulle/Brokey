@@ -22,8 +22,11 @@ pub struct Row {
     pub publisher: Option<String>,
 }
 
-/// The index's own normalisation: letters and digits, folded to lower case.
-/// `Mozilla Firefox (en-US)` is stored as `mozillafirefoxenus`.
+/// Letters and digits, folded to lower case: what search compares a typed
+/// query with. It is not the catalogue's own normalisation, which also strips
+/// versions, architectures and locales; that is [`super::normalise`], and the
+/// registry join uses it. A typed query is a few words with none of those in
+/// it, so the plain fold is what search wants.
 pub fn normalise(text: &str) -> String {
     text.chars()
         .filter(|c| c.is_alphanumeric())
@@ -284,7 +287,7 @@ mod tests {
         assert_eq!(count(&db).unwrap(), 9);
     }
 
-    /// Normalisation matches the index's own: letters and digits, folded.
+    /// Search's fold: letters and digits only.
     #[test]
     fn normalising_keeps_letters_and_digits_only() {
         assert_eq!(normalise("Mozilla Firefox (en-US)"), "mozillafirefoxenus");
@@ -456,15 +459,100 @@ mod tests {
         assert!(super::super::match_entry(&db, &e).unwrap().is_none());
     }
 
-    /// What the name rung is actually worth, written down so nobody mistakes it
-    /// for more. Brokey's `normalise` folds to letters and digits; winget's own
-    /// normaliser, which produced the `norm_names2` values, also strips versions,
-    /// architectures and locale tags, so it stored `python` for `Python 3.0`.
-    /// A real registry DisplayName carries all of those, so the two disagree and
-    /// the rung misses. It misses safely, and the exact rung below is what
-    /// actually finds software installed through winget.
+    /// The fixture with extra `norm_names2` rows, written before it is opened
+    /// read-only, for the forms the nine-package fixture does not carry.
+    fn db_with_names(extra: &[(&str, &str)]) -> (tempfile::TempDir, rusqlite::Connection) {
+        let (dir, conn) = db();
+        drop(conn);
+        let path = dir.path().join("index.db");
+        let rw = rusqlite::Connection::open(&path).unwrap();
+        for (id, norm) in extra {
+            rw.execute(
+                "INSERT INTO norm_names2 (norm_name, package) \
+                 SELECT ?1, rowid FROM packages WHERE id = ?2",
+                rusqlite::params![norm, id],
+            )
+            .unwrap();
+        }
+        drop(rw);
+        let conn = super::super::index::open(&path).unwrap();
+        (dir, conn)
+    }
+
+    /// A registry DisplayName carries a version and an architecture, and the
+    /// publisher a legal-entity suffix; winget's normaliser takes all three
+    /// off, so the name rung meets what the catalogue stored. Before it was
+    /// ported this compared `steam2109191x64` by `valvecorporation` with
+    /// `steam` by `valve` and missed.
     #[test]
-    fn a_realistic_display_name_misses_the_name_rung_and_the_product_code_saves_it() {
+    fn a_versioned_display_name_reaches_the_name_rung() {
+        let (_d, db) = db();
+        let e = entry(
+            "NotAProductCode",
+            "Steam 2.10.91.91 (x64)",
+            "2.10.91.91",
+            "Valve Corporation",
+        );
+        assert_eq!(
+            super::super::match_entry(&db, &e).unwrap().unwrap().id,
+            "Valve.Steam"
+        );
+    }
+
+    /// And it still folds no further than winget did: a different product by
+    /// the same publisher is a different name.
+    #[test]
+    fn another_product_by_the_same_publisher_is_not_a_match() {
+        let (_d, db) = db();
+        let e = entry(
+            "NotAProductCode",
+            "Steam Link 1.3.9 (x64)",
+            "1.3.9",
+            "Valve Corporation",
+        );
+        assert!(super::super::match_entry(&db, &e).unwrap().is_none());
+    }
+
+    /// The catalogue writes the architecture after a name it took from an
+    /// installer that declared one, `obsidianportable(X64)`, and a lookup
+    /// that only tried the bare form would miss it.
+    #[test]
+    fn a_name_stored_with_its_architecture_matches() {
+        let (_d, db) = db_with_names(&[("Obsidian.Obsidian", "obsidianportable(X64)")]);
+        let e = entry(
+            "NotAProductCode",
+            "Obsidian Portable 1.13.0 (x64)",
+            "1.13.0",
+            "Obsidian",
+        );
+        assert_eq!(
+            super::super::match_entry(&db, &e).unwrap().unwrap().id,
+            "Obsidian.Obsidian"
+        );
+    }
+
+    /// One package stored under several forms of its name is still one
+    /// package. Counting it twice would read as an ambiguous match and
+    /// refuse it.
+    #[test]
+    fn one_package_under_two_forms_of_its_name_is_not_ambiguous() {
+        let (_d, db) = db_with_names(&[
+            ("Obsidian.Obsidian", "obsidian(X64)"),
+            ("Obsidian.Obsidian", "obsidian(X86)"),
+        ]);
+        let e = entry("NotAProductCode", "Obsidian 1.13.0", "1.13.0", "Obsidian");
+        assert_eq!(
+            super::super::match_entry(&db, &e).unwrap().unwrap().id,
+            "Obsidian.Obsidian"
+        );
+    }
+
+    /// The normaliser makes a versioned Python fold to `python`, which is the
+    /// whole version family, so the name rung refuses it as ambiguous: a wrong
+    /// join offers an update that replaces one Python with another. The exact
+    /// product-code rung is what finds it.
+    #[test]
+    fn a_versioned_name_that_folds_to_a_family_is_left_to_the_product_code() {
         let (_d, db) = db();
         let named = entry(
             "NotAProductCode",
@@ -474,7 +562,7 @@ mod tests {
         );
         assert!(
             super::super::match_entry(&db, &named).unwrap().is_none(),
-            "the name rung is not expected to reach a versioned display name"
+            "two Pythons fit, so the name rung chooses neither"
         );
 
         let keyed = entry(
@@ -489,6 +577,22 @@ mod tests {
         );
     }
 
+    /// An installed package names the entry it was matched to, which is
+    /// what lets `group.rs` put the two on one row.
+    #[test]
+    fn an_installed_package_names_its_registry_key() {
+        let (_d, db) = db();
+        let e = entry("7-zip", "7-Zip 26.00 (x64)", "26.00", "Igor Pavlov");
+        let ps = super::super::installed_from(&db, std::slice::from_ref(&e)).unwrap();
+        assert!(
+            ps[0].facts.contains(&(
+                crate::sources::windows::arp::REGISTRY_KEY_FACT.to_string(),
+                r"HKLM\7-zip".to_string()
+            )),
+            "{:?}",
+            ps[0].facts
+        );
+    }
     /// Something the catalogue has never heard of.
     #[test]
     fn an_unmatched_entry_is_none() {

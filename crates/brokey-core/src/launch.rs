@@ -19,6 +19,21 @@
 //! the user logs out and back in. The application inherits the session's
 //! environment, so it can tell, and say so, instead of letting an install
 //! look like it did nothing.
+//!
+//! **Windows.** The counterpart of the desktop entry is the shortcut the
+//! installer made: a `.lnk` in the machine or user Start Menu whose target
+//! lies inside the application's install directory
+//! ([`crate::sources::windows::shortcut`] finds it); for an MSIX package,
+//! `shell:AppsFolder\<AUMID>`; for Scoop, the shim in `~\scoop\shims`.
+//! `DisplayIcon` is never a launch target. Every one of them is handed to
+//! `explorer.exe`, which passes it to the running shell, so the application
+//! starts at the user's own level even when Brokey itself was started
+//! elevated (the MSI's Start Brokey tickbox from an administrator console
+//! does that, as `packaging/windows/brokey.wxs` records). `ShellExecuteW`
+//! from an elevated process would start it elevated too, which is why it is
+//! not used here, and `ShellExecuteEx` with `runas` belongs to
+//! `transaction/elevate/` alone. Windows has no counterpart of the session
+//! notice: the Start Menu has no list fixed at login.
 
 use crate::model::Command;
 use std::path::{Path, PathBuf};
@@ -31,10 +46,22 @@ pub enum Launch {
     /// A command started as it is (`flatpak run org.x.Y`), for a package
     /// with no desktop entry the session could use.
     Command(Command),
+    /// Windows: a Start Menu shortcut, opened as the shell opens it, so its
+    /// arguments and working directory are the installer's.
+    Shortcut(PathBuf),
+    /// Windows: an MSIX application, by its Application User Model ID
+    /// (`PackageFamilyName!AppId`), opened as `shell:AppsFolder\<AUMID>`.
+    /// Build it with [`apps_folder`], which refuses anything not shaped
+    /// like an AUMID.
+    AppsFolder(String),
+    /// Windows: a Scoop shim in `~\scoop\shims`, for an application Scoop
+    /// made no shortcut for.
+    Shim(PathBuf),
 }
 
 impl Launch {
-    /// The process that opens it.
+    /// The process that opens it. On Windows this is `explorer.exe` with
+    /// one argument, which [`windows_argument`] spells.
     pub fn command(&self) -> Command {
         match self {
             Launch::Entry(path) => Command {
@@ -44,14 +71,30 @@ impl Launch {
                 cwd: None,
             },
             Launch::Command(command) => command.clone(),
+            Launch::Shortcut(_) | Launch::AppsFolder(_) | Launch::Shim(_) => Command {
+                program: explorer_program(),
+                args: self.windows_argument().into_iter().collect(),
+                env: Vec::new(),
+                cwd: None,
+            },
         }
     }
 
-    /// What the page shows in a tooltip: the entry's file name or the
-    /// command line.
+    /// What `explorer.exe` is handed for a Windows launch: the file, or
+    /// the Apps folder path. `None` for the Linux kinds.
+    pub fn windows_argument(&self) -> Option<String> {
+        match self {
+            Launch::Shortcut(path) | Launch::Shim(path) => Some(path.display().to_string()),
+            Launch::AppsFolder(aumid) => Some(format!(r"shell:AppsFolder\{aumid}")),
+            Launch::Entry(_) | Launch::Command(_) => None,
+        }
+    }
+
+    /// What the page shows in a tooltip: the entry's or shortcut's file
+    /// name, the command line, or the application's AUMID.
     pub fn describe(&self) -> String {
         match self {
-            Launch::Entry(path) => path
+            Launch::Entry(path) | Launch::Shortcut(path) | Launch::Shim(path) => path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string()),
@@ -59,14 +102,60 @@ impl Launch {
                 .chain(c.args.iter().map(String::as_str))
                 .collect::<Vec<_>>()
                 .join(" "),
+            Launch::AppsFolder(aumid) => aumid.clone(),
         }
     }
 
     /// Whether the process exits once the application is started (`gio
-    /// launch`) or stays for the application's lifetime (`flatpak run`).
+    /// launch`, `explorer.exe`) or stays for the application's lifetime
+    /// (`flatpak run`).
     pub fn returns_at_once(&self) -> bool {
-        matches!(self, Launch::Entry(_))
+        !matches!(self, Launch::Command(_))
     }
+}
+
+/// An MSIX application to open by its AUMID, when `aumid` is shaped like
+/// one: a package family name (`Name_PublisherId`) and an application id
+/// joined by a single `!`, in the characters the packaging schema allows.
+/// Anything else is refused rather than handed to `explorer.exe`, where a
+/// comma or a quote would be read as a switch.
+pub fn apps_folder(aumid: &str) -> Option<Launch> {
+    let (family, app) = aumid.split_once('!')?;
+    let allowed = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 256
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    };
+    (allowed(family) && allowed(app) && family.contains('_'))
+        .then(|| Launch::AppsFolder(aumid.to_string()))
+}
+
+/// `explorer.exe` in the Windows directory the kernel reports, not in
+/// whichever directory `%SystemRoot%` or `PATH` names: an environment
+/// variable is something any program that starts Brokey can choose.
+#[cfg(windows)]
+pub fn explorer_program() -> String {
+    use windows_sys::Win32::System::SystemInformation::GetWindowsDirectoryW;
+
+    let mut buffer = [0u16; 260];
+    // SAFETY: `buffer` is a writable array of exactly the length passed
+    // alongside it, which is what this call is documented to fill.
+    let written =
+        unsafe { GetWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+    let directory = if written == 0 || written > buffer.len() {
+        r"C:\Windows".to_string()
+    } else {
+        String::from_utf16_lossy(&buffer[..written])
+    };
+    format!(r"{}\explorer.exe", directory.trim_end_matches('\\'))
+}
+
+/// Off Windows there is no Explorer; the bare name keeps
+/// [`Launch::command`] a plain function for the tests that run on Linux.
+#[cfg(not(windows))]
+pub fn explorer_program() -> String {
+    "explorer.exe".to_string()
 }
 
 /// A plain command, no environment, no working directory.
@@ -446,6 +535,8 @@ mod tests {
     }
 
     #[test]
+    // XDG directories are colon-separated Unix paths.
+    #[cfg(unix)]
     fn the_session_s_directories_follow_the_specification_default() {
         let home = Path::new("/home/me/.local/share");
         let default = session_dirs(None, Some(home));
@@ -470,6 +561,8 @@ mod tests {
     }
 
     #[test]
+    // XDG directories are colon-separated Unix paths.
+    #[cfg(unix)]
     fn the_notice_speaks_only_of_entries_the_session_cannot_see() {
         let dir = tempfile::tempdir().unwrap();
         let exports = dir.path().join("exports/share/applications");
@@ -518,6 +611,51 @@ mod tests {
         let run = Launch::Command(command("flatpak", &["run", "com.notepadqq.Notepadqq"]));
         assert_eq!(run.describe(), "flatpak run com.notepadqq.Notepadqq");
         assert!(!run.returns_at_once());
+    }
+
+    #[test]
+    fn a_windows_launch_is_handed_to_explorer() {
+        let lnk = Launch::Shortcut(PathBuf::from(
+            r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Obsidian.lnk",
+        ));
+        let c = lnk.command();
+        assert!(c.program.ends_with("explorer.exe"), "{}", c.program);
+        assert_eq!(
+            c.args,
+            [r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Obsidian.lnk"]
+        );
+        assert!(lnk.returns_at_once());
+        let app = apps_folder("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App").unwrap();
+        assert_eq!(
+            app.windows_argument().as_deref(),
+            Some(r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App")
+        );
+        assert_eq!(
+            app.describe(),
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
+        );
+        assert_eq!(
+            Launch::Entry(PathBuf::from("/x.desktop")).windows_argument(),
+            None
+        );
+    }
+
+    #[test]
+    fn only_a_string_shaped_like_an_aumid_opens_the_apps_folder() {
+        for bad in [
+            "",
+            "NoBang",
+            "Family_x!",
+            "!App",
+            "NoUnderscore!App",
+            "Family_x!App,/select",
+            "Family_x!App\" /e",
+            "Family_x!A!B",
+            r"Family_x!..\..\x",
+        ] {
+            assert_eq!(apps_folder(bad), None, "{bad}");
+        }
+        assert!(apps_folder("Spotify.Spotify_zpdnekdrzrea0!Spotify").is_some());
     }
     #[test]
     fn an_entry_gives_its_name_comment_categories_and_icon() {

@@ -7,6 +7,7 @@
 
 pub mod index;
 pub mod manifest;
+pub mod normalise;
 pub mod query;
 pub mod version;
 
@@ -285,11 +286,41 @@ pub fn operation_step(kind: OpKind, id: &str, program: &str) -> Step {
         // `--disable-interactivity` tells winget not to prompt, so it cannot
         // ask for elevation on its own: a machine-scope package fails unless
         // the step is already elevated, and most popular winget packages are
-        // machine scope. Choosing the scope per package needs the manifest,
-        // which is the metadata ladder in a later plan.
+        // machine scope. An install whose manifest permits it is
+        // `user_install_step` instead, and does not elevate.
         needs_root: true,
         weight: 10,
     }
+}
+
+/// An install for this user alone, where the package's installer manifest
+/// permits it ([`manifest::permits_user_scope`]): [`operation_step`]'s
+/// install with `--scope user`, and no Administrator. winget installs a
+/// user-scope package without elevating, so the step runs in the user's own
+/// session, which also puts it in the user's own profile rather than in
+/// whichever administrator's profile answered the prompt.
+///
+/// It never needs root, so the helper's closed list never sees it; that
+/// list still rebuilds only [`operation_step`] and [`update_all_step`].
+pub fn user_install_step(id: &str, program: &str) -> Step {
+    let mut step = operation_step(OpKind::Install, id, program);
+    // After the id, where a reader of the command line would look for it.
+    step.command
+        .args
+        .splice(4..4, ["--scope".to_string(), "user".to_string()]);
+    step.needs_root = false;
+    step
+}
+
+/// Whether `row`'s installer manifest permits a user-scope install. `fetch`
+/// is how the manifest is read, as for [`described_package`]. Anything that
+/// goes wrong (no derivable address, a failed fetch, a manifest that says
+/// nothing) answers `false`, which keeps the machine install that always
+/// worked: a missing manifest costs a prompt, never a failed install.
+fn user_scope_permitted(row: &query::Row, fetch: &dyn Fn(&str) -> Result<String>) -> bool {
+    manifest::installer_url(&row.id, &row.latest_version)
+        .and_then(|url| fetch(&url).ok())
+        .is_some_and(|text| manifest::permits_user_scope(&text))
 }
 
 /// The one step that updates everything winget can, which is a different
@@ -387,10 +418,13 @@ WHERE p.rowid = (SELECT package FROM productcodes2 WHERE productcode = :code LIM
 LIMIT 1
 ";
 
+/// `DISTINCT` because one package is stored under several forms of its name
+/// (`python`, `python(X64)`, `python(X86)`), and two hits on one package are
+/// still one package, not the ambiguity the caller refuses.
 const BY_NAME_AND_PUBLISHER_SQL: &str = "
-SELECT p.id, p.name, p.moniker, p.latest_version, np.norm_publisher
+SELECT DISTINCT p.id, p.name, p.moniker, p.latest_version, np.norm_publisher
 FROM packages p
-JOIN norm_names2 nn ON nn.package = p.rowid AND nn.norm_name = :name
+JOIN norm_names2 nn ON nn.package = p.rowid AND nn.norm_name IN (:name, :name_x64, :name_x86)
 JOIN norm_publishers2 np ON np.package = p.rowid AND np.norm_publisher = :publisher
 LIMIT 2
 ";
@@ -398,7 +432,10 @@ LIMIT 2
 /// The catalogue package an uninstall entry is, if it is one.
 ///
 /// Three rungs, exact first. The product and upgrade code rungs are exact.
-/// The name rung requires the publisher to agree as well, and then requires
+/// The name rung folds the display name and the publisher the way winget
+/// folded the catalogue's ([`normalise`]), so `Advanced IP Scanner 2.5.1`
+/// by `Famatech Corp.` meets `advancedipscanner` by `famatech`. It requires
+/// the publisher to agree as well as the name, and then requires
 /// the answer to be unique: the index folds version families, so `python` and
 /// `pythonsoftwarefoundation` name every Python at once. Nothing is returned
 /// when more than one package fits, because a wrong join offers an update
@@ -419,12 +456,19 @@ pub fn match_entry(
     let (Some(name), Some(publisher)) = (&e.display_name, &e.publisher) else {
         return Ok(None);
     };
+    let [bare, x64, x86] = normalise::architecture_suffixes(&normalise::name(name));
+    let publisher = normalise::publisher(publisher);
+    if bare.is_empty() || publisher.is_empty() {
+        return Ok(None);
+    }
     let found = query::rows(
         db,
         BY_NAME_AND_PUBLISHER_SQL,
         &[
-            (":name", &query::normalise(name)),
-            (":publisher", &query::normalise(publisher)),
+            (":name", &bare),
+            (":name_x64", &x64),
+            (":name_x86", &x86),
+            (":publisher", &publisher),
         ],
     )?;
     // Exactly one, or none. See the note above about version families.
@@ -448,10 +492,71 @@ pub fn installed_from(
             let mut p = to_package(&row);
             p.installed = true;
             p.installed_version = e.display_version.clone();
+            // Which Add/Remove Programs entry this is. `group.rs` joins the
+            // two on it, because the names alone (`7-Zip` and
+            // `7-Zip 26.03 (x64)`) share nothing it could join on.
+            p.facts.push((
+                crate::sources::windows::arp::REGISTRY_KEY_FACT.to_string(),
+                crate::sources::windows::arp::package_id(e),
+            ));
             out.push(p);
         }
     }
     Ok(out)
+}
+
+/// The uninstall entries the catalogue joins to the package `id`, through
+/// the same [`match_entry`] that put the package on the Installed page, so
+/// Open opens the application that row stands for and no other.
+pub fn entries_for<'a>(
+    db: &rusqlite::Connection,
+    entries: &'a [crate::sources::windows::arp::RawEntry],
+    id: &str,
+) -> Result<Vec<&'a crate::sources::windows::arp::RawEntry>> {
+    let mut out = Vec::new();
+    for e in entries
+        .iter()
+        .filter(|e| crate::sources::windows::arp::is_application(e))
+    {
+        if match_entry(db, e)?.is_some_and(|row| row.id.eq_ignore_ascii_case(id)) {
+            out.push(e);
+        }
+    }
+    Ok(out)
+}
+
+/// Every installed package's id with the uninstall entry it was joined to,
+/// worked out at most once every few seconds. The page asks what Open
+/// would open for every installed package in one burst, and the join is a
+/// catalogue query per uninstall entry, so doing it per package would be
+/// thousands of queries where one pass is enough.
+#[cfg(windows)]
+fn joined(
+    db: &rusqlite::Connection,
+) -> Result<Arc<Vec<(String, crate::sources::windows::arp::RawEntry)>>> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    type Joined = Arc<Vec<(String, crate::sources::windows::arp::RawEntry)>>;
+    static CACHE: Mutex<Option<(Instant, Joined)>> = Mutex::new(None);
+    const FRESH: Duration = Duration::from_secs(5);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((when, list)) = cache.as_ref()
+        && when.elapsed() < FRESH
+    {
+        return Ok(list.clone());
+    }
+    let mut list = Vec::new();
+    for e in crate::sources::windows::arp::read()
+        .into_iter()
+        .filter(crate::sources::windows::arp::is_application)
+    {
+        if let Some(row) = match_entry(db, &e)? {
+            list.push((row.id, e));
+        }
+    }
+    let list = Arc::new(list);
+    *cache = Some((Instant::now(), list.clone()));
+    Ok(list)
 }
 
 /// Those of them the catalogue has a newer version of.
@@ -488,6 +593,18 @@ pub fn updates_from(
         });
     }
     Ok(out)
+}
+
+/// [`Winget::fetch_catalogue`]'s body, with the download as a parameter so a
+/// test can hand it the fixture or a failure. The age of what is on disk is
+/// never asked here: deciding whether to fetch is the caller's business.
+fn save_catalogue(path: &Path, download: &dyn Fn() -> Result<Vec<u8>>) -> Result<()> {
+    let db = index::database_from_msix(&download()?)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(path, db)
+        .map_err(|e| crate::Error::new(format!("The winget catalogue could not be saved: {e}.")))
 }
 
 impl Source for Winget {
@@ -572,6 +689,15 @@ impl Source for Winget {
         Ok(Vec::new())
     }
 
+    /// Pressing refresh fetches the catalogue whatever its age. Otherwise
+    /// [`Winget::catalogue`] only fetches it once a day, and a package
+    /// published this morning would stay out of search and updates until
+    /// tomorrow however often the user asked. A failure is the caller's line
+    /// to report, and the copy already on disk goes on answering.
+    fn refresh_index(&self) -> Result<()> {
+        self.fetch_catalogue(&index::cached_path(&self.client.download_dir()))
+    }
+
     fn details(&self, id: &str) -> Result<crate::model::Package> {
         let db = self.catalogue()?;
         let row = query::by_id(&db, id)?.ok_or_else(|| {
@@ -585,11 +711,43 @@ impl Source for Winget {
         }))
     }
 
+    /// The Start Menu shortcut of the uninstall entry this package was
+    /// joined to. Read from the catalogue already on disk: opening an
+    /// application never downloads one.
+    fn launcher(&self, id: &str) -> Option<crate::launch::Launch> {
+        #[cfg(windows)]
+        {
+            use crate::sources::windows::shortcut;
+            let path = index::cached_path(&self.client.download_dir());
+            let db = index::open(&path).ok()?;
+            let joined = joined(&db).ok()?;
+            let entries: Vec<_> = joined
+                .iter()
+                .filter(|(row, _)| row.eq_ignore_ascii_case(id))
+                .map(|(_, e)| e)
+                .collect();
+            shortcut::launch_for_entries(&entries, &shortcut::start_menu())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = id;
+            None
+        }
+    }
+
     fn plan(&self, op: &crate::model::Op) -> Result<Vec<Step>> {
         // Resolved once, here, where the environment is the user's own. The
         // elevated helper is handed the result and searches nothing.
         let program = winget_program();
-        self.plan_with(op, &program)
+        // Only an install chooses its scope. An update or a removal acts on
+        // what is already installed, and winget finds that itself.
+        let for_user = match op {
+            crate::model::Op::Install { package } if package.source == SourceKind::Winget => {
+                self.permits_user_scope(&package.id)
+            }
+            _ => false,
+        };
+        self.plan_with(op, &program, for_user)
     }
 }
 
@@ -599,9 +757,16 @@ impl Winget {
     /// drive every `Op` variant against a fixed path without winget being
     /// installed on the machine running the test; `plan` itself still
     /// resolves the program the normal way and is not otherwise changed.
-    fn plan_with(&self, op: &crate::model::Op, program: &str) -> Result<Vec<Step>> {
+    ///
+    /// `for_user` is whether the package's installer manifest permits a
+    /// user-scope install, found by `plan` through the manifest and passed in
+    /// for the same reason as the program.
+    fn plan_with(&self, op: &crate::model::Op, program: &str, for_user: bool) -> Result<Vec<Step>> {
         use crate::model::Op;
         let step = match op {
+            Op::Install { package } if package.source == SourceKind::Winget && for_user => {
+                user_install_step(&package.id, program)
+            }
             Op::Install { package } if package.source == SourceKind::Winget => {
                 operation_step(OpKind::Install, &package.id, program)
             }
@@ -612,8 +777,9 @@ impl Winget {
                 operation_step(OpKind::Remove, &package.id, program)
             }
             Op::UpdateAll { source } if *source == SourceKind::Winget => update_all_step(program),
-            // Refresh is Brokey's own catalogue, not winget's, and `catalogue`
-            // fetches it when it is stale. There is nothing to run.
+            // Refresh is Brokey's own catalogue, not winget's: `catalogue`
+            // fetches it when it is stale and `refresh_index` when asked,
+            // neither of them a step. There is nothing to run.
             _ => return Ok(Vec::new()),
         };
         Ok(vec![step])
@@ -632,6 +798,22 @@ impl Winget {
         Some(format!("{n} packages"))
     }
 
+    /// Whether the package's installer manifest permits a user-scope install.
+    /// One fetch through the same cache the detail page's manifest uses, so
+    /// a package whose page was just opened costs one more small file and a
+    /// second install of it costs nothing.
+    fn permits_user_scope(&self, id: &str) -> bool {
+        let Ok(db) = self.catalogue() else {
+            return false;
+        };
+        let Ok(Some(row)) = query::by_id(&db, id) else {
+            return false;
+        };
+        user_scope_permitted(&row, &|url| {
+            self.client.get_text_cached(url, MANIFEST_MAX_AGE)
+        })
+    }
+
     /// The catalogue, downloaded if the cached copy is missing or stale.
     fn catalogue(&self) -> Result<rusqlite::Connection> {
         let path = index::cached_path(&self.client.download_dir());
@@ -644,16 +826,16 @@ impl Winget {
                 .is_none_or(|age| age > index::MAX_AGE),
         };
         if stale {
-            let bytes = self.client.get_bytes(index::CATALOGUE_URL)?;
-            let db = index::database_from_msix(&bytes)?;
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            std::fs::write(&path, db).map_err(|e| {
-                crate::Error::new(format!("The winget catalogue could not be saved: {e}."))
-            })?;
+            self.fetch_catalogue(&path)?;
         }
         index::open(&path)
+    }
+
+    /// Download the catalogue and put it where [`Winget::catalogue`] reads
+    /// it. Nothing on disk is touched until the download has arrived and
+    /// unpacked, so a failure leaves the copy that was there answering.
+    fn fetch_catalogue(&self, path: &Path) -> Result<()> {
+        save_catalogue(path, &|| self.client.get_bytes(index::CATALOGUE_URL))
     }
 
     /// The newest App Installer release, and the hash published with it.
@@ -932,6 +1114,58 @@ mod tests {
         );
     }
 
+    fn fixture_msix() -> Vec<u8> {
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/windows/winget/source2.msix"
+        ))
+        .unwrap()
+    }
+
+    /// What pressing refresh does: the catalogue is replaced however recently
+    /// it was written. The copy below was written a moment ago, which is as
+    /// fresh as a file can be, and is replaced anyway.
+    #[test]
+    fn a_refresh_replaces_even_a_fresh_catalogue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("winget").join("index.db");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"yesterday").unwrap();
+        save_catalogue(&path, &|| Ok(fixture_msix())).unwrap();
+        let db = index::open(&path).unwrap();
+        assert_eq!(query::count(&db).unwrap(), 9);
+    }
+
+    /// A refresh that cannot download leaves what was there, so search and
+    /// updates go on answering from yesterday's catalogue, and says why.
+    #[test]
+    fn a_failed_refresh_leaves_the_catalogue_it_had() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        std::fs::write(&path, b"what was there").unwrap();
+        let failed = save_catalogue(&path, &|| {
+            Err(crate::Error::new(
+                "Microsoft could not be reached.".to_string(),
+            ))
+        });
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"what was there");
+        // Nor does a download that is not a catalogue overwrite it.
+        assert!(save_catalogue(&path, &|| Ok(b"<html>".to_vec())).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"what was there");
+    }
+
+    /// The real catalogue, fetched by `refresh_index` into an empty cache.
+    #[test]
+    #[ignore]
+    fn live_refresh_index_fetches_the_catalogue() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = Winget::new(Arc::new(crate::http::Client::new(dir.path().to_path_buf())));
+        w.refresh_index().unwrap();
+        let db = index::open(&index::cached_path(&w.client.download_dir())).unwrap();
+        assert!(query::count(&db).unwrap() > 10_000);
+    }
+
     fn gimp_row() -> query::Row {
         query::Row {
             id: "GIMP.GIMP".to_string(),
@@ -1031,6 +1265,123 @@ mod tests {
         assert_eq!(p.licence, None);
         assert_eq!(p.developer, None);
         assert!(p.categories.is_empty());
+    }
+
+    fn obsidian_row() -> query::Row {
+        query::Row {
+            id: "Obsidian.Obsidian".to_string(),
+            name: "Obsidian".to_string(),
+            moniker: Some("obsidian".to_string()),
+            latest_version: "1.15.1".to_string(),
+            publisher: Some("obsidian".to_string()),
+        }
+    }
+
+    fn installer_fixture(name: &str) -> String {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/winget")
+                .join(name),
+        )
+        .expect("the fixture is checked in")
+    }
+
+    /// A manifest with a user installer for every architecture gives an
+    /// install for this user alone, which does not elevate. The address
+    /// asked for is the installer manifest of the catalogue's version.
+    #[test]
+    fn a_package_whose_manifest_permits_it_installs_for_the_user() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let permitted = user_scope_permitted(&obsidian_row(), &|url| {
+            asked.borrow_mut().push(url.to_string());
+            Ok(installer_fixture("obsidian.installer.yaml"))
+        });
+        assert!(permitted);
+        assert_eq!(
+            asked.into_inner(),
+            [
+                "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/o/Obsidian/Obsidian/1.15.1/Obsidian.Obsidian.installer.yaml"
+            ]
+        );
+        let w = Winget::new(crate::http::Client::shared());
+        let op = crate::model::Op::Install {
+            package: crate::model::PackageRef {
+                source: SourceKind::Winget,
+                id: "Obsidian.Obsidian".to_string(),
+            },
+        };
+        let steps = w.plan_with(&op, WINGET, permitted).unwrap();
+        assert_eq!(steps.len(), 1);
+        assert!(!steps[0].needs_root, "a user install never elevates");
+        assert_eq!(
+            steps[0].command.args[..6],
+            [
+                "install",
+                "--exact",
+                "--id",
+                "Obsidian.Obsidian",
+                "--scope",
+                "user"
+            ]
+        );
+        assert!(
+            steps[0]
+                .command
+                .args
+                .contains(&"--disable-interactivity".to_string())
+        );
+    }
+
+    /// And a machine-scope manifest, a fetch that fails or a manifest that
+    /// is not one keep the install that always worked: elevated, no scope.
+    #[test]
+    fn anything_short_of_permission_keeps_the_machine_install() {
+        let row = obsidian_row();
+        assert!(!user_scope_permitted(&row, &|_| Ok(installer_fixture(
+            "7zip.installer.yaml"
+        ))));
+        assert!(!user_scope_permitted(&row, &|_| {
+            Err(crate::Error::new(
+                "GitHub could not be reached.".to_string(),
+            ))
+        }));
+        assert!(!user_scope_permitted(&row, &|_| Ok(
+            "<html>404</html>".to_string()
+        )));
+        let w = Winget::new(crate::http::Client::shared());
+        let op = crate::model::Op::Install {
+            package: crate::model::PackageRef {
+                source: SourceKind::Winget,
+                id: "7zip.7zip".to_string(),
+            },
+        };
+        let steps = w.plan_with(&op, WINGET, false).unwrap();
+        assert!(steps[0].needs_root);
+        assert!(!steps[0].command.args.contains(&"--scope".to_string()));
+    }
+
+    /// Only an install chooses a scope; an update or a removal acts on what is
+    /// installed, whatever `for_user` says.
+    #[test]
+    fn only_an_install_takes_the_user_scope() {
+        let w = Winget::new(crate::http::Client::shared());
+        let package = crate::model::PackageRef {
+            source: SourceKind::Winget,
+            id: "Obsidian.Obsidian".to_string(),
+        };
+        for op in [
+            crate::model::Op::Update {
+                package: package.clone(),
+            },
+            crate::model::Op::Remove { package },
+        ] {
+            let steps = w.plan_with(&op, WINGET, true).unwrap();
+            assert!(steps[0].needs_root, "{op:?}");
+            assert!(
+                !steps[0].command.args.contains(&"--scope".to_string()),
+                "{op:?}"
+            );
+        }
     }
 
     /// Uninstall takes no package agreement. Nothing is being agreed to, and
@@ -1162,7 +1513,10 @@ mod tests {
                 | Op::Refresh { .. }
                 | Op::Setup { .. } => {}
             }
-            for step in w.plan_with(op, PROGRAM).unwrap() {
+            for step in [false, true]
+                .into_iter()
+                .flat_map(|for_user| w.plan_with(op, PROGRAM, for_user).unwrap())
+            {
                 if step.needs_root {
                     assert_eq!(
                         allow::check_step(&step, &allowed),

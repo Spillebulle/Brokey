@@ -182,14 +182,21 @@ These were decided before the first line and are not re-litigated in a fix:
 - **A source never runs anything.** `Source::plan` returns steps; the Runner
   runs them. This is what makes every source testable with fixtures.
 - **Opening an installed application is the one process started outside the
-  Runner, on Linux.** It changes nothing and never runs as root, so it is not
+  Runner.** It changes nothing and never runs as root, so it is not
   a plan: `Source::launcher` finds the desktop entry in the package's own file
   list (or answers `flatpak run` / `snap run` / an AppImage), and
   `commands::logic::start` hands an entry to `gio launch`. Never parse `Exec`
   here. `crates/brokey-core/src/launch.rs` explains why, and why a session that
   started before Flatpak or snapd was installed cannot list their
-  applications until the user logs in again. `launch.rs` and `Source::launcher`
-  are `#[cfg(unix)]`; Windows has no launcher yet.
+  applications until the user logs in again. On Windows `Source::launcher`
+  answers the Start Menu `.lnk` whose target lies inside the install
+  directory derived from the uninstaller (`sources/windows/shortcut.rs`
+  reads `.lnk` files itself), `Launch::AppsFolder` with an AUMID for MSIX
+  (built through `launch::apps_folder`), or a Scoop shim to a windowed
+  program; never `DisplayIcon`, and nothing found means no Open button.
+  `logic::start` hands every one of them to `explorer.exe`, so the
+  application starts at the user's level even from an elevated Brokey:
+  never `ShellExecuteW` here, which would carry Brokey's elevation along.
 - **Grouping is a pure function** of `Vec<Package>` (`group.rs`). Adding a
   heuristic means adding a fixture where it fires and one where it must not.
 - **No partial upgrade on Arch presented as safe.** See `docs/architecture.md`.

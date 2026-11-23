@@ -135,7 +135,7 @@ export interface Package {
   facts: [string, string][];
 }
 
-export type MatchedBy = "appstream" | "name" | "alone";
+export type MatchedBy = "appstream" | "name" | "registry" | "alone";
 
 export interface Edition {
   package: Package;
@@ -292,6 +292,24 @@ export interface DriversReport {
   firmware_available: boolean;
   firmware_note: string | null;
   firmware: FirmwareDevice[];
+}
+
+/** "absent" is Windows's "disabled with payload removed": turning it on downloads it from Windows Update first. */
+export type FeatureState = "enabled" | "disabled" | "absent" | "unknown";
+
+export interface WindowsFeature {
+  id: string;
+  name: string;
+  summary: string | null;
+  state: FeatureState;
+  well_known: boolean;
+}
+
+/** What the Features page draws, Windows's counterpart of DriversReport. */
+export interface FeaturesReport {
+  available: boolean;
+  note: string | null;
+  features: WindowsFeature[];
 }
 
 // ── What the commands exchange (brokey_core::Query, SearchResult, updates::UpdateList,

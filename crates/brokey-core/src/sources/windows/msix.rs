@@ -1321,6 +1321,14 @@ impl Source for Msix {
             notice: SETUP_NOTICE.to_string(),
         })
     }
+
+    /// The package's first Start menu entry, as `shell:AppsFolder\<AUMID>`.
+    /// A package that lists none (a context menu handler, a codec) is not
+    /// an application and has nothing to open.
+    fn launcher(&self, id: &str) -> Option<crate::launch::Launch> {
+        let aumid = self.app_user_model_ids(id).into_iter().next()?;
+        crate::launch::apps_folder(&aumid)
+    }
 }
 
 impl Msix {
@@ -1801,6 +1809,21 @@ mod tests {
             msix.app_user_model_ids("Nobody.Here_0000000000000")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn opening_an_installed_package_is_its_first_start_menu_entry() {
+        let (msix, _dir) = source();
+        let launch = msix.launcher("Microsoft.Paint_8wekyb3d8bbwe").unwrap();
+        assert_eq!(
+            launch.windows_argument().as_deref(),
+            Some(r"shell:AppsFolder\Microsoft.Paint_8wekyb3d8bbwe!App")
+        );
+        // Listed nothing, and not installed: no button either way.
+        let hidden = by_name("Microsoft.PowerToys.FileLocksmithContextMenu").family_name;
+        assert_eq!(msix.launcher(&hidden), None);
+        assert_eq!(msix.launcher("Nobody.Here_0000000000000"), None);
+        assert_eq!(msix.launcher("9PCFS5B6T72H"), None);
     }
 
     #[test]
