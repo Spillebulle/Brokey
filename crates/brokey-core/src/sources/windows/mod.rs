@@ -5,6 +5,7 @@
 
 pub mod arp;
 pub mod choco;
+pub mod features;
 pub mod icon;
 pub mod pe;
 pub mod scoop;
