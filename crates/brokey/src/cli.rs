@@ -34,6 +34,9 @@ Commands:
       The steps a transaction would run. Nothing is executed.
   drivers
       Devices, the driver profiles offered for them, and firmware.
+  features [--all]
+      Windows optional features and whether each is on. Only the
+      well-known ones unless --all is given. Windows only.
   open <source>:<id> [--dry-run]
       Open an installed application the way the window's Open button does.
       --dry-run says what would be opened and opens nothing.
@@ -76,6 +79,7 @@ pub fn run(args: &[String]) -> i32 {
         "installed" => installed(rest),
         "plan" => plan(rest),
         "drivers" => drivers(rest),
+        "features" => features(rest),
         "self-update" => self_update(rest),
         "open" => open(rest),
         other => usage_error(&format!("{other} is not a command.")),
@@ -708,6 +712,53 @@ fn drivers(args: &[String]) -> i32 {
             ]);
         }
         print!("{}", table.render(terminal_width()));
+    }
+    0
+}
+
+// -------------------------------------------------------------- features
+
+fn features(args: &[String]) -> i32 {
+    let all = match args {
+        [] => false,
+        [flag] if flag == "--all" => true,
+        _ => return usage_error("features takes only --all."),
+    };
+    let report = brokey_core::sources::windows::features::report();
+    if !report.available {
+        eprintln!(
+            "{}",
+            sentence(
+                report
+                    .note
+                    .as_deref()
+                    .unwrap_or("The features could not be read.")
+            )
+        );
+        return 1;
+    }
+    let mut table = Table::new(&["Feature", "State", "Windows name"]);
+    let mut shown = 0;
+    for f in report.features.iter().filter(|f| all || f.well_known) {
+        shown += 1;
+        table.row(vec![
+            f.name.clone(),
+            match f.state {
+                brokey_core::FeatureState::Enabled => "on",
+                brokey_core::FeatureState::Disabled => "off",
+                brokey_core::FeatureState::Absent => "off, not downloaded",
+                brokey_core::FeatureState::Unknown => "unknown",
+            }
+            .to_string(),
+            f.id.clone(),
+        ]);
+    }
+    print!("{}", table.render(terminal_width()));
+    if !all {
+        println!(
+            "{shown} of {} features. brokey features --all lists every one.",
+            report.features.len()
+        );
     }
     0
 }

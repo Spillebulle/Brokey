@@ -16,7 +16,8 @@ import { formatCount, plural } from "../format";
 import { sourceLabel, type Op, type PlanPreview, type PlanStatus, type SourceKind, type Step } from "../types";
 import { useActivity } from "./store";
 
-export type Verb = "Install" | "Remove" | "Update" | "Apply";
+/** "Turn on" and "Turn off" are a Windows feature's words: it is switched, never installed or removed. */
+export type Verb = "Install" | "Remove" | "Update" | "Apply" | "Turn on" | "Turn off";
 
 export interface FlowState {
   open: boolean;
@@ -121,6 +122,9 @@ export function startOps(ops: Op[], title: string): Promise<string | null> {
 /** The primary button's word: what the operations do. A setup is an install of the tool, so it never changes the word. */
 export function verbFor(ops: Op[]): Verb {
   const kinds = new Set(ops.filter((o) => o.op !== "setup").map((o) => o.op));
+  const features = ops.length > 0 && ops.every((o) => "package" in o && o.package.source === "features");
+  if (features && kinds.size === 1 && kinds.has("install")) return "Turn on";
+  if (features && kinds.size === 1 && kinds.has("remove")) return "Turn off";
   if (kinds.size === 0) return "Install";
   if (kinds.size === 1 && kinds.has("install")) return "Install";
   if (kinds.size === 1 && kinds.has("remove")) return "Remove";
@@ -161,6 +165,11 @@ export function summarise(ops: Op[]): string {
   const parts: string[] = [];
   let first = true;
   for (const [source, n] of perSource) {
+    if (source === "features") {
+      parts.push(plural(n, "Windows feature"));
+      first = false;
+      continue;
+    }
     const noun = source === "fwupd" ? "firmware update" : source === "chwd" ? "driver profile" : "package";
     parts.push(`${first ? plural(n, noun) : formatCount(n)} from ${fromSource(source)}`);
     first = false;
@@ -187,7 +196,8 @@ function nameOf(source: SourceKind, id: string, steps: Step[]): string {
 
 /** "This removes steam and what only it needed." */
 export function removalSentence(ops: Op[], steps: Step[]): string | null {
-  const names = ops.flatMap((o) => (o.op === "remove" ? [nameOf(o.package.source, o.package.id, steps)] : []));
+  // A Windows feature turned off takes nothing else with it, so it has no sentence here.
+  const names = ops.flatMap((o) => (o.op === "remove" && o.package.source !== "features" ? [nameOf(o.package.source, o.package.id, steps)] : []));
   if (names.length === 0) return null;
   if (names.length === 1) return `This removes ${names[0]} and what only it needed.`;
   if (names.length === 2) return `This removes ${names[0]} and ${names[1]} and what only they needed.`;

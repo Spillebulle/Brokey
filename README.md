@@ -112,10 +112,22 @@ and which is installed. Firmware updates come from fwupd on every
 distribution. Where no driver manager is known, the page says so rather than
 guessing.
 
+## Windows features
+
+On Windows, Windows Update looks after drivers and firmware, so the Drivers
+slot is the Features page instead. It lists every optional feature Windows
+reports, with Windows Subsystem for Linux, Virtual Machine Platform, Hyper-V,
+Windows Sandbox, Windows Hypervisor Platform, .NET Framework 3.5 and the
+OpenSSH client and server first, and those are found by search as well.
+Turning one on or off asks to allow it as Administrator. When Windows needs a
+restart to finish the change, the end of the transaction says so; Brokey never
+restarts the machine. `brokey features` lists them in a terminal.
+
 ## What is not there yet
 
 - apt and dnf are written to the same interface as pacman but have not run on a real Debian or Fedora. They are marked untested in the sources list until they have.
 - Drivers are managed only through chwd (CachyOS). Elsewhere they install as ordinary packages.
+- On Windows the Features page has optional features and the two OpenSSH capabilities, not the rest of Windows's capabilities, such as language packs and the RSAT tools: only DISM lists those, and it answers only a process running as Administrator. Turning a feature on or off is admitted by the helper and covered by tests, but has not yet been carried out on a real machine.
 - No reviews or ratings.
 - An application installed by hand, such as a browser unpacked into your home folder, is not listed: no package manager has a record of it.
 - AppImages from GitHub releases are placed in `~/.local/bin` without a menu entry yet.

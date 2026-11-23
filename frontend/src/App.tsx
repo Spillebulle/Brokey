@@ -7,7 +7,7 @@ import { onPlanDone, subscribeActivity, useActivity } from "./activity/store";
 import * as api from "./api";
 import { Toasts } from "./components/Toast";
 import { toast } from "./components/toastStore";
-import { AppDetailPage, DriversPage, InstalledPage, SearchPage, SettingsPage, UpdatesPage } from "./pages";
+import { AppDetailPage, DriversPage, FeaturesPage, InstalledPage, SearchPage, SettingsPage, UpdatesPage } from "./pages";
 import { useShortcuts } from "./shell/keys";
 import { Shell } from "./shell/Shell";
 import { useShell } from "./shell/store";
@@ -54,6 +54,8 @@ function Page() {
       return <UpdatesPage />;
     case "drivers":
       return <DriversPage />;
+    case "features":
+      return <FeaturesPage />;
     case "settings":
       return <SettingsPage />;
   }

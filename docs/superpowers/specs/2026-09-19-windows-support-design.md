@@ -175,11 +175,41 @@ directory. Architecture matching gains `x64`, `amd64`, `arm64` and `win`.
 
 **Windows optional features.** Hyper-V, WSL, the OpenSSH client, .NET
 Framework 3.5, Windows Sandbox: software already on the machine that is
-switched on rather than downloaded. Listing is a read-only
-`DISM /Online /Get-Features` query, which is the shape `fwupd.rs` already has
-for `fwupdmgr`. Enabling and disabling are steps through the helper. It takes
-the nav slot the Drivers page occupies on Linux, because `chwd` and `fwupd`
-have no meaning here and Windows Update manages drivers itself.
+switched on rather than downloaded. Enabling and disabling are steps through
+the helper. It takes the nav slot the Drivers page occupies on Linux, because
+`chwd` and `fwupd` have no meaning here and Windows Update manages drivers
+itself.
+
+*As built, listing is not DISM.* This spec planned a read-only
+`DISM /Online /Get-Features` query, the shape `fwupd.rs` has for `fwupdmgr`.
+Measured on the reference machine, DISM refuses every `/Online` query from a
+process that is not elevated (error 740), and the window never is, so the
+plan could not work without elevating to read, which the closed list exists
+to prevent. `sources/windows/features.rs` asks WMI's `Win32_OptionalFeature`
+class through COM instead: documented, answered for a standard user, the same
+names DISM uses plus a caption a person can read, and no tool output to parse
+at all. The registry under `Component Based Servicing\Notifications\
+OptionalFeatures` was the other candidate and was rejected: undocumented, no
+captions, and 114 features where WMI listed 126. The OpenSSH client and server
+are capabilities, not features, which WMI does not list and DISM again only
+answers elevated; their state is read from the servicing stack's package
+records (`CurrentState` under `Component Based Servicing\Packages`), and only
+those two capabilities are offered. The fixture is WMI's answer on the
+reference machine, captured as JSON.
+
+Changing one is `dism.exe` from the system directory with
+`/English /Online /Enable-Feature /FeatureName:<id> /All /NoRestart` (or
+`/Disable-Feature`, `/Add-Capability`, `/Remove-Capability`). The closed list
+admits exactly that `dism.exe` and rebuilds the command from its id, as it does
+for winget and Chocolatey, and an id that could be read as an option builds
+nothing. `/NoRestart` always: DISM then exits 3010 when the change needs a
+restart, the helper reports that step as a success carrying a sentence, and the
+runner says it again at the end of the plan. A 3010 from any other source is
+still a failure. The page draws the well-known features first (WSL, Virtual
+Machine Platform, Hyper-V, Windows Sandbox, Windows Hypervisor Platform, .NET
+Framework 3.5, OpenSSH client and server), then every other feature with a
+filter; search finds only the well-known ones, and the Installed page lists
+none of them.
 
 ### Grouping has a stronger key on Windows than on Linux
 
@@ -457,7 +487,7 @@ its own window. No new component, no new token, no new page.
 - **Per-user before elevated.** Where a source can install for this user
   alone, it does, and a plan that must elevate names the package that forced
   it and says how many times permission will be asked.
-- **A source still never runs anything.** `DISM /Online /Get-Features` and the
+- **A source still never runs anything.** The WMI feature query and the
   OData and catalogue queries are read-only questions, the shape `fwupd.rs`
   already uses. Everything that changes the machine is a Step.
 - **`SourceKind` is whole on both platforms**, so the page's types are checked

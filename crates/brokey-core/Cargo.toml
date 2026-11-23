@@ -29,6 +29,18 @@ tempfile = "3"
 
 [target."cfg(windows)".dependencies]
 windows-registry = "0.6.1"
+# COM, for the one question only WMI answers a process that is not
+# elevated: which optional features Windows has (sources/windows/features.rs).
+# windows-sys has no COM interfaces. 0.61 is the version Tauri already pulls.
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Com",
+  "Win32_System_Ole",
+  "Win32_System_Rpc",
+  "Win32_System_Variant",
+  "Win32_System_Wmi",
+] }
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Security",
