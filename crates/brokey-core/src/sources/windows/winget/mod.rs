@@ -511,6 +511,18 @@ pub fn updates_from(
     Ok(out)
 }
 
+/// [`Winget::fetch_catalogue`]'s body, with the download as a parameter so a
+/// test can hand it the fixture or a failure. The age of what is on disk is
+/// never asked here: deciding whether to fetch is the caller's business.
+fn save_catalogue(path: &Path, download: &dyn Fn() -> Result<Vec<u8>>) -> Result<()> {
+    let db = index::database_from_msix(&download()?)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(path, db)
+        .map_err(|e| crate::Error::new(format!("The winget catalogue could not be saved: {e}.")))
+}
+
 impl Source for Winget {
     fn kind(&self) -> SourceKind {
         SourceKind::Winget
@@ -593,6 +605,15 @@ impl Source for Winget {
         Ok(Vec::new())
     }
 
+    /// Pressing refresh fetches the catalogue whatever its age. Otherwise
+    /// [`Winget::catalogue`] only fetches it once a day, and a package
+    /// published this morning would stay out of search and updates until
+    /// tomorrow however often the user asked. A failure is the caller's line
+    /// to report, and the copy already on disk goes on answering.
+    fn refresh_index(&self) -> Result<()> {
+        self.fetch_catalogue(&index::cached_path(&self.client.download_dir()))
+    }
+
     fn details(&self, id: &str) -> Result<crate::model::Package> {
         let db = self.catalogue()?;
         let row = query::by_id(&db, id)?.ok_or_else(|| {
@@ -633,8 +654,9 @@ impl Winget {
                 operation_step(OpKind::Remove, &package.id, program)
             }
             Op::UpdateAll { source } if *source == SourceKind::Winget => update_all_step(program),
-            // Refresh is Brokey's own catalogue, not winget's, and `catalogue`
-            // fetches it when it is stale. There is nothing to run.
+            // Refresh is Brokey's own catalogue, not winget's: `catalogue`
+            // fetches it when it is stale and `refresh_index` when asked,
+            // neither of them a step. There is nothing to run.
             _ => return Ok(Vec::new()),
         };
         Ok(vec![step])
@@ -665,16 +687,16 @@ impl Winget {
                 .is_none_or(|age| age > index::MAX_AGE),
         };
         if stale {
-            let bytes = self.client.get_bytes(index::CATALOGUE_URL)?;
-            let db = index::database_from_msix(&bytes)?;
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            std::fs::write(&path, db).map_err(|e| {
-                crate::Error::new(format!("The winget catalogue could not be saved: {e}."))
-            })?;
+            self.fetch_catalogue(&path)?;
         }
         index::open(&path)
+    }
+
+    /// Download the catalogue and put it where [`Winget::catalogue`] reads
+    /// it. Nothing on disk is touched until the download has arrived and
+    /// unpacked, so a failure leaves the copy that was there answering.
+    fn fetch_catalogue(&self, path: &Path) -> Result<()> {
+        save_catalogue(path, &|| self.client.get_bytes(index::CATALOGUE_URL))
     }
 
     /// The newest App Installer release, and the hash published with it.
@@ -951,6 +973,58 @@ mod tests {
             "took {:?}, which means it tried the network",
             start.elapsed()
         );
+    }
+
+    fn fixture_msix() -> Vec<u8> {
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/windows/winget/source2.msix"
+        ))
+        .unwrap()
+    }
+
+    /// What pressing refresh does: the catalogue is replaced however recently
+    /// it was written. The copy below was written a moment ago, which is as
+    /// fresh as a file can be, and is replaced anyway.
+    #[test]
+    fn a_refresh_replaces_even_a_fresh_catalogue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("winget").join("index.db");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"yesterday").unwrap();
+        save_catalogue(&path, &|| Ok(fixture_msix())).unwrap();
+        let db = index::open(&path).unwrap();
+        assert_eq!(query::count(&db).unwrap(), 9);
+    }
+
+    /// A refresh that cannot download leaves what was there, so search and
+    /// updates go on answering from yesterday's catalogue, and says why.
+    #[test]
+    fn a_failed_refresh_leaves_the_catalogue_it_had() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        std::fs::write(&path, b"what was there").unwrap();
+        let failed = save_catalogue(&path, &|| {
+            Err(crate::Error::new(
+                "Microsoft could not be reached.".to_string(),
+            ))
+        });
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"what was there");
+        // Nor does a download that is not a catalogue overwrite it.
+        assert!(save_catalogue(&path, &|| Ok(b"<html>".to_vec())).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"what was there");
+    }
+
+    /// The real catalogue, fetched by `refresh_index` into an empty cache.
+    #[test]
+    #[ignore]
+    fn live_refresh_index_fetches_the_catalogue() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = Winget::new(Arc::new(crate::http::Client::new(dir.path().to_path_buf())));
+        w.refresh_index().unwrap();
+        let db = index::open(&index::cached_path(&w.client.download_dir())).unwrap();
+        assert!(query::count(&db).unwrap() > 10_000);
     }
 
     fn gimp_row() -> query::Row {
