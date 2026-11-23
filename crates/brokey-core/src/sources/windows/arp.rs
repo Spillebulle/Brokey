@@ -565,6 +565,13 @@ impl Source for Arp {
             })
     }
 
+    /// The Start Menu shortcut whose target lies inside the directory the
+    /// uninstaller lives in. See [`super::shortcut`].
+    fn launcher(&self, id: &str) -> Option<crate::launch::Launch> {
+        let entry = self.find(id)?;
+        super::shortcut::launch_for_entries(&[entry], &super::shortcut::start_menu())
+    }
+
     /// Removal is the only operation this source has. Any other kind is
     /// nothing for it to do, which is an empty list. An id it does not hold
     /// is a different thing and is an error: an empty list would be carried
