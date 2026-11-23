@@ -84,9 +84,7 @@ impl Gatherer<'_> {
                 return Ok(());
             }
             self.set_up.push(kind);
-            let Some(setup) = source.setup() else {
-                return Err(crate::Error::from_source(kind, cannot_set_up(kind)));
-            };
+            let setup = source.try_setup()?;
             for inner in &setup.ops {
                 self.gather(inner)?;
             }
@@ -1350,6 +1348,59 @@ mod tests {
             cannot_set_up(SourceKind::Flatpak),
             "Flatpak cannot be set up on this system by Brokey."
         );
+    }
+
+    /// A source whose setup is refused for a reason of its own: winget's
+    /// "not just now" when Microsoft could not be reached.
+    struct NotNow;
+
+    impl Source for NotNow {
+        fn kind(&self) -> SourceKind {
+            SourceKind::Winget
+        }
+        fn status(&self) -> SourceStatus {
+            SourceStatus {
+                kind: SourceKind::Winget,
+                available: false,
+                reason: Some("Not installed.".to_string()),
+                detail: None,
+                searchable: false,
+                setup: None,
+            }
+        }
+        fn search(&self, _: &Query) -> Result<Vec<Package>> {
+            Ok(Vec::new())
+        }
+        fn installed(&self) -> Result<Vec<Package>> {
+            Ok(Vec::new())
+        }
+        fn updates(&self) -> Result<Vec<Update>> {
+            Ok(Vec::new())
+        }
+        fn details(&self, id: &str) -> Result<Package> {
+            Err(crate::Error::new(format!("{id} is not known.")))
+        }
+        fn plan(&self, _: &Op) -> Result<Vec<Step>> {
+            Ok(Vec::new())
+        }
+        fn try_setup(&self) -> Result<Setup> {
+            Err(crate::Error::from_source(
+                SourceKind::Winget,
+                "Microsoft could not be reached just now.",
+            ))
+        }
+    }
+
+    /// The reason a source gives for having no setup reaches the user in
+    /// place of the generic sentence, which would say "cannot" where the
+    /// truth is "not just now".
+    #[test]
+    fn a_setup_refused_for_a_reason_says_that_reason() {
+        let store = store(vec![Box::new(NotNow)]);
+        let err = build(&store, &[setup(SourceKind::Winget)]).unwrap_err();
+        assert_eq!(err.message, "Microsoft could not be reached just now.");
+        assert_eq!(err.source_kind, Some(SourceKind::Winget));
+        assert_ne!(err.message, cannot_set_up(SourceKind::Winget));
     }
 
     #[test]

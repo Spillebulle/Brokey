@@ -23,6 +23,12 @@
 //! | pacman package | `brokey-bin-<v>-1-x86_64.pkg.tar.zst` | not built |
 //! | AppImage | `Brokey-<v>-x86_64.AppImage` | `Brokey-<v>-aarch64.AppImage` |
 //! | Flatpak bundle | `brokey-<v>-x86_64.flatpak` (not built yet; the name is reserved so a bundle, when it ships, is found without a code change) | not built |
+//! | Windows setup program | `brokey-setup-<v>-x64.exe` | `brokey-setup-<v>-arm64.exe` |
+//!
+//! A copy the Windows installer put in Program Files is told which setup
+//! program to run rather than given a plan: Windows Installer owns its
+//! files, and the helper's closed list has no entry that runs a downloaded
+//! installer.
 //!
 //! `<v>` is the workspace version with no `v`; the tag is `v<v>`. No
 //! tarball is published: a portable copy is told about the AppImage. A

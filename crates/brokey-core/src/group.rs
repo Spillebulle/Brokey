@@ -701,6 +701,13 @@ fn flatpak_ref_name(id: &str) -> Option<&str> {
 /// The order editions are listed in. The distribution's own repository
 /// first, then the sandboxed stores, then the AUR and GitHub, which build or
 /// download rather than install.
+///
+/// On Windows, winget, then Chocolatey and Scoop, and Add/Remove Programs
+/// last of all. An Add/Remove entry says something is installed and nothing
+/// about where it came from or where a newer one is, and it never offers an
+/// update; a package manager's edition of the same application can. When
+/// both are present the manager's is the edition the page leads with, and
+/// the registry's stays in the list as the record of what is on the disk.
 fn edition_rank(source: SourceKind) -> u8 {
     match source {
         SourceKind::Pacman => 0,
@@ -713,11 +720,11 @@ fn edition_rank(source: SourceKind) -> u8 {
         SourceKind::Fwupd => 7,
         SourceKind::Chwd => 8,
         SourceKind::Winget => 9,
-        SourceKind::Arp => 10,
-        SourceKind::Choco => 11,
-        SourceKind::Scoop => 12,
+        SourceKind::Choco => 10,
+        SourceKind::Scoop => 11,
         SourceKind::Msix => 13,
         SourceKind::Features => 14,
+        SourceKind::Arp => 15,
     }
 }
 

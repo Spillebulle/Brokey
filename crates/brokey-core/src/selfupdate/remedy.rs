@@ -65,6 +65,15 @@ impl Arch {
         }
     }
 
+    /// Windows' spelling, the one in the MSI's and the setup program's
+    /// names.
+    pub fn windows(self) -> &'static str {
+        match self {
+            Arch::X86_64 => "x64",
+            Arch::Aarch64 => "arm64",
+        }
+    }
+
     /// rpm's spelling, which the pacman package, the AppImage and the
     /// Flatpak bundle use too.
     pub fn rpm(self) -> &'static str {
@@ -91,6 +100,10 @@ pub enum Format {
     /// `brokey-<v>-x86_64.flatpak`. Not built yet; the name is reserved
     /// so a bundle, when it ships, is found without a code change.
     Flatpak,
+    /// `brokey-setup-<v>-x64.exe`, `brokey-setup-<v>-arm64.exe`: the MSI
+    /// with Brokey's own setup window round it, the file the README tells
+    /// Windows users to take.
+    WindowsSetup,
 }
 
 impl Format {
@@ -104,6 +117,7 @@ impl Format {
             }
             Format::AppImage => format!("Brokey-{version}-{}.AppImage", arch.rpm()),
             Format::Flatpak => format!("brokey-{version}-{}.flatpak", arch.rpm()),
+            Format::WindowsSetup => format!("brokey-setup-{version}-{}.exe", arch.windows()),
         }
     }
 
@@ -120,6 +134,7 @@ impl Format {
             Format::PacmanPackage => ("brokey-bin-", format!("-{}.pkg.tar.zst", arch.rpm())),
             Format::AppImage => ("Brokey-", format!("-{}.AppImage", arch.rpm())),
             Format::Flatpak => ("brokey-", format!("-{}.flatpak", arch.rpm())),
+            Format::WindowsSetup => ("brokey-setup-", format!("-{}.exe", arch.windows())),
         };
         name.starts_with(prefix) && name.ends_with(&suffix)
     }
@@ -132,6 +147,7 @@ impl Format {
             Format::PacmanPackage => "pacman package",
             Format::AppImage => "AppImage",
             Format::Flatpak => "Flatpak bundle",
+            Format::WindowsSetup => "Windows setup program",
         }
     }
 }
@@ -377,6 +393,21 @@ pub fn remedy(
                      for {} on the releases page, so this copy stays as it is until one is published.",
                     arch_word(arch)
                 ),
+            },
+        },
+
+        // Windows Installer owns the files, and the helper's closed list has
+        // no entry that runs an installer Brokey downloaded, so this is a
+        // sentence naming the file rather than a plan. The setup program
+        // carries the same MSI, whose MajorUpgrade replaces this copy.
+        Installation::Msi => Remedy::Sentence {
+            sentence: match asset(Format::WindowsSetup) {
+                Some(a) => format!(
+                    "This copy was installed by Brokey's Windows installer. \
+                     Take {} from the releases page and run it, and it replaces this copy in place.",
+                    a.name
+                ),
+                None => none_for(Format::WindowsSetup, latest, arch),
             },
         },
 

@@ -896,6 +896,18 @@ plan's own workspace is scratch and these outlive it.
   of writing 97 MB, unpacking `DesktopAppInstaller_Dependencies.zip` and
   choosing the right architecture's packages. This is the one requirement of
   this spec the winget plan did not meet.
+  **Closed, 2026-11-23.** `bootstrap_steps` downloads the bundle and
+  `DesktopAppInstaller_Dependencies.zip`, checks both against the `.txt`
+  hashes published beside them in one step that can stop the plan, then
+  unpacks the archive and hands the machine's own folder (`x64`, `arm64` or
+  `x86`, from `IsWow64Process2` so an emulated x64 Brokey on ARM64 takes the
+  ARM64 frameworks) to `Add-AppxPackage -DependencyPath`. Through the
+  bundle's install rather than one `Add-AppxPackage` per framework first,
+  because adding an older framework on its own is refused when a newer one
+  is installed, where a satisfied dependency is simply skipped. At v1.29.380
+  the archive holds VCLibs, the UWP desktop VCLibs and the Windows App
+  Runtime 1.8, not `Microsoft.UI.Xaml`, so the folder is taken whole rather
+  than by package name.
 
 - **The two Windows sources disagree about elevation.** `winget`'s
   `operation_step` marks every operation `needs_root: true`, because
@@ -976,6 +988,11 @@ plan's own workspace is scratch and these outlive it.
   "winget cannot be set up on this system by Brokey." for both "already
   installed" and "Microsoft could not be reached". The second is wrong: it
   can be, just not now. Closing it means widening the `Source` trait.
+  **Closed, 2026-11-23.** `Source::try_setup` returns `Result<Setup>`, and the
+  planner asks it. Its default answers `setup()` or the old sentence, so no
+  other source changed; winget overrides it and answers `setup()` from it.
+  winget says "already installed" when it is, and `NO_BOOTSTRAP` followed by
+  what the network said when the release could not be fetched.
 
 - **A registry value of the wrong type reads as absent.** `windows-registry`'s
   `get_u32` rejects a `REG_SZ`, so an installer that writes `SystemComponent`
@@ -987,6 +1004,12 @@ plan's own workspace is scratch and these outlive it.
   recorded rather than coded around: if a machine turns one up, the fix is to
   fall back to reading the value as text and parsing it, with a fixture entry
   for each.
+  **Closed, 2026-11-23**, ahead of a machine turning one up. `SystemComponent`,
+  `WindowsInstaller` and `EstimatedSize` are read as a `REG_DWORD`, then a
+  `REG_QWORD`, then `REG_SZ` text in decimal or `0x` hexadecimal. The fixture
+  spells a string value as a JSON string and reads it through the same
+  parser, with an entry for a text `SystemComponent` and one for a text
+  `WindowsInstaller`.
 
 **Left by the Store and MSIX source, 2026-11-23.**
 
@@ -1035,12 +1058,41 @@ plan's own workspace is scratch and these outlive it.
   entry is exactly how it will appear. Settling either means a grouping
   fixture, per the invariant that a heuristic arrives with a fixture where it
   fires and one where it must not.
+  **Closed, 2026-11-23.** `edition_rank` puts winget, Chocolatey and Scoop
+  ahead of Add/Remove Programs, which is last of all, with fixtures in
+  `tests/group.rs` for an application in all four and for one only the
+  registry knows; `metadata_rank` is unchanged, since the registry's icon is
+  the installed executable's own. `is_self_package` stays `false` for every
+  Windows source, now on purpose and pinned by a test: Add/Remove Programs
+  never lists an update, its id is a ProductCode WiX makes afresh each
+  build, and Brokey is published to none of the managers. Brokey recognises
+  its own entry by `DisplayName` and `Publisher` on a key the Windows
+  Installer owns (`arp::is_self`, with a test that reads `brokey.wxs`), and
+  `selfupdate::install::detect` answers `Installation::Msi` for that entry
+  together with `Program Files\Brokey\brokey.exe`. Its remedy is a sentence
+  naming the release's `brokey-setup-<v>-<arch>.exe`. Running that installer
+  from the Updates page would need a helper entry for a downloaded MSI, and
+  is left for the privilege plan.
 - How the second spec hooks in. The candidates are an install-time snapshot
   taken before a plan runs, a path and registry ownership index built from
   every source's installed list, and an undo journal written by the helper.
   This spec deliberately does not choose; it only guarantees that the
   Add/Remove Programs source exposes the derived install directory and the
   uninstall key path, which all three would need.
+- **An unquoted uninstall string with spaces ran the wrong program.**
+  Closed, 2026-11-23: `arp::read_command_line` reads it as `CreateProcess`
+  does, the shortest prefix ending at a space that names a file (with `.exe`
+  added where there is no extension), then the first `.exe` that ends a
+  word when nothing is on the disk. The disk check is injected, so it is
+  fixture-tested; `shortcut::uninstaller` now calls it, so removal, the
+  install directory and Open read the string the same way. Reading it
+  correctly surfaced the next thing: on the reference machine Steam's folder
+  grants `BUILTIN\Users` full control, so the helper refuses to start
+  `uninstall.exe` as Administrator, correctly, and removing Steam from
+  Add/Remove Programs stops with that sentence. Steam is a machine-wide
+  entry, so there is no unelevated route either. Whether such an entry
+  should be offered as interactive and unelevated, or drawn as not
+  removable here with the reason, belongs with the privilege plan.
 
 ## Evidence
 

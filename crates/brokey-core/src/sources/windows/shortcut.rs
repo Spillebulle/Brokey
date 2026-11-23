@@ -436,29 +436,12 @@ pub fn specific(dir: &str) -> bool {
 
 /// The uninstaller an entry names, split into its program and arguments.
 ///
-/// A quoted program is split as [`arp::split_command_line`] splits it. An
-/// unquoted one may still hold spaces: `C:\Program Files (x86)\Steam\
-/// uninstall.exe` is written that way by Steam, Plex, WinRAR and
-/// Tesseract on the reference machine, and Windows itself reads such a line
-/// by trying the shortest prefix that names a program. So the program ends
-/// at the first `.exe` that is followed by a space or by the end.
+/// [`arp::command_line`] reads it, the one reader of an uninstall string:
+/// an unquoted path with spaces, such as Steam's `C:\Program Files (x86)\
+/// Steam\uninstall.exe`, is read the way Windows reads it, so the directory
+/// searched here is the one the Add/Remove Programs removal runs from.
 pub fn uninstaller(e: &RawEntry) -> Option<(String, Vec<String>)> {
-    let line = e.uninstall_string.as_deref()?.trim();
-    if line.starts_with('"') {
-        return arp::split_command_line(line);
-    }
-    let lower = line.to_ascii_lowercase();
-    let end = lower
-        .match_indices(".exe")
-        .map(|(i, _)| i + 4)
-        .find(|&end| line[end..].is_empty() || line[end..].starts_with(char::is_whitespace));
-    match end {
-        Some(end) => Some((
-            line[..end].to_string(),
-            line[end..].split_whitespace().map(str::to_string).collect(),
-        )),
-        None => arp::split_command_line(line),
-    }
+    arp::command_line(e.uninstall_string.as_deref()?)
 }
 
 fn is_msiexec(program: &str) -> bool {

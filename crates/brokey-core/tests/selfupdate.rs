@@ -245,6 +245,87 @@ fn every_installation_is_detected_from_its_own_readings() {
     }
 }
 
+/// On Windows the MSI's copy is told by two readings together: its entry in
+/// Add/Remove Programs, and this executable where the MSI puts it. Either
+/// alone is not enough.
+#[test]
+fn the_windows_installers_copy_is_its_entry_and_its_path_together() {
+    let env = [
+        ("ProgramFiles", "C:\\Program Files"),
+        ("ProgramW6432", "C:\\Program Files"),
+        ("USERPROFILE", "C:\\Users\\a"),
+    ];
+    let installed = "C:\\Program Files\\Brokey\\brokey.exe";
+    // A name, the executable's path, the environment, whether Add/Remove
+    // Programs has the MSI's entry, and what detect must say.
+    type WindowsCase<'a> = (
+        &'a str,
+        &'a str,
+        &'a [(&'a str, &'a str)],
+        bool,
+        Installation,
+    );
+    let cases: [WindowsCase<'_>; 7] = [
+        ("installed", installed, &env, true, Installation::Msi),
+        (
+            "the long path form current_exe can give",
+            "\\\\?\\C:\\Program Files\\Brokey\\brokey.exe",
+            &env,
+            true,
+            Installation::Msi,
+        ),
+        (
+            "case and separators as somebody typed them",
+            "c:/program files/BROKEY/Brokey.EXE",
+            &[("ProgramFiles", "C:\\Program Files\\")],
+            true,
+            Installation::Msi,
+        ),
+        // A portable copy run while the MSI is installed too: updating the
+        // MSI would not update this one.
+        (
+            "a copy elsewhere beside an installed one",
+            "C:\\Users\\a\\Downloads\\brokey.exe",
+            &env,
+            true,
+            Installation::Unknown,
+        ),
+        // Moved with INSTALLFOLDER: still the MSI's, but not where this can
+        // tell, so the honest sentence rather than a guess.
+        (
+            "installed somewhere else",
+            "D:\\Brokey\\brokey.exe",
+            &env,
+            true,
+            Installation::Unknown,
+        ),
+        // The file is there but Windows Installer has no record of it.
+        (
+            "copied into Program Files by hand",
+            installed,
+            &env,
+            false,
+            Installation::Unknown,
+        ),
+        (
+            "no Program Files in the environment",
+            installed,
+            &[],
+            true,
+            Installation::Unknown,
+        ),
+    ];
+    for (name, exe, env, entry, expected) in cases {
+        let probe = Probe::fixed(exe, env, &[]);
+        let probe = if entry { probe.with_msi_entry() } else { probe };
+        assert_eq!(detect(&probe), expected, "{name}");
+    }
+    // The label the Settings page draws.
+    assert_eq!(Installation::Msi.label(), "the Windows installer package");
+    assert_eq!(Installation::Msi.id(), "msi");
+    assert!(!Installation::Msi.is_self_updatable());
+}
+
 /// On pacman the archive is a section of pacman.conf, read from the probe's
 /// copy of the file, never from the machine running the test.
 #[test]
@@ -347,7 +428,7 @@ fn the_fixture_reads_as_the_release_it_is() {
     assert!(r.notes.starts_with("## 0.2.0"));
     // 2026-10-01T10:15:30Z
     assert_eq!(r.published, Some(1_790_849_730));
-    assert_eq!(r.assets.len(), 9);
+    assert_eq!(r.assets.len(), 12);
     assert!(r.assets.iter().all(Asset::is_fetchable));
 }
 
@@ -387,6 +468,16 @@ fn every_documented_asset_name_is_in_the_fixture_and_is_found() {
             "Brokey-0.2.0-aarch64.AppImage",
         ),
         (Format::Flatpak, Arch::X86_64, "brokey-0.2.0-x86_64.flatpak"),
+        (
+            Format::WindowsSetup,
+            Arch::X86_64,
+            "brokey-setup-0.2.0-x64.exe",
+        ),
+        (
+            Format::WindowsSetup,
+            Arch::Aarch64,
+            "brokey-setup-0.2.0-arm64.exe",
+        ),
     ];
     for (format, arch, name) in expected {
         assert_eq!(format.name(version, arch), name);
@@ -442,6 +533,7 @@ fn every_installation() -> Vec<Installation> {
         Installation::Rpm { archive: true },
         Installation::Rpm { archive: false },
         Installation::Portable,
+        Installation::Msi,
         Installation::Unknown,
     ]
 }
@@ -479,9 +571,17 @@ fn named_files(sentence: &str) -> Vec<String> {
         // about the machine, not a claim about the release.
         .filter(|w| !w.contains('/'))
         .filter(|w| {
-            [".deb", ".rpm", ".pkg.tar.zst", ".AppImage", ".flatpak"]
-                .iter()
-                .any(|ext| w.ends_with(ext))
+            [
+                ".deb",
+                ".rpm",
+                ".pkg.tar.zst",
+                ".AppImage",
+                ".flatpak",
+                ".exe",
+                ".msi",
+            ]
+            .iter()
+            .any(|ext| w.ends_with(ext))
         })
         .map(str::to_string)
         .collect()
@@ -833,6 +933,28 @@ fn each_installation_gets_the_rule_the_style_guide_settles() {
         r.sentence()
     );
     assert!(!r.sentence().contains(".tar.gz"));
+
+    // The Windows installer's copy is told which setup program to run, for
+    // its own architecture, and never offered a plan: the helper has no
+    // entry that runs a downloaded installer.
+    let r = remedy(&Installation::Msi, &latest, x86, &assets);
+    assert_eq!(
+        r,
+        Remedy::Sentence {
+            sentence: "This copy was installed by Brokey's Windows installer. \
+                       Take brokey-setup-0.2.0-x64.exe from the releases page and run it, \
+                       and it replaces this copy in place."
+                .into()
+        }
+    );
+    let r = remedy(&Installation::Msi, &latest, "aarch64", &assets);
+    assert!(
+        r.sentence().contains("brokey-setup-0.2.0-arm64.exe"),
+        "{}",
+        r.sentence()
+    );
+    assert!(!r.sentence().contains(".msi"), "{}", r.sentence());
+    assert!(!r.is_actionable());
 
     // Unknown says so and names nothing.
     let r = remedy(&Installation::Unknown, &latest, x86, &assets);

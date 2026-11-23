@@ -158,6 +158,16 @@ pub trait Source: Send + Sync {
         None
     }
 
+    /// [`Source::setup`] with the reason when there is none, which is what
+    /// the planner asks. The default says the source cannot be set up here;
+    /// a source that can tell "nothing to set up" from "not just now"
+    /// overrides this and answers `setup` from it.
+    fn try_setup(&self) -> Result<Setup> {
+        let kind = self.kind();
+        self.setup()
+            .ok_or_else(|| Error::from_source(kind, transaction::plan::cannot_set_up(kind)))
+    }
+
     /// How to open an installed package: its desktop entry, or a command
     /// for a format with its own way to run what it installed. `None` when
     /// the package is not installed through this source or has nothing a

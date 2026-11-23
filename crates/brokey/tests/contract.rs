@@ -776,6 +776,7 @@ fn everything_the_page_receives_matches_types_ts() {
         Installation::Dpkg { archive: false },
         Installation::Rpm { archive: false },
         Installation::Portable,
+        Installation::Msi,
         Installation::Unknown,
     ];
     let mut kinds = std::collections::BTreeSet::new();

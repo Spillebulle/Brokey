@@ -30,6 +30,11 @@
       "name": "brokey-0.3.0-x86_64.flatpak",
       "size": 60000000,
       "browser_download_url": "http://github.com/Spillebulle/Brokey/releases/download/v0.3.0/brokey-0.3.0-x86_64.flatpak"
+    },
+    {
+      "name": "brokey-setup-0.3.0-x64.exe",
+      "size": 25000000,
+      "browser_download_url": "https://github.com/Spillebulle/Brokey/releases/download/v0.3.0/brokey-setup-0.3.0-x64.exe"
     }
   ],
   "body": "## 0.3.0\n\nA release that built x86-64 only, and whose Flatpak was uploaded on plain http.\n"
