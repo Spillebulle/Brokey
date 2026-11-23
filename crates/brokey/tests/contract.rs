@@ -666,6 +666,44 @@ fn everything_the_page_receives_matches_types_ts() {
             }],
         },
     );
+    for state in [
+        FeatureState::Enabled,
+        FeatureState::Disabled,
+        FeatureState::Absent,
+        FeatureState::Unknown,
+    ] {
+        c.value(
+            "FeaturesReport",
+            &FeaturesReport {
+                available: true,
+                note: None,
+                features: vec![
+                    WindowsFeature {
+                        id: "Microsoft-Windows-Subsystem-Linux".into(),
+                        name: "Windows Subsystem for Linux".into(),
+                        summary: Some("Runs Linux distributions alongside Windows.".into()),
+                        state,
+                        well_known: true,
+                    },
+                    WindowsFeature {
+                        id: "TelnetClient".into(),
+                        name: "Telnet Client".into(),
+                        summary: None,
+                        state,
+                        well_known: false,
+                    },
+                ],
+            },
+        );
+    }
+    c.value(
+        "FeaturesReport",
+        &FeaturesReport {
+            available: false,
+            note: Some("Windows did not answer.".into()),
+            features: Vec::new(),
+        },
+    );
     c.value("Query", &Query::new("steam"));
     c.value(
         "SearchResult",

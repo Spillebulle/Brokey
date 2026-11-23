@@ -23,8 +23,8 @@ use crate::settings::Settings;
 use crate::state::{AppState, PlanStatus};
 use brokey_core::updates::UpdateList;
 use brokey_core::{
-    DriversReport, Event, Op, Package, PackageRef, Plan, Query, SearchResult, SourceStatus,
-    SystemInfo,
+    DriversReport, Event, FeaturesReport, Op, Package, PackageRef, Plan, Query, SearchResult,
+    SourceStatus, SystemInfo,
 };
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Invoke;
@@ -54,6 +54,7 @@ pub fn handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + 'static 
         cancel_plan,
         active_plans,
         drivers,
+        features,
         settings_get,
         settings_set,
         self_update_check,
@@ -204,6 +205,13 @@ fn active_plans(state: tauri::State<'_, AppState>) -> Result<Vec<PlanStatus>, St
 async fn drivers(state: tauri::State<'_, AppState>) -> Result<DriversReport, String> {
     let state = state.inner().clone();
     blocking(move || Ok(logic::drivers(&state))).await
+}
+
+/// The Features page, Windows's counterpart of the Drivers page. One WMI
+/// query; nothing is started.
+#[tauri::command]
+async fn features() -> Result<FeaturesReport, String> {
+    blocking(|| Ok(brokey_core::sources::windows::features::report())).await
 }
 
 #[tauri::command]
