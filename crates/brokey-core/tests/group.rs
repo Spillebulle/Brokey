@@ -962,6 +962,73 @@ fn steam_from_four_sources_is_one_app_and_the_runtime_is_not() {
     assert_eq!(apps[0].key, steam.key, "the exact match sorts first");
 }
 
+/// An installed application as Add/Remove Programs gives it, and the same
+/// application in the three Windows package managers. The registry's
+/// edition is the record of what is on the disk, with no provenance and no
+/// newer version; every manager's edition leads it.
+fn obsidian_on_windows() -> Vec<Package> {
+    let mut arp = app(SourceKind::Arp, "HKLM\\Obsidian", "Obsidian");
+    arp.installed = true;
+    arp.installed_version = Some("1.8.9".to_string());
+    arp.developer = Some("Obsidian".to_string());
+    vec![
+        arp,
+        app(SourceKind::Scoop, "extras/obsidian", "Obsidian"),
+        app(SourceKind::Choco, "obsidian", "Obsidian"),
+        app(SourceKind::Winget, "Obsidian.Obsidian", "Obsidian"),
+    ]
+}
+
+#[test]
+fn an_add_remove_entry_is_the_last_edition_behind_every_package_manager() {
+    let apps = group(obsidian_on_windows(), "obsidian");
+    assert_eq!(apps.len(), 1, "{:?}", names(&apps));
+    let sources: Vec<SourceKind> = apps[0].editions.iter().map(|e| e.package.source).collect();
+    assert_eq!(
+        sources,
+        [
+            SourceKind::Winget,
+            SourceKind::Choco,
+            SourceKind::Scoop,
+            SourceKind::Arp
+        ]
+    );
+    assert!(apps[0].installed, "the registry's edition still says so");
+    // Whatever order the sources answered in.
+    let mut reversed = obsidian_on_windows();
+    reversed.reverse();
+    let again = group(reversed, "obsidian");
+    assert_eq!(again[0].editions[0].package.source, SourceKind::Winget);
+    assert_eq!(
+        again[0].editions.last().unwrap().package.source,
+        SourceKind::Arp
+    );
+}
+
+#[test]
+fn an_add_remove_entry_with_no_manager_edition_is_its_own_row_and_leads_it() {
+    // Only the registry knows this one: it stays a row, and its edition is
+    // the first because it is the only one.
+    let alone = group(
+        vec![
+            obsidian_on_windows().remove(0),
+            app(SourceKind::Winget, "Valve.Steam", "Steam"),
+        ],
+        "",
+    );
+    assert_eq!(names(&alone), ["Obsidian", "Steam"]);
+    let obsidian = &alone[0];
+    assert_eq!(
+        editions(obsidian),
+        vec![(SourceKind::Arp, MatchedBy::Alone, 1.0)]
+    );
+    assert!(obsidian.installed);
+    // And the rank never joins anything: a different program in a manager
+    // is a different row, whichever source ranks first.
+    assert_eq!(alone[1].editions[0].package.source, SourceKind::Winget);
+    assert_eq!(alone[1].editions.len(), 1);
+}
+
 // Rule 4: the app's fields.
 
 #[test]
