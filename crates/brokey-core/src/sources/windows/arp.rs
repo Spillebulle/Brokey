@@ -154,6 +154,90 @@ pub fn split_command_line(s: &str) -> Option<(String, Vec<String>)> {
     Some((program, args))
 }
 
+/// Read a registry command line the way `CreateProcess` reads it, which is
+/// how Windows itself runs an uninstall string. Pure: `exists` answers
+/// whether a path names a file, so every case is a fixture.
+///
+/// A quoted program is [`split_command_line`]'s. An unquoted one may still
+/// hold spaces: Steam, Plex, WinRAR and Tesseract write
+/// `C:\Program Files (x86)\Steam\uninstall.exe` with no quotes, and split on
+/// the first space that runs `C:\Program`. So, in order:
+///
+/// 1. As `CreateProcess` does, the prefixes that end at a space, shortest
+///    first, each as written and with `.exe` added when it has no extension
+///    of its own; the first that names a file is the program.
+/// 2. When none does (a machine where the file has gone, or a host that is
+///    not Windows), the program ends at the first `.exe` followed by a space
+///    or the end, which is what every such value on the reference machine
+///    looks like.
+/// 3. Otherwise the first word, as before.
+pub fn read_command_line(
+    line: &str,
+    exists: &dyn Fn(&str) -> bool,
+) -> Option<(String, Vec<String>)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('"') {
+        return split_command_line(line);
+    }
+    let rest_after = |end: usize| -> Vec<String> {
+        line[end..].split_whitespace().map(str::to_string).collect()
+    };
+    let ends = line
+        .char_indices()
+        .filter(|(_, c)| c.is_whitespace())
+        .map(|(i, _)| i)
+        .chain(std::iter::once(line.len()));
+    for end in ends {
+        let candidate = &line[..end];
+        if candidate.trim().is_empty() {
+            continue;
+        }
+        if exists(candidate) {
+            return Some((candidate.to_string(), rest_after(end)));
+        }
+        let has_extension = windows_file_name(candidate).contains('.');
+        if !has_extension {
+            let with_exe = format!("{candidate}.exe");
+            if exists(&with_exe) {
+                return Some((with_exe, rest_after(end)));
+            }
+        }
+    }
+    let lower = line.to_ascii_lowercase();
+    let exe_end = lower
+        .match_indices(".exe")
+        .map(|(i, _)| i + 4)
+        .find(|&end| line[end..].is_empty() || line[end..].starts_with(char::is_whitespace));
+    match exe_end {
+        Some(end) => Some((line[..end].to_string(), rest_after(end))),
+        None => split_command_line(line),
+    }
+}
+
+/// [`read_command_line`] against this machine's disk. Off Windows nothing
+/// a registry names is on the disk, so only the shape is read.
+pub fn command_line(line: &str) -> Option<(String, Vec<String>)> {
+    read_command_line(line, &file_exists)
+}
+
+#[cfg(windows)]
+fn file_exists(path: &str) -> bool {
+    std::path::Path::new(path).is_file()
+}
+
+#[cfg(not(windows))]
+fn file_exists(_path: &str) -> bool {
+    false
+}
+
+/// The last component of a Windows path, as text.
+fn windows_file_name(path: &str) -> &str {
+    match path.rfind(['\\', '/']) {
+        Some(cut) => &path[cut + 1..],
+        None => path,
+    }
+}
+
 /// The directory part of a Windows path, as text.
 ///
 /// `std::path::Path` cannot do this. Off Windows a backslash is an ordinary
@@ -222,7 +306,7 @@ pub fn install_dir(e: &RawEntry) -> Option<PathBuf> {
     let from_uninstaller = e
         .uninstall_string
         .as_deref()
-        .and_then(split_command_line)
+        .and_then(command_line)
         .filter(|(program, _)| !is_msiexec(program))
         .and_then(|(program, _)| windows_parent(&program))
         .map(PathBuf::from);
@@ -296,7 +380,7 @@ pub fn package_id(e: &RawEntry) -> String {
 fn is_driver(e: &RawEntry) -> bool {
     e.uninstall_string
         .as_deref()
-        .and_then(split_command_line)
+        .and_then(command_line)
         .is_some_and(|(program, _)| {
             windows_file_stem(&program)
                 .to_ascii_uppercase()
@@ -376,7 +460,7 @@ fn product_code(key_name: &str) -> Option<&str> {
 }
 
 fn command(line: &str) -> Option<Command> {
-    let (program, args) = split_command_line(line)?;
+    let (program, args) = command_line(line)?;
     Some(Command {
         program,
         args,
@@ -865,6 +949,129 @@ mod tests {
         );
     }
 
+    /// Steam writes its uninstaller unquoted, with spaces in the path. Split
+    /// on the first space it runs `C:\Program`; read as Windows reads it, it
+    /// runs Steam's own uninstaller, from Steam's directory.
+    #[test]
+    fn an_unquoted_uninstaller_with_spaces_is_the_whole_path() {
+        let entries = fixture();
+        let steam = named(&entries, "Steam");
+        let Some(Removal::Interactive(command)) = removal(steam) else {
+            panic!("Steam opens its own uninstaller");
+        };
+        assert_eq!(
+            command.program,
+            "C:\\Program Files (x86)\\Steam\\uninstall.exe"
+        );
+        assert!(command.args.is_empty(), "{:?}", command.args);
+        assert_eq!(
+            install_dir(steam),
+            Some(PathBuf::from("C:\\Program Files (x86)\\Steam"))
+        );
+    }
+
+    /// Plex has spaces in the directory and in the file name, and an
+    /// argument after it, which stays an argument.
+    #[test]
+    fn an_unquoted_uninstaller_keeps_its_arguments() {
+        let entries = fixture();
+        let plex = named(&entries, "Plex Media Server");
+        let Some(Removal::Interactive(command)) = removal(plex) else {
+            panic!("Plex opens its own uninstaller");
+        };
+        assert_eq!(
+            command.program,
+            "C:\\Program Files\\Plex\\Plex Media Server\\Plex Media Server Uninstaller.exe"
+        );
+        assert_eq!(command.args, ["/uninstall"]);
+        assert_eq!(
+            install_dir(plex),
+            Some(PathBuf::from("C:\\Program Files\\Plex\\Plex Media Server"))
+        );
+    }
+
+    /// With the disk asked, as `CreateProcess` asks it: the shortest prefix
+    /// ending at a space that names a file wins, with `.exe` added to one
+    /// that has no extension, and a directory is not a file.
+    #[test]
+    fn the_shortest_prefix_that_names_a_file_is_the_program() {
+        let on_disk = |path: &str| {
+            [
+                "C:\\Program Files\\Tesseract-OCR\\tesseract-uninstall.exe",
+                "C:\\Program Files\\Odd App\\uninst.exe",
+                "C:\\Program.exe",
+            ]
+            .contains(&path)
+        };
+        let nothing = |_: &str| false;
+        assert_eq!(
+            read_command_line(
+                "C:\\Program Files\\Tesseract-OCR\\tesseract-uninstall.exe",
+                &|p| on_disk(p) && p != "C:\\Program.exe"
+            ),
+            Some((
+                "C:\\Program Files\\Tesseract-OCR\\tesseract-uninstall.exe".to_string(),
+                vec![]
+            ))
+        );
+        // No extension written, as Windows allows: `.exe` is tried.
+        assert_eq!(
+            read_command_line("C:\\Program Files\\Odd App\\uninst /S", &|p| on_disk(p)
+                && p != "C:\\Program.exe"),
+            Some((
+                "C:\\Program Files\\Odd App\\uninst.exe".to_string(),
+                vec!["/S".to_string()]
+            ))
+        );
+        // `C:\Program.exe` existing is the hazard Windows warns about, and
+        // is exactly what Windows would run, so it is what this reads.
+        assert_eq!(
+            read_command_line("C:\\Program Files\\Odd App\\uninst /S", &on_disk).map(|(p, _)| p),
+            Some("C:\\Program.exe".to_string())
+        );
+        // Nothing on the disk: the first `.exe` that ends a word.
+        assert_eq!(
+            read_command_line(
+                "C:\\Program Files (x86)\\WinRAR\\uninstall.exe /s",
+                &nothing
+            ),
+            Some((
+                "C:\\Program Files (x86)\\WinRAR\\uninstall.exe".to_string(),
+                vec!["/s".to_string()]
+            ))
+        );
+        // Not `.exe` inside a directory name.
+        assert_eq!(
+            read_command_line("C:\\Tools\\app.exe.d\\run.exe /x", &nothing).map(|(p, _)| p),
+            Some("C:\\Tools\\app.exe.d\\run.exe".to_string())
+        );
+    }
+
+    /// A quoted program is already unambiguous and is never re-read, even
+    /// when a shorter prefix would name a file.
+    #[test]
+    fn a_quoted_uninstaller_is_read_as_quoted() {
+        let everything = |_: &str| true;
+        assert_eq!(
+            read_command_line(
+                "\"C:\\Program Files\\Obsidian\\Uninstall Obsidian.exe\" /allusers /S",
+                &everything
+            ),
+            Some((
+                "C:\\Program Files\\Obsidian\\Uninstall Obsidian.exe".to_string(),
+                vec!["/allusers".to_string(), "/S".to_string()]
+            ))
+        );
+        let entries = fixture();
+        let Some(Removal::Quiet(command)) = removal(named(&entries, "Obsidian")) else {
+            panic!("Obsidian has a quiet uninstaller");
+        };
+        assert_eq!(
+            command.program,
+            "C:\\Program Files\\Obsidian\\Uninstall Obsidian.exe"
+        );
+    }
+
     /// What counts as a number written as text, and what does not.
     #[test]
     fn a_number_written_as_text_is_read_and_anything_else_is_absent() {
@@ -934,14 +1141,14 @@ mod tests {
     /// The whole fixture at once, so a heuristic added later cannot quietly
     /// change the answer for everything.
     #[test]
-    fn the_fixture_yields_exactly_the_eight_applications() {
+    fn the_fixture_yields_exactly_the_ten_applications() {
         let entries = fixture();
         let kept: Vec<&str> = entries
             .iter()
             .filter(|e| is_application(e))
             .filter_map(|e| e.display_name.as_deref())
             .collect();
-        assert_eq!(kept.len(), 8, "{kept:?}");
+        assert_eq!(kept.len(), 10, "{kept:?}");
     }
 
     /// Windows quoting: a quoted first token can hold spaces, and what
@@ -1398,7 +1605,7 @@ mod tests {
     fn installed_is_the_filtered_entries_as_packages() {
         let (arp, _cache) = source_from_fixture();
         let installed = arp.installed().unwrap();
-        assert_eq!(installed.len(), 8);
+        assert_eq!(installed.len(), 10);
         assert!(installed.iter().all(|p| p.installed));
         assert!(
             installed
@@ -1494,8 +1701,20 @@ mod tests {
             };
             for step in arp.plan(&Op::Remove { package }).unwrap_or_default() {
                 if step.needs_root {
+                    let verdict = allow::check_step(&step, &allowed);
+                    // A fixture path that is also real on this machine is
+                    // judged by its real permissions, and Steam's folder is
+                    // one every user may write to. Refusing that is the
+                    // closed list working, not the plan's shape failing.
+                    if std::path::Path::new(&step.command.program).is_file()
+                        && verdict.as_ref().is_err_and(|m| {
+                            m.starts_with("The helper refused a program this account can replace")
+                        })
+                    {
+                        continue;
+                    }
                     assert_eq!(
-                        allow::check_step(&step, &allowed),
+                        verdict,
                         Ok(()),
                         "removing {:?} produced a step the closed list refuses: {:?}",
                         entry.display_name,
@@ -1514,7 +1733,7 @@ mod tests {
         let status = arp.status();
         assert!(status.available);
         assert_eq!(status.reason, None);
-        assert_eq!(status.detail.as_deref(), Some("8 applications"));
+        assert_eq!(status.detail.as_deref(), Some("10 applications"));
     }
 
     /// A machine with exactly one is not told it has "1 applications".

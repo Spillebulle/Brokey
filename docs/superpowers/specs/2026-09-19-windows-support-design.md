@@ -904,6 +904,20 @@ plan's own workspace is scratch and these outlive it.
   This spec deliberately does not choose; it only guarantees that the
   Add/Remove Programs source exposes the derived install directory and the
   uninstall key path, which all three would need.
+- **An unquoted uninstall string with spaces ran the wrong program.**
+  Closed, 2026-11-23: `arp::read_command_line` reads it as `CreateProcess`
+  does, the shortest prefix ending at a space that names a file (with `.exe`
+  added where there is no extension), then the first `.exe` that ends a
+  word when nothing is on the disk. The disk check is injected, so it is
+  fixture-tested; `shortcut::uninstaller` now calls it, so removal, the
+  install directory and Open read the string the same way. Reading it
+  correctly surfaced the next thing: on the reference machine Steam's folder
+  grants `BUILTIN\Users` full control, so the helper refuses to start
+  `uninstall.exe` as Administrator, correctly, and removing Steam from
+  Add/Remove Programs stops with that sentence. Steam is a machine-wide
+  entry, so there is no unelevated route either. Whether such an entry
+  should be offered as interactive and unelevated, or drawn as not
+  removable here with the reason, belongs with the privilege plan.
 
 ## Evidence
 
