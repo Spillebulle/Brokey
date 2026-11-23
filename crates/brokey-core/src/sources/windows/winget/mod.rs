@@ -110,25 +110,155 @@ pub const WINGET_CLI_LATEST: &str =
 
 pub const NOT_INSTALLED: &str = "winget is not installed, so nothing can be installed or removed through it. \
      Brokey still searches winget's catalogue, which it reads itself.";
-/// Not wired up yet. `Source::setup` returns `Option<Setup>`, and `None`
-/// carries no reason, so `transaction/plan.rs` cannot tell "already
-/// installed" apart from "Microsoft could not be reached" and shows a
-/// generic sentence for both. Reaching this constant needs the trait to
-/// carry a reason through a failed setup, which is outside this task.
+/// What setting winget up answers when Microsoft's release could not be
+/// asked. [`Source::try_setup`] carries it, followed by what the network
+/// said, so the page tells "not just now" apart from "not here".
 pub const NO_BOOTSTRAP: &str = "winget is not installed, and the App Installer release could not be reached, \
      so Brokey cannot set it up just now. Brokey still searches winget's catalogue.";
+/// What setting winget up answers when there is nothing to set up.
+pub const ALREADY_INSTALLED: &str = "winget is already installed, so there is nothing to set up.";
 pub const SETUP_LABEL: &str = "Install winget";
-pub const SETUP_SENTENCE: &str = "The App Installer package is downloaded from Microsoft, checked against the \
-     hash Microsoft publishes with it, and installed for you alone. No \
-     Administrator permission is needed.";
+pub const SETUP_SENTENCE: &str = "The App Installer package and the packages it depends on are downloaded \
+     from Microsoft, each checked against the hash Microsoft publishes with it, and installed for you \
+     alone. No Administrator permission is needed.";
 
-/// What a `winget-cli` release says about its bundle.
+/// The file the dependency archive is published as, beside the bundle.
+pub const DEPENDENCIES_ZIP: &str = "DesktopAppInstaller_Dependencies.zip";
+
+/// What a `winget-cli` release says about its bundle and its dependencies.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bootstrap {
     pub url: String,
     /// The SHA-256 Microsoft publishes in a `.txt` beside the bundle.
     pub sha256: String,
     pub version: String,
+    /// [`DEPENDENCIES_ZIP`]: the framework packages App Installer needs
+    /// (VCLibs, the UWP desktop VCLibs and the Windows App Runtime at the
+    /// time of writing), one folder per architecture. A machine that has
+    /// never had winget is usually a machine missing these too: Server,
+    /// Sandbox, a stripped image. Without them `Add-AppxPackage` fails with
+    /// `0x80073CF3`.
+    pub dependencies_url: String,
+    /// The SHA-256 Microsoft publishes in a `.txt` beside the archive.
+    pub dependencies_sha256: String,
+    /// The folder inside the archive for this machine: `x64`, `arm64` or
+    /// `x86`. See [`dependency_folder`].
+    pub arch: String,
+}
+
+/// The two release assets setting winget up downloads and the two hash
+/// files that vouch for them, chosen from a release's asset list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BootstrapAssets {
+    pub bundle_url: String,
+    pub bundle_hash_url: String,
+    pub dependencies_url: String,
+    pub dependencies_hash_url: String,
+}
+
+/// Choose the bundle, the dependency archive and the hash file for each
+/// from a release's `(name, download url)` pairs. Pure, so the choice is
+/// tested against the real release's names on any machine.
+///
+/// Each hash file is found by the relationship Microsoft maintains, the
+/// asset's own name with its extension replaced by `.txt`, and never by a
+/// predicate on the name: the release carries two `.txt` files whose names
+/// contain `DesktopAppInstaller`, and they hold different hashes.
+pub fn bootstrap_assets(assets: &[(String, String)]) -> Result<BootstrapAssets> {
+    let url_of = |name: &str| {
+        assets
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, url)| url.clone())
+    };
+    let bundle = assets
+        .iter()
+        .find(|(n, _)| n.ends_with(".msixbundle"))
+        .ok_or_else(|| {
+            crate::Error::from_source(
+                SourceKind::Winget,
+                "The App Installer release has no package in it, so winget cannot be set up.",
+            )
+        })?;
+    let bundle_hash_url = url_of(&hash_asset_name(&bundle.0)).ok_or_else(|| {
+        crate::Error::from_source(
+            SourceKind::Winget,
+            "The App Installer release publishes no hash for its package, so Brokey \
+             will not install it.",
+        )
+    })?;
+    let dependencies_url = url_of(DEPENDENCIES_ZIP).ok_or_else(|| {
+        crate::Error::from_source(
+            SourceKind::Winget,
+            "The App Installer release has no dependency archive in it, so winget cannot be \
+             set up on a machine that is missing those packages.",
+        )
+    })?;
+    let dependencies_hash_url = url_of(&hash_asset_name(DEPENDENCIES_ZIP)).ok_or_else(|| {
+        crate::Error::from_source(
+            SourceKind::Winget,
+            "The App Installer release publishes no hash for its dependency archive, so Brokey \
+             will not install it.",
+        )
+    })?;
+    Ok(BootstrapAssets {
+        bundle_url: bundle.1.clone(),
+        bundle_hash_url,
+        dependencies_url,
+        dependencies_hash_url,
+    })
+}
+
+/// The folder of the dependency archive that holds this architecture's
+/// packages, from `std::env::consts::ARCH` or Windows' own spelling. The
+/// archive has `x64`, `arm64` and `x86`; `None` for anything else.
+pub fn dependency_folder(arch: &str) -> Option<&'static str> {
+    match arch.to_ascii_lowercase().as_str() {
+        "x86_64" | "amd64" | "x64" => Some("x64"),
+        "aarch64" | "arm64" => Some("arm64"),
+        "x86" | "i386" | "i686" => Some("x86"),
+        _ => None,
+    }
+}
+
+/// The machine's own architecture rather than this process's: an x64
+/// Brokey running emulated on an ARM64 machine gets the ARM64 App
+/// Installer from the bundle, which needs the ARM64 frameworks.
+#[cfg(windows)]
+pub fn native_arch() -> &'static str {
+    use windows_sys::Win32::System::SystemInformation::{
+        IMAGE_FILE_MACHINE, IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64,
+        IMAGE_FILE_MACHINE_I386,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
+    let mut process: IMAGE_FILE_MACHINE = 0;
+    let mut native: IMAGE_FILE_MACHINE = 0;
+    // SAFETY: the pseudo-handle from GetCurrentProcess needs no closing, and
+    // both out-pointers are to locals that outlive the call.
+    let ok = unsafe { IsWow64Process2(GetCurrentProcess(), &mut process, &mut native) };
+    if ok != 0 {
+        match native {
+            IMAGE_FILE_MACHINE_AMD64 => return "x86_64",
+            IMAGE_FILE_MACHINE_ARM64 => return "aarch64",
+            IMAGE_FILE_MACHINE_I386 => return "x86",
+            _ => {}
+        }
+    }
+    std::env::consts::ARCH
+}
+
+/// Where a failed request leaves setting winget up: [`NO_BOOTSTRAP`], then
+/// what the network said, as a sentence.
+pub fn unreachable(cause: &str) -> crate::Error {
+    let cause = cause.trim();
+    let message = if cause.is_empty() {
+        NO_BOOTSTRAP.to_string()
+    } else if cause.ends_with(['.', '!', '?']) {
+        format!("{NO_BOOTSTRAP} {cause}")
+    } else {
+        format!("{NO_BOOTSTRAP} {cause}.")
+    };
+    crate::Error::from_source(SourceKind::Winget, message)
 }
 
 pub struct Winget {
@@ -141,12 +271,27 @@ impl Winget {
     }
 }
 
-/// Download, check, install. Three steps because the check has to be able to
-/// stop the plan: the Runner abandons a plan at the first failing step, so an
-/// install can never run against a bundle whose hash did not match.
+/// Download both, check both, install. The check is a step of its own
+/// because it has to be able to stop the plan: the Runner abandons a plan at
+/// the first failing step, so nothing downloaded is unpacked or installed
+/// unless both files matched the hashes Microsoft publishes for them.
+///
+/// The dependencies go in through `Add-AppxPackage -DependencyPath` rather
+/// than an `Add-AppxPackage` each before the bundle. That is the form
+/// Microsoft documents for App Installer, and it is the one that does not
+/// fail on a machine that already has a newer copy of a framework: adding
+/// an older framework on its own is refused with `0x80073D06`, while a
+/// dependency that is already satisfied is simply not installed again.
 pub fn bootstrap_steps(b: &Bootstrap, into: &Path) -> Vec<Step> {
-    let file = into.join("Microsoft.DesktopAppInstaller.msixbundle");
-    let file = file.display().to_string();
+    let file = into
+        .join("Microsoft.DesktopAppInstaller.msixbundle")
+        .display()
+        .to_string();
+    let zip = into.join(DEPENDENCIES_ZIP).display().to_string();
+    let unpacked = into
+        .join("DesktopAppInstaller_Dependencies")
+        .display()
+        .to_string();
     let step = |title: String, program: &str, args: Vec<String>, weight: u32| Step {
         source: SourceKind::Winget,
         title,
@@ -160,64 +305,101 @@ pub fn bootstrap_steps(b: &Bootstrap, into: &Path) -> Vec<Step> {
         needs_root: false,
         weight,
     };
+    let curl = |to: &str, url: &str| {
+        vec![
+            "-L".to_string(),
+            "--fail".to_string(),
+            "--create-dirs".to_string(),
+            "-o".to_string(),
+            to.to_string(),
+            url.to_string(),
+        ]
+    };
+    let powershell = |script: String| {
+        vec![
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-Command".to_string(),
+            script,
+        ]
+    };
+    let check = |path: &str, hash: &str, what: &str| {
+        format!(
+            "if ((Get-FileHash -Algorithm SHA256 -LiteralPath '{}').Hash -ne '{}') \
+             {{ Write-Error '{what} did not match the hash Microsoft publishes for it, \
+             so nothing was installed.'; exit 1 }}",
+            ps_quote(path),
+            ps_quote(hash)
+        )
+    };
     vec![
         step(
             format!("Downloading App Installer {}", b.version),
             "curl.exe",
-            vec![
-                "-L".to_string(),
-                "--fail".to_string(),
-                "--create-dirs".to_string(),
-                "-o".to_string(),
-                file.clone(),
-                b.url.clone(),
-            ],
+            curl(&file, &b.url),
             8,
+        ),
+        step(
+            "Downloading the packages App Installer depends on".to_string(),
+            "curl.exe",
+            curl(&zip, &b.dependencies_url),
+            6,
         ),
         step(
             "Checking what was downloaded".to_string(),
             "powershell.exe",
-            vec![
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-Command".to_string(),
-                format!(
-                    "if ((Get-FileHash -Algorithm SHA256 -LiteralPath '{}').Hash -ne '{}') \
-                     {{ Write-Error 'The App Installer package did not match the hash Microsoft \
-                     publishes for it, so it was not installed.'; exit 1 }}",
-                    ps_quote(&file),
-                    ps_quote(&b.sha256)
+            powershell(format!(
+                "{}; {}",
+                check(&file, &b.sha256, "The App Installer package"),
+                check(
+                    &zip,
+                    &b.dependencies_sha256,
+                    "The archive of packages App Installer depends on"
                 ),
-            ],
+            )),
             1,
         ),
         step(
             format!("Installing App Installer {}", b.version),
             "powershell.exe",
-            vec![
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-Command".to_string(),
-                // `Add-AppxPackage` has no `-LiteralPath` parameter, only
-                // `-Path` (alias `PSPath`), unlike `Get-FileHash` above. Its
-                // `-Path` is a plain string with no wildcard support, so
-                // `ps_quote` is enough and no bracket escaping is needed.
-                format!("Add-AppxPackage -Path '{}'", ps_quote(&file)),
-            ],
+            // `Add-AppxPackage` has no `-LiteralPath` parameter, only
+            // `-Path` (alias `PSPath`), unlike `Get-FileHash` above. Its
+            // `-Path` is a plain string with no wildcard support, so
+            // `ps_quote` is enough and no bracket escaping is needed. The
+            // unpacked folder is emptied first so a package left by an older
+            // release is never offered alongside the new one.
+            powershell(format!(
+                "$ErrorActionPreference = 'Stop'; \
+                 $d = '{unpacked}'; \
+                 if (Test-Path -LiteralPath $d) {{ Remove-Item -LiteralPath $d -Recurse -Force }}; \
+                 Expand-Archive -LiteralPath '{zip}' -DestinationPath $d; \
+                 $deps = @(Get-ChildItem -LiteralPath (Join-Path $d '{arch}') -Filter *.appx | \
+                 ForEach-Object {{ $_.FullName }}); \
+                 if ($deps.Count -eq 0) {{ Write-Error 'The archive of packages App Installer \
+                 depends on has none for {arch}, so nothing was installed.'; exit 1 }}; \
+                 Add-AppxPackage -Path '{file}' -DependencyPath $deps",
+                unpacked = ps_quote(&unpacked),
+                zip = ps_quote(&zip),
+                arch = ps_quote(&b.arch),
+                file = ps_quote(&file),
+            )),
             4,
         ),
     ]
 }
 
-/// The name of the `.txt` file Microsoft publishes beside a bundle, holding
+/// The name of the `.txt` file Microsoft publishes beside an asset, holding
 /// its SHA-256. This is the relationship Microsoft actually maintains: the
-/// hash file is the bundle's own name with `.msixbundle` replaced by `.txt`.
-/// The release also carries a second `.txt` whose name contains
-/// `DesktopAppInstaller`, the dependency archive's hash, which is why a
-/// predicate on the name alone cannot tell the two apart. Pure, so it is
+/// hash file is the asset's own name with its extension replaced by `.txt`,
+/// for the bundle and for the dependency archive alike. The release carries
+/// two `.txt` files whose names contain `DesktopAppInstaller`, which is why
+/// a predicate on the name alone cannot tell the two apart. Pure, so it is
 /// tested without a fixture and runs on Linux too.
-pub fn hash_asset_name(bundle_name: &str) -> String {
-    bundle_name.replace(".msixbundle", ".txt")
+pub fn hash_asset_name(asset_name: &str) -> String {
+    match asset_name.rsplit_once('.') {
+        Some((stem, _)) => format!("{stem}.txt"),
+        None => format!("{asset_name}.txt"),
+    }
 }
 
 /// A PowerShell single-quoted literal takes an apostrophe as two of them,
@@ -233,6 +415,22 @@ fn ps_quote(s: &str) -> String {
 /// nothing useful to say about why.
 pub fn is_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The hash out of a published `.txt`, or the sentence that refuses it.
+/// `what` names the file the hash is for, in the middle of a sentence.
+pub fn published_hash(text: &str, what: &str) -> Result<String> {
+    let hash = text.trim();
+    if is_sha256(hash) {
+        Ok(hash.to_string())
+    } else {
+        Err(crate::Error::from_source(
+            SourceKind::Winget,
+            format!(
+                "The hash published with {what} is not a SHA-256, so Brokey will not install it."
+            ),
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -534,12 +732,26 @@ impl Source for Winget {
     }
 
     fn setup(&self) -> Option<Setup> {
+        self.try_setup().ok()
+    }
+
+    /// Why there is no setup matters here, where it does not for most
+    /// sources: "already installed" and "Microsoft could not be reached
+    /// just now" are different sentences, and the second one is temporary.
+    fn try_setup(&self) -> Result<Setup> {
         #[cfg(windows)]
         if winget_exe().is_some() {
-            return None;
+            return Err(crate::Error::from_source(
+                SourceKind::Winget,
+                ALREADY_INSTALLED,
+            ));
         }
-        let b = self.bootstrap().ok()?;
-        Some(Setup {
+        #[cfg(windows)]
+        let arch = native_arch();
+        #[cfg(not(windows))]
+        let arch = std::env::consts::ARCH;
+        let b = self.bootstrap(arch)?;
+        Ok(Setup {
             ops: Vec::new(),
             steps: bootstrap_steps(&b, &self.client.download_dir()),
             notice: SETUP_SENTENCE.to_string(),
@@ -656,8 +868,9 @@ impl Winget {
         index::open(&path)
     }
 
-    /// The newest App Installer release, and the hash published with it.
-    fn bootstrap(&self) -> Result<Bootstrap> {
+    /// The newest App Installer release, the dependency archive beside it,
+    /// and the hash published with each.
+    fn bootstrap(&self, arch: &str) -> Result<Bootstrap> {
         #[derive(serde::Deserialize)]
         struct Release {
             tag_name: String,
@@ -668,45 +881,45 @@ impl Winget {
             name: String,
             browser_download_url: String,
         }
-        let release: Release = self.client.get_json(WINGET_CLI_LATEST, &[])?;
-        let bundle = release
-            .assets
-            .iter()
-            .find(|a| a.name.ends_with(".msixbundle"))
-            .ok_or_else(|| {
-                crate::Error::new(
-                    "The App Installer release has no package in it, so winget cannot be set up."
-                        .to_string(),
-                )
-            })?;
-        let hash_name = hash_asset_name(&bundle.name);
-        let hash_asset = release
-            .assets
-            .iter()
-            .find(|a| a.name == hash_name)
-            .ok_or_else(|| {
-                crate::Error::new(
-                    "The App Installer release publishes no hash for its package, so Brokey \
-                     will not install it."
-                        .to_string(),
-                )
-            })?;
-        let sha256 = self
+        let folder = dependency_folder(arch).ok_or_else(|| {
+            crate::Error::from_source(
+                SourceKind::Winget,
+                format!(
+                    "Microsoft publishes the packages App Installer depends on for x64, ARM64 \
+                     and x86, and this machine is {arch}, so Brokey cannot set winget up here."
+                ),
+            )
+        })?;
+        let release: Release = self
             .client
-            .get_text(&hash_asset.browser_download_url)?
-            .trim()
-            .to_string();
-        if !is_sha256(&sha256) {
-            return Err(crate::Error::new(
-                "The hash published with the App Installer package is not a SHA-256, \
-                 so Brokey will not install it."
-                    .to_string(),
-            ));
-        }
+            .get_json(WINGET_CLI_LATEST, &[])
+            .map_err(|e| unreachable(&e.message))?;
+        let pairs: Vec<(String, String)> = release
+            .assets
+            .into_iter()
+            .map(|a| (a.name, a.browser_download_url))
+            .collect();
+        let chosen = bootstrap_assets(&pairs)?;
+        let fetch = |url: &str| {
+            self.client
+                .get_text(url)
+                .map_err(|e| unreachable(&e.message))
+        };
+        let sha256 = published_hash(
+            &fetch(&chosen.bundle_hash_url)?,
+            "the App Installer package",
+        )?;
+        let dependencies_sha256 = published_hash(
+            &fetch(&chosen.dependencies_hash_url)?,
+            "the archive of packages App Installer depends on",
+        )?;
         Ok(Bootstrap {
-            url: bundle.browser_download_url.clone(),
+            url: chosen.bundle_url,
             sha256,
             version: release.tag_name.trim_start_matches('v').to_string(),
+            dependencies_url: chosen.dependencies_url,
+            dependencies_sha256,
+            arch: folder.to_string(),
         })
     }
 }
@@ -722,35 +935,214 @@ mod tests {
                 .to_string(),
             sha256: "ab".repeat(32),
             version: "1.29.290".to_string(),
+            dependencies_url:
+                "https://github.com/microsoft/winget-cli/releases/download/v1.29.290/\
+                               DesktopAppInstaller_Dependencies.zip"
+                    .to_string(),
+            dependencies_sha256: "cd".repeat(32),
+            arch: "x64".to_string(),
         }
     }
 
-    /// Three steps, in the only order that is safe.
+    /// Both downloads, then the check, then the install: the only order in
+    /// which nothing downloaded is unpacked or installed before both hashes
+    /// have matched.
     #[test]
     fn setting_winget_up_downloads_then_verifies_then_installs() {
         let steps = bootstrap_steps(&bootstrap(), std::path::Path::new("C:/tmp"));
-        assert_eq!(steps.len(), 3);
-        assert!(
-            steps[0].title.starts_with("Downloading"),
-            "{}",
-            steps[0].title
+        let titles: Vec<&str> = steps.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Downloading App Installer 1.29.290",
+                "Downloading the packages App Installer depends on",
+                "Checking what was downloaded",
+                "Installing App Installer 1.29.290",
+            ]
         );
-        assert!(steps[1].title.starts_with("Checking"), "{}", steps[1].title);
         assert!(
-            steps[2].title.starts_with("Installing"),
-            "{}",
-            steps[2].title
+            steps[1]
+                .command
+                .args
+                .iter()
+                .any(|a| a.ends_with(DEPENDENCIES_ZIP))
+        );
+        assert!(
+            steps[1]
+                .command
+                .args
+                .contains(&bootstrap().dependencies_url)
+        );
+        // Nothing before the check touches the archive except to write it.
+        for s in &steps[..2] {
+            assert_eq!(s.command.program, "curl.exe");
+        }
+    }
+
+    /// Both published hashes reach the command that checks them, each beside
+    /// its own file. Without this the verify step is decoration.
+    #[test]
+    fn the_verify_step_carries_both_published_hashes() {
+        let b = bootstrap();
+        let steps = bootstrap_steps(&b, std::path::Path::new("C:/tmp"));
+        let joined = steps[2].command.args.join(" ");
+        let bundle = joined
+            .find(&b.sha256)
+            .expect("the bundle's hash is in the command");
+        let deps = joined
+            .find(&b.dependencies_sha256)
+            .expect("the archive's hash is in the command");
+        let bundle_file = joined.find("msixbundle").unwrap();
+        let deps_file = joined.find(DEPENDENCIES_ZIP).unwrap();
+        assert!(
+            bundle_file < bundle && bundle < deps_file && deps_file < deps,
+            "{joined}"
+        );
+        assert_eq!(joined.matches("exit 1").count(), 2, "{joined}");
+    }
+
+    /// The install takes this machine's folder out of the archive and hands
+    /// every package in it to `Add-AppxPackage` as a dependency of the
+    /// bundle, and stops if the folder is empty rather than installing a
+    /// bundle that is known to fail.
+    #[test]
+    fn the_install_step_adds_this_architectures_dependencies_with_the_bundle() {
+        let mut b = bootstrap();
+        b.arch = "arm64".to_string();
+        let joined = bootstrap_steps(&b, std::path::Path::new("C:/tmp"))[3]
+            .command
+            .args
+            .join(" ");
+        assert!(
+            joined.contains("$ErrorActionPreference = 'Stop'"),
+            "{joined}"
+        );
+        assert!(joined.contains("Expand-Archive"), "{joined}");
+        assert!(joined.contains("'arm64'"), "{joined}");
+        assert!(!joined.contains("x64"), "{joined}");
+        assert!(joined.contains("-DependencyPath $deps"), "{joined}");
+        assert!(joined.contains("$deps.Count -eq 0"), "{joined}");
+        let unpack = joined.find("Expand-Archive").unwrap();
+        let add = joined.find("Add-AppxPackage").unwrap();
+        assert!(unpack < add, "{joined}");
+    }
+
+    /// The archive has three folders. Every spelling of each that reaches
+    /// this function picks one; anything else is refused rather than
+    /// guessed, because a wrong guess installs frameworks that cannot load.
+    #[test]
+    fn the_dependency_folder_follows_the_machine() {
+        for (arch, folder) in [
+            ("x86_64", "x64"),
+            ("AMD64", "x64"),
+            ("aarch64", "arm64"),
+            ("ARM64", "arm64"),
+            ("x86", "x86"),
+        ] {
+            assert_eq!(dependency_folder(arch), Some(folder), "{arch}");
+        }
+        assert_eq!(dependency_folder("riscv64"), None);
+        assert_eq!(dependency_folder(""), None);
+    }
+
+    /// The real release's asset list, as `api.github.com` gave it for
+    /// v1.29.380. The four files setting up needs are chosen, and each hash
+    /// is the one beside its own file.
+    fn release_assets() -> Vec<(String, String)> {
+        [
+            "DesktopAppInstallerPolicies.zip",
+            "DesktopAppInstaller_Dependencies.json",
+            "DesktopAppInstaller_Dependencies.txt",
+            "DesktopAppInstaller_Dependencies.zip",
+            "e53e159d00e04f729cc2180cffd1c02e_License1.xml",
+            "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle",
+            "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.txt",
+        ]
+        .into_iter()
+        .map(|n| (n.to_string(), format!("https://example.invalid/{n}")))
+        .collect()
+    }
+
+    #[test]
+    fn the_release_gives_the_bundle_the_archive_and_a_hash_for_each() {
+        let chosen = bootstrap_assets(&release_assets()).unwrap();
+        assert_eq!(
+            chosen,
+            BootstrapAssets {
+                bundle_url:
+                    "https://example.invalid/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+                        .to_string(),
+                bundle_hash_url:
+                    "https://example.invalid/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.txt"
+                        .to_string(),
+                dependencies_url: "https://example.invalid/DesktopAppInstaller_Dependencies.zip"
+                    .to_string(),
+                dependencies_hash_url:
+                    "https://example.invalid/DesktopAppInstaller_Dependencies.txt".to_string(),
+            }
         );
     }
 
-    /// The published hash reaches the command that checks it. Without this
-    /// the verify step is decoration.
+    /// A release missing either file, or either hash, is refused with a
+    /// sentence saying which. Installing the bundle without its archive is
+    /// what this change exists to stop, so a missing archive is not skipped.
     #[test]
-    fn the_verify_step_carries_the_published_hash() {
-        let b = bootstrap();
-        let steps = bootstrap_steps(&b, std::path::Path::new("C:/tmp"));
-        let joined = steps[1].command.args.join(" ");
-        assert!(joined.contains(&b.sha256), "the hash is in the command");
+    fn a_release_missing_a_file_or_a_hash_says_which() {
+        for (missing, says) in [
+            (
+                "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle",
+                "no package",
+            ),
+            (
+                "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.txt",
+                "no hash for its package",
+            ),
+            (
+                "DesktopAppInstaller_Dependencies.zip",
+                "no dependency archive",
+            ),
+            (
+                "DesktopAppInstaller_Dependencies.txt",
+                "no hash for its dependency archive",
+            ),
+        ] {
+            let assets: Vec<_> = release_assets()
+                .into_iter()
+                .filter(|(n, _)| n != missing)
+                .collect();
+            let err = bootstrap_assets(&assets).unwrap_err();
+            assert!(err.message.contains(says), "{missing}: {}", err.message);
+            assert!(err.message.ends_with('.'), "{}", err.message);
+            assert_eq!(err.source_kind, Some(SourceKind::Winget));
+        }
+    }
+
+    /// What the page reads when Microsoft could not be asked: that it is
+    /// temporary, then the network's own words, ending as a sentence.
+    #[test]
+    fn an_unreachable_release_says_not_just_now_and_why() {
+        let err = unreachable("api.github.com did not answer in time");
+        assert!(err.message.starts_with(NO_BOOTSTRAP), "{}", err.message);
+        assert!(err.message.contains("just now"), "{}", err.message);
+        assert!(
+            err.message
+                .ends_with("api.github.com did not answer in time."),
+            "{}",
+            err.message
+        );
+        assert_eq!(unreachable("  ").message, NO_BOOTSTRAP);
+        assert_eq!(err.source_kind, Some(SourceKind::Winget));
+    }
+
+    #[test]
+    fn a_published_hash_is_trimmed_and_anything_else_is_refused() {
+        let hash = "BA875AFE9D190F61218985AC0292A99D1DB710BF93E13C68944CA9D89F0D82D1";
+        assert_eq!(published_hash(&format!("{hash}\r\n"), "x").unwrap(), hash);
+        let err = published_hash("<html>404</html>", "the archive").unwrap_err();
+        assert_eq!(
+            err.message,
+            "The hash published with the archive is not a SHA-256, so Brokey will not install it."
+        );
     }
 
     /// Nothing about setting winget up needs Administrator. This is what
@@ -779,7 +1171,7 @@ mod tests {
     fn a_quote_in_the_hash_cannot_close_the_powershell_literal() {
         let mut b = bootstrap();
         b.sha256 = "aa' -and $false -and 'bb".to_string();
-        let joined = bootstrap_steps(&b, std::path::Path::new("C:/tmp"))[1]
+        let joined = bootstrap_steps(&b, std::path::Path::new("C:/tmp"))[2]
             .command
             .args
             .join(" ");
@@ -792,7 +1184,7 @@ mod tests {
     #[test]
     fn a_quote_in_the_path_cannot_close_the_powershell_literal() {
         let steps = bootstrap_steps(&bootstrap(), std::path::Path::new("C:/Users/O'Brien"));
-        for i in [1, 2] {
+        for i in [2, 3] {
             let joined = steps[i].command.args.join(" ");
             assert!(joined.contains("O''Brien"), "step {i}: {joined}");
             // Every apostrophe in the command is either one of the four that
@@ -907,9 +1299,9 @@ mod tests {
     #[test]
     fn the_install_step_uses_the_parameter_add_appxpackage_actually_has() {
         let steps = bootstrap_steps(&bootstrap(), std::path::Path::new("C:/tmp"));
-        let joined = steps[2].command.args.join(" ");
-        assert!(joined.contains("-Path"), "{joined}");
-        assert!(!joined.contains("-LiteralPath"), "{joined}");
+        let joined = steps[3].command.args.join(" ");
+        assert!(joined.contains("Add-AppxPackage -Path '"), "{joined}");
+        assert!(!joined.contains("Add-AppxPackage -LiteralPath"), "{joined}");
     }
 
     /// Guards the fix for `status()` fetching the catalogue itself: it is
