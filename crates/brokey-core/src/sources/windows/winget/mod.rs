@@ -286,11 +286,41 @@ pub fn operation_step(kind: OpKind, id: &str, program: &str) -> Step {
         // `--disable-interactivity` tells winget not to prompt, so it cannot
         // ask for elevation on its own: a machine-scope package fails unless
         // the step is already elevated, and most popular winget packages are
-        // machine scope. Choosing the scope per package needs the manifest,
-        // which is the metadata ladder in a later plan.
+        // machine scope. An install whose manifest permits it is
+        // `user_install_step` instead, and does not elevate.
         needs_root: true,
         weight: 10,
     }
+}
+
+/// An install for this user alone, where the package's installer manifest
+/// permits it ([`manifest::permits_user_scope`]): [`operation_step`]'s
+/// install with `--scope user`, and no Administrator. winget installs a
+/// user-scope package without elevating, so the step runs in the user's own
+/// session, which also puts it in the user's own profile rather than in
+/// whichever administrator's profile answered the prompt.
+///
+/// It never needs root, so the helper's closed list never sees it; that
+/// list still rebuilds only [`operation_step`] and [`update_all_step`].
+pub fn user_install_step(id: &str, program: &str) -> Step {
+    let mut step = operation_step(OpKind::Install, id, program);
+    // After the id, where a reader of the command line would look for it.
+    step.command
+        .args
+        .splice(4..4, ["--scope".to_string(), "user".to_string()]);
+    step.needs_root = false;
+    step
+}
+
+/// Whether `row`'s installer manifest permits a user-scope install. `fetch`
+/// is how the manifest is read, as for [`described_package`]. Anything that
+/// goes wrong (no derivable address, a failed fetch, a manifest that says
+/// nothing) answers `false`, which keeps the machine install that always
+/// worked: a missing manifest costs a prompt, never a failed install.
+fn user_scope_permitted(row: &query::Row, fetch: &dyn Fn(&str) -> Result<String>) -> bool {
+    manifest::installer_url(&row.id, &row.latest_version)
+        .and_then(|url| fetch(&url).ok())
+        .is_some_and(|text| manifest::permits_user_scope(&text))
 }
 
 /// The one step that updates everything winget can, which is a different
@@ -631,7 +661,15 @@ impl Source for Winget {
         // Resolved once, here, where the environment is the user's own. The
         // elevated helper is handed the result and searches nothing.
         let program = winget_program();
-        self.plan_with(op, &program)
+        // Only an install chooses its scope. An update or a removal acts on
+        // what is already installed, and winget finds that itself.
+        let for_user = match op {
+            crate::model::Op::Install { package } if package.source == SourceKind::Winget => {
+                self.permits_user_scope(&package.id)
+            }
+            _ => false,
+        };
+        self.plan_with(op, &program, for_user)
     }
 }
 
@@ -641,9 +679,16 @@ impl Winget {
     /// drive every `Op` variant against a fixed path without winget being
     /// installed on the machine running the test; `plan` itself still
     /// resolves the program the normal way and is not otherwise changed.
-    fn plan_with(&self, op: &crate::model::Op, program: &str) -> Result<Vec<Step>> {
+    ///
+    /// `for_user` is whether the package's installer manifest permits a
+    /// user-scope install, found by `plan` through the manifest and passed in
+    /// for the same reason as the program.
+    fn plan_with(&self, op: &crate::model::Op, program: &str, for_user: bool) -> Result<Vec<Step>> {
         use crate::model::Op;
         let step = match op {
+            Op::Install { package } if package.source == SourceKind::Winget && for_user => {
+                user_install_step(&package.id, program)
+            }
             Op::Install { package } if package.source == SourceKind::Winget => {
                 operation_step(OpKind::Install, &package.id, program)
             }
@@ -673,6 +718,22 @@ impl Winget {
         let db = index::open(&path).ok()?;
         let n = query::count(&db).ok()?;
         Some(format!("{n} packages"))
+    }
+
+    /// Whether the package's installer manifest permits a user-scope install.
+    /// One fetch through the same cache the detail page's manifest uses, so
+    /// a package whose page was just opened costs one more small file and a
+    /// second install of it costs nothing.
+    fn permits_user_scope(&self, id: &str) -> bool {
+        let Ok(db) = self.catalogue() else {
+            return false;
+        };
+        let Ok(Some(row)) = query::by_id(&db, id) else {
+            return false;
+        };
+        user_scope_permitted(&row, &|url| {
+            self.client.get_text_cached(url, MANIFEST_MAX_AGE)
+        })
     }
 
     /// The catalogue, downloaded if the cached copy is missing or stale.
@@ -1128,6 +1189,123 @@ mod tests {
         assert!(p.categories.is_empty());
     }
 
+    fn obsidian_row() -> query::Row {
+        query::Row {
+            id: "Obsidian.Obsidian".to_string(),
+            name: "Obsidian".to_string(),
+            moniker: Some("obsidian".to_string()),
+            latest_version: "1.15.1".to_string(),
+            publisher: Some("obsidian".to_string()),
+        }
+    }
+
+    fn installer_fixture(name: &str) -> String {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/winget")
+                .join(name),
+        )
+        .expect("the fixture is checked in")
+    }
+
+    /// A manifest with a user installer for every architecture gives an
+    /// install for this user alone, which does not elevate. The address
+    /// asked for is the installer manifest of the catalogue's version.
+    #[test]
+    fn a_package_whose_manifest_permits_it_installs_for_the_user() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let permitted = user_scope_permitted(&obsidian_row(), &|url| {
+            asked.borrow_mut().push(url.to_string());
+            Ok(installer_fixture("obsidian.installer.yaml"))
+        });
+        assert!(permitted);
+        assert_eq!(
+            asked.into_inner(),
+            [
+                "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/o/Obsidian/Obsidian/1.15.1/Obsidian.Obsidian.installer.yaml"
+            ]
+        );
+        let w = Winget::new(crate::http::Client::shared());
+        let op = crate::model::Op::Install {
+            package: crate::model::PackageRef {
+                source: SourceKind::Winget,
+                id: "Obsidian.Obsidian".to_string(),
+            },
+        };
+        let steps = w.plan_with(&op, WINGET, permitted).unwrap();
+        assert_eq!(steps.len(), 1);
+        assert!(!steps[0].needs_root, "a user install never elevates");
+        assert_eq!(
+            steps[0].command.args[..6],
+            [
+                "install",
+                "--exact",
+                "--id",
+                "Obsidian.Obsidian",
+                "--scope",
+                "user"
+            ]
+        );
+        assert!(
+            steps[0]
+                .command
+                .args
+                .contains(&"--disable-interactivity".to_string())
+        );
+    }
+
+    /// And a machine-scope manifest, a fetch that fails or a manifest that
+    /// is not one keep the install that always worked: elevated, no scope.
+    #[test]
+    fn anything_short_of_permission_keeps_the_machine_install() {
+        let row = obsidian_row();
+        assert!(!user_scope_permitted(&row, &|_| Ok(installer_fixture(
+            "7zip.installer.yaml"
+        ))));
+        assert!(!user_scope_permitted(&row, &|_| {
+            Err(crate::Error::new(
+                "GitHub could not be reached.".to_string(),
+            ))
+        }));
+        assert!(!user_scope_permitted(&row, &|_| Ok(
+            "<html>404</html>".to_string()
+        )));
+        let w = Winget::new(crate::http::Client::shared());
+        let op = crate::model::Op::Install {
+            package: crate::model::PackageRef {
+                source: SourceKind::Winget,
+                id: "7zip.7zip".to_string(),
+            },
+        };
+        let steps = w.plan_with(&op, WINGET, false).unwrap();
+        assert!(steps[0].needs_root);
+        assert!(!steps[0].command.args.contains(&"--scope".to_string()));
+    }
+
+    /// Only an install chooses a scope; an update or a removal acts on what is
+    /// installed, whatever `for_user` says.
+    #[test]
+    fn only_an_install_takes_the_user_scope() {
+        let w = Winget::new(crate::http::Client::shared());
+        let package = crate::model::PackageRef {
+            source: SourceKind::Winget,
+            id: "Obsidian.Obsidian".to_string(),
+        };
+        for op in [
+            crate::model::Op::Update {
+                package: package.clone(),
+            },
+            crate::model::Op::Remove { package },
+        ] {
+            let steps = w.plan_with(&op, WINGET, true).unwrap();
+            assert!(steps[0].needs_root, "{op:?}");
+            assert!(
+                !steps[0].command.args.contains(&"--scope".to_string()),
+                "{op:?}"
+            );
+        }
+    }
+
     /// Uninstall takes no package agreement. Nothing is being agreed to, and
     /// `winget uninstall` does not accept the flag at all, so passing it would
     /// fail the step rather than be ignored. Checked against winget 1.30.140.
@@ -1257,7 +1435,10 @@ mod tests {
                 | Op::Refresh { .. }
                 | Op::Setup { .. } => {}
             }
-            for step in w.plan_with(op, PROGRAM).unwrap() {
+            for step in [false, true]
+                .into_iter()
+                .flat_map(|for_user| w.plan_with(op, PROGRAM, for_user).unwrap())
+            {
                 if step.needs_root {
                     assert_eq!(
                         allow::check_step(&step, &allowed),

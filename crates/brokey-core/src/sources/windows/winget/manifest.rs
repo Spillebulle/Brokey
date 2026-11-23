@@ -95,6 +95,87 @@ pub fn manifest_url(id: &str, version: &str) -> Option<String> {
     ))
 }
 
+/// Where `winget-pkgs` keeps the installer manifest for one version: the same
+/// directory as [`manifest_url`]'s, and the id followed by `.installer.yaml`.
+/// It is the file that says which installers exist and for which scope.
+pub fn installer_url(id: &str, version: &str) -> Option<String> {
+    manifest_url(id, version)
+        .map(|url| url.replace(".locale.en-US.yaml", ".installer.yaml"))
+        .filter(|url| url.ends_with(".installer.yaml"))
+}
+
+/// Whether an installer manifest lets this package be installed for one user
+/// alone: every architecture it lists has an installer whose scope is `user`,
+/// its own or the manifest's default.
+///
+/// Every architecture rather than this machine's, because the architecture
+/// winget picks is winget's decision (an x86 installer runs on x64, and
+/// either on ARM64) and a guess here would hand it a `--scope user` it then
+/// cannot honour, which fails the install. An installer with no scope at all
+/// is not a user one: winget treats it as unknown and installs it however the
+/// installer likes, which is most often for the whole machine.
+///
+/// Reads only what it needs, in the shape every manifest in `winget-pkgs`
+/// takes: a `Scope:` at the left margin is the default, `Installers:` is a
+/// sequence of `- ` items at the left margin, and an item's own `Scope:` and
+/// `Architecture:` are its first-level keys. A manifest that is not that
+/// shape answers `false`, which keeps the install as it always was.
+pub fn permits_user_scope(yaml: &str) -> bool {
+    let mut default: Option<String> = None;
+    // (architecture, scope) for each installer, in order.
+    let mut installers: Vec<(Option<String>, Option<String>)> = Vec::new();
+    let mut in_installers = false;
+    for line in yaml.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)) {
+        if let Some(item) = line.strip_prefix("- ") {
+            if in_installers {
+                installers.push((None, None));
+                read_installer_key(item, installers.last_mut());
+            }
+            continue;
+        }
+        if let Some((key, rest)) = split_key(line) {
+            in_installers = key == "Installers" && rest.is_empty();
+            if key == "Scope" {
+                default = Some(scalar(rest).to_lowercase());
+            }
+            continue;
+        }
+        // A first-level key of the current item is indented by exactly two.
+        if in_installers
+            && let Some(inner) = line.strip_prefix("  ")
+            && !inner.starts_with(' ')
+        {
+            read_installer_key(inner, installers.last_mut());
+        }
+    }
+    if installers.is_empty() {
+        return false;
+    }
+    let scope_of = |s: &Option<String>| s.clone().or_else(|| default.clone());
+    let mut architectures: Vec<Option<String>> =
+        installers.iter().map(|(a, _)| a.clone()).collect();
+    architectures.sort();
+    architectures.dedup();
+    architectures.iter().all(|arch| {
+        installers
+            .iter()
+            .any(|(a, s)| a == arch && scope_of(s).as_deref() == Some("user"))
+    })
+}
+
+/// One `Key: value` of an installer item, kept when it is one of the two
+/// [`permits_user_scope`] reads.
+fn read_installer_key(text: &str, installer: Option<&mut (Option<String>, Option<String>)>) {
+    let (Some(installer), Some((key, rest))) = (installer, split_key(text)) else {
+        return;
+    };
+    match key {
+        "Architecture" => installer.0 = Some(scalar(rest).to_lowercase()),
+        "Scope" => installer.1 = Some(scalar(rest).to_lowercase()),
+        _ => {}
+    }
+}
+
 /// One segment of the address above: it begins with an ASCII letter or digit
 /// and carries nothing but those and `-`, `_`, `.`, `+` and `~`, which are
 /// the characters a package id and a version are made of and are all
@@ -760,5 +841,64 @@ mod tests {
         let before = p.clone();
         describe(&mut p, &Described::default());
         assert_eq!(p, before);
+    }
+
+    /// Beside the locale manifest, in the same directory.
+    #[test]
+    fn the_installer_manifest_is_beside_the_locale_one() {
+        assert_eq!(
+            installer_url("Microsoft.VisualStudioCode", "1.146.0").as_deref(),
+            Some(
+                "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/m/Microsoft/VisualStudioCode/1.146.0/Microsoft.VisualStudioCode.installer.yaml"
+            )
+        );
+        assert_eq!(installer_url("nodot", "1.0"), None);
+    }
+
+    /// It fires: Visual Studio Code and Obsidian publish a user installer
+    /// beside the machine one for every architecture they list.
+    #[test]
+    fn a_manifest_with_a_user_installer_for_every_architecture_permits_it() {
+        assert!(permits_user_scope(&fixture("vscode.installer.yaml")));
+        assert!(permits_user_scope(&fixture("obsidian.installer.yaml")));
+    }
+
+    /// It must not: 7-Zip says `Scope: machine` once, for all its installers.
+    #[test]
+    fn a_machine_scope_manifest_does_not() {
+        assert!(!permits_user_scope(&fixture("7zip.installer.yaml")));
+    }
+
+    /// The manifest's own `Scope:` is the default an installer without one
+    /// takes, and an installer's own overrides it.
+    #[test]
+    fn the_manifest_scope_is_the_default_and_an_installer_overrides_it() {
+        let user_default = "Scope: user\nInstallers:\n- Architecture: x64\n  InstallerUrl: https://example.org/a.exe\n";
+        assert!(permits_user_scope(user_default));
+        let overridden = "Scope: user\nInstallers:\n- Architecture: x64\n  Scope: machine\n";
+        assert!(!permits_user_scope(overridden));
+    }
+
+    /// One architecture without a user installer is enough to say no, because
+    /// winget, not Brokey, chooses which architecture runs. No scope anywhere
+    /// is not permission either, and neither is a manifest with no installers.
+    #[test]
+    fn a_gap_anywhere_keeps_the_machine_install() {
+        let gap = "Installers:\n- Architecture: x64\n  Scope: user\n- Architecture: arm64\n  Scope: machine\n";
+        assert!(!permits_user_scope(gap));
+        let unscoped =
+            "Installers:\n- Architecture: x64\n  InstallerUrl: https://example.org/a.exe\n";
+        assert!(!permits_user_scope(unscoped));
+        assert!(!permits_user_scope(""));
+        assert!(!permits_user_scope("<!DOCTYPE html><html>404</html>"));
+    }
+
+    /// A `Scope:` nested deeper than an installer's own keys, or under a key
+    /// that is not `Installers`, is not an installer's scope. CRLF is read
+    /// like LF.
+    #[test]
+    fn only_an_installers_own_scope_counts() {
+        let nested = "Installers:\r\n- Architecture: x64\r\n  Scope: machine\r\n  Extra:\r\n    Scope: user\r\nOther:\r\n- Scope: user\r\n";
+        assert!(!permits_user_scope(nested));
     }
 }
