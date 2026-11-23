@@ -13,6 +13,9 @@ pub mod linux;
 // way `system::windows` does it. `linux` keeps its gate because its modules
 // call unix-only APIs throughout.
 pub mod windows;
+// Both platforms: what differs is which assets a release offers and how
+// they are installed, and that is split inside it.
+pub mod github;
 
 use crate::Source;
 use crate::appstream::Catalogue;
@@ -32,12 +35,13 @@ pub fn all(
     }
     #[cfg(windows)]
     {
-        let _ = (system, catalogue, preferences);
+        let _ = preferences;
         vec![
             Box::new(windows::arp::Arp::new()),
             Box::new(windows::winget::Winget::new(client.clone())),
             Box::new(windows::choco::Choco::new(client.clone())),
-            Box::new(windows::scoop::Scoop::new(client)),
+            Box::new(windows::scoop::Scoop::new(client.clone())),
+            Box::new(github::Github::new(system, client, catalogue)),
         ]
     }
 }
@@ -79,7 +83,7 @@ mod tests {
     /// Windows from here on. The order is the order the page draws them in.
     #[cfg(windows)]
     #[test]
-    fn windows_has_add_remove_programs_winget_chocolatey_and_scoop() {
+    fn windows_has_add_remove_programs_winget_chocolatey_scoop_and_github() {
         let kinds = windows_kinds();
         assert_eq!(
             kinds,
@@ -88,6 +92,7 @@ mod tests {
                 crate::SourceKind::Winget,
                 crate::SourceKind::Choco,
                 crate::SourceKind::Scoop,
+                crate::SourceKind::Github,
             ]
         );
     }

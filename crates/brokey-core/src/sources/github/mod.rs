@@ -1,8 +1,17 @@
-//! GitHub releases as a source. A search asks the public API for
-//! repositories by name, then looks at each one's latest release and keeps
-//! only those that publish something a Linux machine can install: a
-//! package for this distribution, an AppImage, a Flatpak bundle, or a
-//! Linux archive as a last resort.
+//! GitHub releases as a source, on both platforms. A search asks the public
+//! API for repositories by name, then looks at each one's latest release
+//! and keeps only those that publish something this machine can install.
+//!
+//! What that is, and how it is installed, is the one part that differs by
+//! platform, and it lives in [`linux`] and [`windows`]: on Linux a package
+//! for this distribution, an AppImage, a Flatpak bundle or an archive; on
+//! Windows an MSI, an installer, a bare program or a portable zip. Both are
+//! pure functions and are compiled on both platforms, so each platform's
+//! choice is tested on the other as well. The source picks between them by
+//! [`SystemInfo::platform`], which `system::detect` fills by `#[cfg]`; that
+//! is also what lets a test build a Linux source on Windows and the other
+//! way round. Everything else here, the API, the cache, the record of what
+//! was installed and the version order of updates, is shared.
 //!
 //! The API is used without a token: ten searches a minute, and sixty other
 //! requests an hour, which the release look-ups count against. Answers are
@@ -15,12 +24,20 @@
 //! ([`Source::finished`]), and a successful install or update is written
 //! there then, a removal forgotten. An Arch package installed this way is
 //! foreign to pacman, so the record also keeps the name pacman knows it by,
-//! and [`pacman_names_installed_by_github`] is how the AUR source learns
-//! not to claim it.
+//! and `linux::pacman_names_installed_by_github` is how the AUR source
+//! learns not to claim it. A portable application unpacked on Windows has
+//! no record anywhere else either, so the folder it went into is kept too,
+//! for whatever needs to find it again.
 //!
 //! `plan` does no network: it builds steps from the release a search or a
 //! details call already fetched, so a plan for a repository nobody has
 //! looked at says so instead of quietly asking the API.
+
+pub mod linux;
+pub mod windows;
+
+#[cfg(unix)]
+pub use linux::pacman_names_installed_by_github;
 
 use crate::appstream::Catalogue;
 use crate::http::Client;
@@ -28,7 +45,7 @@ use crate::model::*;
 use crate::system::{self, Dirs};
 use crate::{Error, Op, Query, Result, Source};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -115,7 +132,10 @@ struct SearchAnswer {
     items: Vec<Repo>,
 }
 
-/// What a release asset is, judged from its file name.
+/// What a release asset is, judged from its file name by
+/// [`linux::kind_of`] or [`windows::kind_of`]. One enum for both platforms
+/// because it is written into `github-installs.json`, and a record means
+/// the same thing whichever build reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AssetKind {
@@ -128,31 +148,19 @@ pub enum AssetKind {
     /// A `.tar.gz`, `.tar.xz` or `.zip` with "linux" in its name. Listed so
     /// the repository is found; not installable by a plan.
     Archive,
+    /// A Windows Installer package, installed by `msiexec`.
+    Msi,
+    /// An `.exe` whose name says it is a setup or an installer: the
+    /// publisher's own, run in its own window.
+    Installer,
+    /// Any other `.exe`: the application itself, copied into a folder of
+    /// its own.
+    Exe,
+    /// A `.zip` for Windows, unpacked as a portable application.
+    Zip,
 }
 
 impl AssetKind {
-    pub fn of(name: &str) -> Option<AssetKind> {
-        let lower = name.to_lowercase();
-        let ends = |s: &str| lower.ends_with(s);
-        if ends(".appimage") {
-            Some(AssetKind::AppImage)
-        } else if ends(".deb") {
-            Some(AssetKind::Deb)
-        } else if ends(".rpm") {
-            Some(AssetKind::Rpm)
-        } else if ends(".pkg.tar.zst") || ends(".pacman") {
-            Some(AssetKind::Pacman)
-        } else if ends(".flatpak") {
-            Some(AssetKind::Flatpak)
-        } else if (ends(".tar.gz") || ends(".tgz") || ends(".tar.xz") || ends(".zip"))
-            && lower.contains("linux")
-        {
-            Some(AssetKind::Archive)
-        } else {
-            None
-        }
-    }
-
     /// For sentences: "a Debian package".
     pub fn label(self) -> &'static str {
         match self {
@@ -162,19 +170,10 @@ impl AssetKind {
             AssetKind::Pacman => "an Arch package",
             AssetKind::Flatpak => "a Flatpak bundle",
             AssetKind::Archive => "an archive",
-        }
-    }
-
-    /// The package kind this distribution installs natively, if any.
-    pub fn native(system: &SystemInfo) -> Option<AssetKind> {
-        if system.is_arch_like() {
-            Some(AssetKind::Pacman)
-        } else if system.is_debian_like() {
-            Some(AssetKind::Deb)
-        } else if system.is_fedora_like() {
-            Some(AssetKind::Rpm)
-        } else {
-            None
+            AssetKind::Msi => "a Windows Installer package",
+            AssetKind::Installer => "an installer",
+            AssetKind::Exe => "a program",
+            AssetKind::Zip => "a portable application",
         }
     }
 }
@@ -183,6 +182,10 @@ impl AssetKind {
 pub enum Arch {
     X86_64,
     Aarch64,
+    /// 32-bit x86. Only [`windows::arch_of`] answers it, because Windows
+    /// runs such a build on either of the other two; on Linux a 32-bit name
+    /// is one that does not say.
+    X86,
 }
 
 impl Arch {
@@ -191,22 +194,8 @@ impl Arch {
         match arch {
             "x86_64" => Some(Arch::X86_64),
             "aarch64" => Some(Arch::Aarch64),
+            "x86" => Some(Arch::X86),
             _ => None,
-        }
-    }
-
-    /// Guessed from an asset's name; `None` when the name does not say.
-    pub fn guess(name: &str) -> Option<Arch> {
-        let lower = name.to_lowercase();
-        if ["aarch64", "arm64"].iter().any(|s| lower.contains(s)) {
-            Some(Arch::Aarch64)
-        } else if ["x86_64", "x86-64", "amd64", "x64"]
-            .iter()
-            .any(|s| lower.contains(s))
-        {
-            Some(Arch::X86_64)
-        } else {
-            None
         }
     }
 }
@@ -217,47 +206,6 @@ pub struct Chosen {
     pub asset: Asset,
     pub kind: AssetKind,
     pub arch: Option<Arch>,
-}
-
-/// The best Linux asset for this machine: one for its architecture before
-/// one that does not say, never one for the other; the distribution's own
-/// package kind first, then an AppImage, then a Flatpak, then a package for
-/// another distribution, then an archive.
-pub fn pick_asset(
-    assets: &[Asset],
-    machine: Option<Arch>,
-    native: Option<AssetKind>,
-) -> Option<Chosen> {
-    let mut candidates: Vec<(u8, u8, Chosen)> = assets
-        .iter()
-        .filter_map(|asset| {
-            let kind = AssetKind::of(&asset.name)?;
-            let arch = Arch::guess(&asset.name);
-            let arch_rank = match (arch, machine) {
-                (Some(a), Some(m)) if a == m => 0,
-                (None, _) | (Some(_), None) => 1,
-                (Some(_), Some(_)) => return None,
-            };
-            let kind_rank = match kind {
-                k if Some(k) == native => 0,
-                AssetKind::AppImage => 1,
-                AssetKind::Flatpak => 2,
-                AssetKind::Archive => 4,
-                _ => 3,
-            };
-            Some((
-                arch_rank,
-                kind_rank,
-                Chosen {
-                    asset: asset.clone(),
-                    kind,
-                    arch,
-                },
-            ))
-        })
-        .collect();
-    candidates.sort_by(|a, b| (a.0, a.1, &a.2.asset.name).cmp(&(b.0, b.1, &b.2.asset.name)));
-    candidates.into_iter().next().map(|c| c.2)
 }
 
 /// "v1.2.3" and "V1.2.3" to "1.2.3"; other tags as they are.
@@ -370,6 +318,12 @@ pub struct InstallRecord {
     /// every other kind, and in a record written before this was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pkgname: Option<String>,
+    /// For a portable application on Windows (a zip or a bare program),
+    /// the folder it was put in: [`windows::portable_dir`], written once
+    /// the install worked. Nothing else on the machine knows where it is,
+    /// so this is what finds it again. `None` for every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// The name in `<data>` the records are kept under.
@@ -393,46 +347,8 @@ pub fn read_records(path: &Path) -> Vec<InstallRecord> {
     }
 }
 
-/// The package name in an Arch package's file name, which `makepkg` writes
-/// as `<name>-<pkgver>-<pkgrel>-<arch>.pkg.tar<.ext>`. `None` for any other
-/// shape, `.pacman` among them: electron-builder names that file after the
-/// release, not after the package inside it.
-pub fn pkgname_from_file_name(file: &str) -> Option<String> {
-    let stem = [".pkg.tar.zst", ".pkg.tar.xz", ".pkg.tar.gz", ".pkg.tar"]
-        .iter()
-        .find_map(|ext| file.strip_suffix(ext))?;
-    let mut parts = stem.rsplitn(4, '-');
-    let (_arch, _pkgrel, _pkgver, name) =
-        (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
-    super::alpmdb::is_package_name(name).then(|| name.to_string())
-}
-
-/// The pacman names of every Arch package these records say GitHub
-/// installed: the `.PKGINFO` name where it was read, else the one in the
-/// file name. pacman sees such a package as foreign, the same as one built
-/// from the AUR, so the AUR source takes these out of its installed list
-/// and never offers to rebuild them from a different upstream. A `.pacman`
-/// file recorded before names were read has no name to give and is missing
-/// here.
-pub fn pacman_names(records: &[InstallRecord]) -> HashSet<String> {
-    records
-        .iter()
-        .filter(|r| r.kind == AssetKind::Pacman)
-        .filter_map(|r| {
-            r.pkgname
-                .clone()
-                .or_else(|| pkgname_from_file_name(&r.asset))
-        })
-        .collect()
-}
-
-/// [`pacman_names`] for the records under `data`, the store's data
-/// directory (`Dirs::new().data` on a real machine).
-pub fn pacman_names_installed_by_github(data: &Path) -> HashSet<String> {
-    pacman_names(&read_records(&records_path(data)))
-}
-
-/// The package for a repository whose latest release has a Linux asset.
+/// The package for a repository whose latest release has an asset this
+/// machine can install.
 pub fn package(repo: &Repo, release: &Release, chosen: &Chosen, catalogue: &Catalogue) -> Package {
     let mut p = Package::new(SourceKind::Github, &repo.full_name, &repo.name);
     p.kind = PackageKind::App;
@@ -472,13 +388,47 @@ pub fn package(repo: &Repo, release: &Release, chosen: &Chosen, catalogue: &Cata
     if !repo.topics.is_empty() {
         p.facts.push(("Topics".to_string(), repo.topics.join(", ")));
     }
-    if chosen.kind == AssetKind::AppImage {
-        p.facts.push((
-            "Install".to_string(),
-            "The AppImage is placed in ~/.local/bin; no menu entry yet.".to_string(),
-        ));
+    let install = match chosen.kind {
+        AssetKind::AppImage => Some("The AppImage is placed in ~/.local/bin; no menu entry yet."),
+        AssetKind::Msi => Some(
+            "Windows Installer installs it, and asks for permission itself if the package is for every user.",
+        ),
+        AssetKind::Installer => {
+            Some("The publisher's installer opens in its own window; finish it there.")
+        }
+        AssetKind::Exe | AssetKind::Zip => Some(
+            "Placed in your Programs folder under Brokey, for you alone; no Start menu entry yet.",
+        ),
+        _ => None,
+    };
+    if let Some(install) = install {
+        p.facts.push(("Install".to_string(), install.to_string()));
     }
     p
+}
+
+/// The last component of a name GitHub gave a file, so that a name with a
+/// path in it cannot place the download anywhere but where it was meant.
+fn file_name(asset: &str) -> String {
+    Path::new(asset)
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "release".to_string())
+}
+
+fn step(title: String, program: &str, args: Vec<String>, needs_root: bool, weight: u32) -> Step {
+    Step {
+        source: SourceKind::Github,
+        title,
+        command: Command {
+            program: program.to_string(),
+            args,
+            env: Vec::new(),
+            cwd: None,
+        },
+        needs_root,
+        weight,
+    }
 }
 
 /// The package for something already installed from a record, with no
@@ -498,227 +448,6 @@ pub fn record_package(record: &InstallRecord) -> Package {
     p
 }
 
-/// What a plan needs to install one release, with no network in it.
-pub struct InstallTarget<'a> {
-    pub name: &'a str,
-    pub chosen: &'a Chosen,
-    pub downloads: &'a Path,
-    pub home: &'a Path,
-    pub native: Option<AssetKind>,
-    pub has_curl: bool,
-    /// Whether `libfuse.so.2` is on the machine ([`has_libfuse2`]), which a
-    /// type 2 AppImage needs to mount itself and start.
-    pub has_libfuse2: bool,
-}
-
-/// Where `libfuse.so.2` is on Arch (and Fedora's 64-bit lib directory, and
-/// Debian's multiarch one). Arch's `fuse3` does not provide it; `fuse2`
-/// does, and is not installed by default.
-pub const LIBFUSE2: [&str; 3] = [
-    "/usr/lib/libfuse.so.2",
-    "/usr/lib64/libfuse.so.2",
-    "/usr/lib/x86_64-linux-gnu/libfuse.so.2",
-];
-
-/// Whether any of [`LIBFUSE2`] is present.
-pub fn has_libfuse2() -> bool {
-    LIBFUSE2.iter().any(|p| Path::new(p).exists())
-}
-
-/// The check run on a download whose asset carries a digest, as `sh -c`
-/// with the expected digits as `$1` and the file as `$2`. Through a shell
-/// because the comparison needs a pipe or a check file and a step is one
-/// argv with no stdin; the digits and the path are passed as arguments,
-/// never written into the script, so neither is ever parsed as shell. The
-/// file is read on stdin so its name needs no escaping for `sha256sum`'s
-/// check-file format, and a file that does not match is deleted, so a
-/// retry downloads it again rather than finding it there.
-pub const CHECK_SCRIPT: &str = r#"sum=$(sha256sum < "$2") || exit 1; [ "${sum%% *}" = "$1" ] && exit 0; rm -f -- "$2"; echo "The download does not match the checksum GitHub published for it, so it was not installed and has been deleted. Try again; if it happens again, the file on GitHub is not the one its release describes." >&2; exit 1"#;
-
-/// The file the asset is downloaded to. The name comes from GitHub, so
-/// only its last path component is used.
-fn download_path(downloads: &Path, asset: &str) -> PathBuf {
-    let file = Path::new(asset)
-        .file_name()
-        .map(|f| f.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "release".to_string());
-    downloads.join(file)
-}
-
-fn step(title: String, program: &str, args: Vec<String>, needs_root: bool, weight: u32) -> Step {
-    Step {
-        source: SourceKind::Github,
-        title,
-        command: Command {
-            program: program.to_string(),
-            args,
-            env: Vec::new(),
-            cwd: None,
-        },
-        needs_root,
-        weight,
-    }
-}
-
-/// Download with curl, then install by kind. curl rather than the store's
-/// own client because a download is a step the runner logs and can cancel,
-/// and a plan must not fetch anything itself.
-pub fn install_steps(target: &InstallTarget) -> Result<Vec<Step>> {
-    let asset = &target.chosen.asset;
-    let url = &asset.browser_download_url;
-    let kind = target.chosen.kind;
-    if kind == AssetKind::Archive {
-        return Err(err(format!(
-            "This release is an archive, not a package; download it from {url} and unpack it by hand."
-        )));
-    }
-    if matches!(kind, AssetKind::Deb | AssetKind::Rpm | AssetKind::Pacman)
-        && Some(kind) != target.native
-    {
-        return Err(err(format!(
-            "{} is {}, which this machine cannot install; download it by hand from {url} if you want it.",
-            asset.name,
-            kind.label()
-        )));
-    }
-    if !target.has_curl {
-        return Err(err(
-            "curl is needed to download GitHub releases; install it and try again.",
-        ));
-    }
-    let path = download_path(target.downloads, &asset.name);
-    let path_str = path.to_string_lossy().into_owned();
-    let mut steps = Vec::new();
-    if kind == AssetKind::AppImage
-        && !target.has_libfuse2
-        && target.native == Some(AssetKind::Pacman)
-    {
-        // A type 2 AppImage mounts itself through libfuse 2 and without it
-        // fails to start with a line about FUSE that names no package. The
-        // install is the pacman source's own shape, a whole-system
-        // upgrade with the name, because a bare -S is the partial upgrade
-        // Arch does not support. Other distributions package it under
-        // names that vary by release (libfuse2, libfuse2t64, fuse-libs),
-        // so nothing is added there.
-        let mut fuse = step(
-            "Installing fuse2, which AppImages need to start, and updating the system".to_string(),
-            "pacman",
-            ["-Syu", "--noconfirm", "--needed", "fuse2"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            true,
-            3,
-        );
-        fuse.command
-            .env
-            .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
-        steps.push(fuse);
-    }
-    steps.push(step(
-        format!("Downloading {}", asset.name),
-        "curl",
-        ["-L", "-sS", "--fail", "--create-dirs", "-o", &path_str, url]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
-        false,
-        4,
-    ));
-    if let Some(sha256) = asset.sha256() {
-        steps.push(step(
-            format!("Checking {}", asset.name),
-            "sh",
-            vec![
-                "-c".to_string(),
-                CHECK_SCRIPT.to_string(),
-                "sh".to_string(),
-                sha256,
-                path_str.clone(),
-            ],
-            false,
-            1,
-        ));
-    }
-    let title = format!("Installing {}", target.name);
-    let s = |args: &[&str], needs_root: bool, weight: u32, program: &str| {
-        step(
-            title.clone(),
-            program,
-            args.iter().map(|a| a.to_string()).collect(),
-            needs_root,
-            weight,
-        )
-    };
-    let install = match kind {
-        AssetKind::Pacman => s(&["-U", "--noconfirm", &path_str], true, 4, "pacman"),
-        AssetKind::Deb => {
-            let mut st = s(&["install", "-y", &path_str], true, 4, "apt-get");
-            st.command
-                .env
-                .push(("DEBIAN_FRONTEND".to_string(), "noninteractive".to_string()));
-            st
-        }
-        AssetKind::Rpm => s(&["install", "-y", &path_str], true, 4, "dnf"),
-        // `--reinstall` because an update is the same command on a newer
-        // bundle, and without it flatpak refuses an application that is
-        // already installed. A session step, so not the helper's list.
-        AssetKind::Flatpak => s(
-            &[
-                "install",
-                "-y",
-                "--noninteractive",
-                "--user",
-                "--reinstall",
-                &path_str,
-            ],
-            false,
-            4,
-            "flatpak",
-        ),
-        AssetKind::AppImage => {
-            let dest = appimage_path(target.home, target.name);
-            s(
-                &["-Dm755", &path_str, &dest.to_string_lossy()],
-                false,
-                1,
-                "install",
-            )
-        }
-        AssetKind::Archive => unreachable!("archives were refused above"),
-    };
-    steps.push(install);
-    Ok(steps)
-}
-
-fn appimage_path(home: &Path, name: &str) -> PathBuf {
-    home.join(".local/bin").join(name)
-}
-
-/// Removing what a record says was installed. Only an AppImage is a file
-/// this source owns; a package went into the package manager's database
-/// and is removed there, and a Flatpak bundle's application id is not in
-/// the record.
-pub fn remove_steps(record: &InstallRecord, home: &Path) -> Result<Vec<Step>> {
-    match record.kind {
-        AssetKind::AppImage => {
-            let path = appimage_path(home, &record.name);
-            Ok(vec![step(
-                format!("Removing {}", record.name),
-                "rm",
-                vec!["-f".to_string(), path.to_string_lossy().into_owned()],
-                false,
-                1,
-            )])
-        }
-        kind => Err(err(format!(
-            "{} was installed as {}; remove it with the tool that installed it.",
-            record.name,
-            kind.label()
-        ))),
-    }
-}
-
 fn err(message: impl Into<String>) -> Error {
     Error::from_source(SourceKind::Github, message)
 }
@@ -726,7 +455,10 @@ fn err(message: impl Into<String>) -> Error {
 pub struct Github {
     client: Arc<Client>,
     catalogue: Arc<Catalogue>,
+    /// Which of [`linux`] and [`windows`] chooses and installs.
+    platform: Platform,
     machine: Option<Arch>,
+    /// The distribution's own package kind; always `None` on Windows.
     native: Option<AssetKind>,
     /// `<data>/github-installs.json`.
     installs: PathBuf,
@@ -734,6 +466,10 @@ pub struct Github {
     downloads: PathBuf,
     /// `<cache>/github`, API answers by URL.
     cache: PathBuf,
+    /// Where a portable application goes on Windows:
+    /// [`windows::programs_dir`] on a real machine. `None` when Windows
+    /// names no profile folder, and unused on Linux.
+    programs: Option<PathBuf>,
     /// Latest releases seen by search, details and updates, so a plan can
     /// be built without the network.
     known: Mutex<HashMap<String, Release>>,
@@ -742,10 +478,14 @@ pub struct Github {
 impl Github {
     pub fn new(system: &SystemInfo, client: Arc<Client>, catalogue: Arc<Catalogue>) -> Github {
         let dirs = Dirs::new();
-        Github::with_dirs(system, client, catalogue, &dirs.data, &dirs.cache)
+        let mut github = Github::with_dirs(system, client, catalogue, &dirs.data, &dirs.cache);
+        github.programs = windows::programs_dir();
+        github
     }
 
-    /// The same source with its files somewhere else, for tests.
+    /// The same source with its files somewhere else, for tests. Portable
+    /// applications go under `<data>/Programs`, so a test never writes into
+    /// the user's real profile.
     pub fn with_dirs(
         system: &SystemInfo,
         client: Arc<Client>,
@@ -756,13 +496,26 @@ impl Github {
         Github {
             client,
             catalogue,
+            platform: system.platform,
             machine: Arch::of_machine(&system.arch),
-            native: AssetKind::native(system),
+            native: match system.platform {
+                Platform::Linux => linux::native(system),
+                Platform::Windows => None,
+            },
             installs: records_path(data),
             downloads: cache.join("downloads"),
             cache: cache.join("github"),
+            programs: Some(data.join("Programs")),
             known: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Where a portable application goes, or the sentence that says why
+    /// there is nowhere.
+    fn programs(&self) -> Result<&Path> {
+        self.programs.as_deref().ok_or_else(|| {
+            err("Windows did not say where this user's local application folder is, so nothing can be unpacked into it.")
+        })
     }
 
     /// Every install this source recorded; see [`read_records`].
@@ -926,7 +679,10 @@ impl Github {
     }
 
     fn choose(&self, release: &Release) -> Option<Chosen> {
-        pick_asset(&release.assets, self.machine, self.native)
+        match self.platform {
+            Platform::Linux => linux::pick_asset(&release.assets, self.machine, self.native),
+            Platform::Windows => windows::pick_asset(&release.assets, self.machine),
+        }
     }
 
     fn mark_installed(&self, p: &mut Package, records: &[InstallRecord]) {
@@ -943,19 +699,70 @@ impl Github {
             ))
         })?;
         let name = repo.rsplit('/').next().unwrap_or(repo);
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
-        install_steps(&InstallTarget {
-            name,
-            chosen: &chosen,
-            downloads: &self.downloads,
-            home: &home,
-            native: self.native,
-            has_curl: system::which("curl").is_some(),
-            has_libfuse2: has_libfuse2(),
-        })
+        match self.platform {
+            Platform::Linux => linux::install_steps(&linux::InstallTarget {
+                name,
+                chosen: &chosen,
+                downloads: &self.downloads,
+                home: &home(),
+                native: self.native,
+                has_curl: system::which("curl").is_some(),
+                has_libfuse2: linux::has_libfuse2(),
+            }),
+            Platform::Windows => {
+                // The id becomes two folder names here, not only a URL.
+                if !valid_repo_id(repo) {
+                    return Err(err(format!(
+                        "{repo} is not a GitHub repository name (owner/repo)."
+                    )));
+                }
+                if system::which("curl").is_none() {
+                    return Err(err(
+                        "curl.exe, which Windows has included since version 1803, is not on this machine, so GitHub releases cannot be downloaded.",
+                    ));
+                }
+                windows::install_steps(&windows::InstallTarget {
+                    name,
+                    repo,
+                    chosen: &chosen,
+                    downloads: &self.downloads,
+                    programs: self.programs()?,
+                    msiexec: &crate::sources::windows::arp::msiexec_program(),
+                })
+            }
+        }
     }
+
+    fn remove_plan(&self, record: &InstallRecord) -> Result<Vec<Step>> {
+        match self.platform {
+            Platform::Linux => linux::remove_steps(record, &home()),
+            Platform::Windows => {
+                if !valid_repo_id(&record.repo) {
+                    return Err(err(format!(
+                        "{} is not a GitHub repository name (owner/repo).",
+                        record.repo
+                    )));
+                }
+                let present = record.kind == AssetKind::Msi
+                    && windows::download_path(&self.downloads, &record.repo, &record.asset)
+                        .is_file();
+                windows::remove_steps(
+                    record,
+                    &self.downloads,
+                    self.programs()?,
+                    &crate::sources::windows::arp::msiexec_program(),
+                    present,
+                )
+            }
+        }
+    }
+}
+
+/// `$HOME`, or `/tmp` when it is not set. Linux only in meaning.
+fn home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
 fn parse<T: serde::de::DeserializeOwned>(text: &str) -> Result<T> {
@@ -1129,13 +936,14 @@ impl Source for Github {
     /// Only an AppImage this source placed is opened from here: a package
     /// it installed through pacman, apt or dnf belongs to that source's
     /// record, under a name the release does not state.
+    #[cfg(unix)]
     fn launcher(&self, id: &str) -> Option<crate::launch::Launch> {
         let record = self.records().into_iter().find(|r| r.repo == id)?;
         if record.kind != AssetKind::AppImage {
             return None;
         }
         let home = std::env::var_os("HOME").map(PathBuf::from)?;
-        let path = appimage_path(&home, &record.name);
+        let path = linux::appimage_path(&home, &record.name);
         path.is_file().then(|| {
             crate::launch::Launch::Command(crate::launch::command(path.display().to_string(), &[]))
         })
@@ -1172,10 +980,7 @@ impl Source for Github {
                             package.id
                         ))
                     })?;
-                let home = std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("/tmp"));
-                remove_steps(&record, &home)
+                self.remove_plan(&record)
             }
             // The planner expands a setup through `Source::setup`.
             Op::Refresh { .. } | Op::Setup { .. } => Ok(Vec::new()),
@@ -1200,15 +1005,28 @@ impl Source for Github {
                 // The file is still where the plan downloaded it. Reading
                 // its metadata runs nothing; it is how a `.pacman` file is
                 // known by the name pacman gave it.
+                #[cfg(unix)]
                 let pkgname = (chosen.kind == AssetKind::Pacman)
                     .then(|| {
-                        super::alpmdb::package_file_name(&download_path(
+                        crate::sources::linux::alpmdb::package_file_name(&linux::download_path(
                             &self.downloads,
                             &chosen.asset.name,
                         ))
-                        .or_else(|| pkgname_from_file_name(&chosen.asset.name))
+                        .or_else(|| linux::pkgname_from_file_name(&chosen.asset.name))
                     })
                     .flatten();
+                #[cfg(not(unix))]
+                let pkgname = None;
+                // Where a portable application went, for whatever needs to
+                // find it again: nothing else on the machine records it.
+                let path = match (chosen.kind, &self.programs) {
+                    (AssetKind::Zip | AssetKind::Exe, Some(programs)) => Some(
+                        windows::portable_dir(programs, &package.id)
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                    _ => None,
+                };
                 self.record_install(InstallRecord {
                     repo: package.id.clone(),
                     name: package
@@ -1221,6 +1039,7 @@ impl Source for Github {
                     version: strip_v(&release.tag_name),
                     kind: chosen.kind,
                     pkgname,
+                    path,
                 })
             }
             Op::Remove { package } => self.forget_install(&package.id),
@@ -1235,65 +1054,8 @@ impl Source for Github {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn asset_kinds_by_name() {
-        assert_eq!(
-            AssetKind::of("Heroic-2.22.1-linux-x86_64.AppImage"),
-            Some(AssetKind::AppImage)
-        );
-        assert_eq!(
-            AssetKind::of("nvim-linux-x86_64.appimage"),
-            Some(AssetKind::AppImage)
-        );
-        assert_eq!(
-            AssetKind::of("Heroic-2.22.1-linux-amd64.deb"),
-            Some(AssetKind::Deb)
-        );
-        assert_eq!(
-            AssetKind::of("Heroic-2.22.1-linux-x86_64.rpm"),
-            Some(AssetKind::Rpm)
-        );
-        assert_eq!(
-            AssetKind::of("Heroic-2.22.1-linux-x64.pacman"),
-            Some(AssetKind::Pacman)
-        );
-        assert_eq!(
-            AssetKind::of("brokey-0.1.0-1-x86_64.pkg.tar.zst"),
-            Some(AssetKind::Pacman)
-        );
-        assert_eq!(AssetKind::of("app.flatpak"), Some(AssetKind::Flatpak));
-        assert_eq!(
-            AssetKind::of("Heroic-2.22.1-linux-x64.tar.xz"),
-            Some(AssetKind::Archive)
-        );
-        assert_eq!(
-            AssetKind::of("nvim-linux-x86_64.tar.gz"),
-            Some(AssetKind::Archive)
-        );
-        assert_eq!(AssetKind::of("nvim-macos-x86_64.tar.gz"), None);
-        assert_eq!(AssetKind::of("Heroic-2.22.1-Setup-x64.exe"), None);
-        assert_eq!(AssetKind::of("Heroic-2.22.1-macOS-x64.zip"), None);
-        assert_eq!(AssetKind::of("latest-linux.yml"), None);
-    }
-
-    #[test]
-    fn architectures_by_name() {
-        assert_eq!(Arch::guess("Heroic-linux-amd64.deb"), Some(Arch::X86_64));
-        assert_eq!(Arch::guess("Heroic-linux-x64.pacman"), Some(Arch::X86_64));
-        assert_eq!(
-            Arch::guess("nvim-linux-x86_64.appimage"),
-            Some(Arch::X86_64)
-        );
-        assert_eq!(
-            Arch::guess("nvim-linux-arm64.appimage"),
-            Some(Arch::Aarch64)
-        );
-        assert_eq!(Arch::guess("thing-aarch64.rpm"), Some(Arch::Aarch64));
-        assert_eq!(Arch::guess("thing.AppImage"), None);
-        assert_eq!(Arch::of_machine("x86_64"), Some(Arch::X86_64));
-        assert_eq!(Arch::of_machine("riscv64"), None);
-    }
+    #[cfg(unix)]
+    use std::collections::HashSet;
 
     fn asset(name: &str) -> Asset {
         Asset {
@@ -1305,13 +1067,10 @@ mod tests {
     }
 
     #[test]
-    fn an_asset_for_the_other_architecture_is_never_picked() {
-        let assets = [asset("tool-linux-arm64.AppImage")];
-        assert!(pick_asset(&assets, Some(Arch::X86_64), None).is_none());
-        assert!(pick_asset(&assets, Some(Arch::Aarch64), None).is_some());
-        // A name that does not say is taken on any machine.
-        let assets = [asset("tool.AppImage")];
-        assert!(pick_asset(&assets, Some(Arch::Aarch64), None).is_some());
+    fn machines_by_rusts_spelling() {
+        assert_eq!(Arch::of_machine("x86_64"), Some(Arch::X86_64));
+        assert_eq!(Arch::of_machine("aarch64"), Some(Arch::Aarch64));
+        assert_eq!(Arch::of_machine("riscv64"), None);
     }
 
     #[test]
@@ -1389,80 +1148,7 @@ mod tests {
         assert_eq!(old.sha256(), None);
     }
 
-    #[test]
-    fn the_check_accepts_the_right_file_and_deletes_the_wrong_one() {
-        if system::which("sha256sum").is_none() {
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("a file with spaces.AppImage");
-        let check = |sum: &str| {
-            std::process::Command::new("sh")
-                .args(["-c", CHECK_SCRIPT, "sh", sum, file.to_str().unwrap()])
-                .output()
-                .unwrap()
-        };
-        std::fs::write(&file, b"abc").unwrap();
-        let good = check("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-        assert!(good.status.success());
-        assert!(file.exists());
-        let bad = check(&"0".repeat(64));
-        assert!(!bad.status.success());
-        assert!(!file.exists(), "a file that does not match is not kept");
-        let said = String::from_utf8_lossy(&bad.stderr);
-        assert!(
-            said.starts_with("The download does not match the checksum GitHub published"),
-            "{said}"
-        );
-        assert!(!said.contains('\u{2014}'));
-        assert!(
-            !check(&"0".repeat(64)).status.success(),
-            "a missing file fails"
-        );
-    }
-
-    #[test]
-    fn pacman_names_come_from_the_record_or_the_file_name() {
-        assert_eq!(
-            pkgname_from_file_name("brokey-0.1.5-1-x86_64.pkg.tar.zst").as_deref(),
-            Some("brokey")
-        );
-        assert_eq!(
-            pkgname_from_file_name("lib32-gcc-libs-14.2.1+r730-1-x86_64.pkg.tar.xz").as_deref(),
-            Some("lib32-gcc-libs")
-        );
-        assert_eq!(
-            pkgname_from_file_name("Heroic-2.22.1-linux-x64.pacman"),
-            None
-        );
-        assert_eq!(pkgname_from_file_name("x86_64.pkg.tar.zst"), None);
-        assert_eq!(pkgname_from_file_name("Tool-1-1-any.pkg.tar.zst"), None);
-
-        let record = |asset: &str, kind: AssetKind, pkgname: Option<&str>| InstallRecord {
-            repo: format!("someone/{asset}"),
-            name: asset.to_string(),
-            asset: asset.to_string(),
-            version: "1".to_string(),
-            kind,
-            pkgname: pkgname.map(str::to_string),
-        };
-        let names = pacman_names(&[
-            record(
-                "Heroic-2.22.1-linux-x64.pacman",
-                AssetKind::Pacman,
-                Some("heroic"),
-            ),
-            record("brokey-0.1.5-1-x86_64.pkg.tar.zst", AssetKind::Pacman, None),
-            // Recorded before names were read: nothing to go on.
-            record("Old-1.0-linux-x64.pacman", AssetKind::Pacman, None),
-            record("tool-1.0-1-x86_64.pkg.tar.zst", AssetKind::AppImage, None),
-        ]);
-        assert_eq!(
-            names,
-            HashSet::from(["heroic".to_string(), "brokey".to_string()])
-        );
-    }
-
+    #[cfg(unix)]
     #[test]
     fn a_record_written_before_pkgname_existed_still_reads() {
         let dir = tempfile::tempdir().unwrap();
@@ -1484,6 +1170,7 @@ mod tests {
         assert!(!text.contains("pkgname"), "{text}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_finished_install_records_the_name_pacman_gave_the_package() {
         let dir = tempfile::tempdir().unwrap();
@@ -1534,11 +1221,5 @@ mod tests {
             pacman_names_installed_by_github(&dir.path().join("data")),
             HashSet::from(["heroic".to_string()])
         );
-    }
-
-    #[test]
-    fn download_names_cannot_escape_the_directory() {
-        let p = download_path(Path::new("/cache/downloads"), "../../evil.deb");
-        assert_eq!(p, PathBuf::from("/cache/downloads/evil.deb"));
     }
 }
