@@ -185,5 +185,39 @@
     "release_type": null,
     "estimated_size": " 0x800 ",
     "url_info_about": null
+  },
+  {
+    "hive": "machine",
+    "key_name": "{3D5A2C8E-7B14-4F0A-9C61-2E8B7D4A1F05}",
+    "display_name": "Brokey",
+    "display_version": "0.1.7",
+    "publisher": "Brokey contributors",
+    "install_location": null,
+    "uninstall_string": "MsiExec.exe /X{3D5A2C8E-7B14-4F0A-9C61-2E8B7D4A1F05}",
+    "quiet_uninstall_string": null,
+    "windows_installer": 1,
+    "display_icon": "C:\\WINDOWS\\Installer\\{3D5A2C8E-7B14-4F0A-9C61-2E8B7D4A1F05}\\brokey.ico",
+    "system_component": null,
+    "parent_key_name": null,
+    "release_type": null,
+    "estimated_size": 31744,
+    "url_info_about": "https://github.com/Spillebulle/Brokey"
+  },
+  {
+    "hive": "user",
+    "key_name": "Brokey",
+    "display_name": "Brokey",
+    "display_version": "2.0",
+    "publisher": "Someone else",
+    "install_location": "C:\\Users\\test\\AppData\\Local\\Brokey",
+    "uninstall_string": "\"C:\\Users\\test\\AppData\\Local\\Brokey\\uninstall.exe\"",
+    "quiet_uninstall_string": null,
+    "windows_installer": null,
+    "display_icon": null,
+    "system_component": null,
+    "parent_key_name": null,
+    "release_type": null,
+    "estimated_size": null,
+    "url_info_about": null
   }
 ]

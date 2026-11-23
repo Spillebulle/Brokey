@@ -188,14 +188,19 @@ fn is_self_package(package: &PackageRef) -> bool {
         }
         SourceKind::Flatpak => package.id.contains(APP_ID),
         SourceKind::Github => package.id.eq_ignore_ascii_case("Spillebulle/Brokey"),
-        SourceKind::Fwupd
-        | SourceKind::Chwd
-        | SourceKind::Winget
-        | SourceKind::Arp
-        | SourceKind::Choco
-        | SourceKind::Scoop
-        | SourceKind::Msix
-        | SourceKind::Features => false,
+        // On Windows Brokey is an MSI, so it appears as an Add/Remove
+        // Programs entry, and that source never lists an update: the
+        // registry records one version and knows of no newer one. Its id is
+        // also no help here, being a ProductCode WiX makes afresh for every
+        // build. Brokey recognises that entry by name and publisher
+        // (`arp::is_self`), and the self-update check uses it to tell the
+        // MSI's copy apart (`selfupdate::install::detect`); the newer
+        // release reaches the user there, not as a row in this list.
+        // Brokey is not published to winget, Chocolatey or Scoop, so no id
+        // there is Brokey's, and naming one would claim a package that does
+        // not exist.
+        SourceKind::Arp | SourceKind::Winget | SourceKind::Choco | SourceKind::Scoop => false,
+        SourceKind::Fwupd | SourceKind::Chwd | SourceKind::Msix | SourceKind::Features => false,
     }
 }
 
@@ -514,6 +519,30 @@ mod tests {
         )]);
         assert!(!list.updates[0].is_self);
         assert!(list.self_update().is_none());
+    }
+
+    /// No Windows row is taken for Brokey by its id, including one named
+    /// `brokey`: Brokey is published to none of those managers, and its own
+    /// Add/Remove Programs id is a ProductCode that changes every release.
+    /// `selfupdate` recognises the MSI's copy instead.
+    #[test]
+    fn no_windows_row_is_brokey_by_its_id() {
+        for (source, id) in [
+            (
+                SourceKind::Arp,
+                "HKLM\\{3D5A2C8E-7B14-4F0A-9C61-2E8B7D4A1F05}",
+            ),
+            (SourceKind::Arp, "HKLM\\Brokey"),
+            (SourceKind::Winget, "Spillebulle.Brokey"),
+            (SourceKind::Choco, "brokey"),
+            (SourceKind::Scoop, "extras/brokey"),
+        ] {
+            let list = merge(vec![(
+                source,
+                Ok(vec![update(source, id, "Brokey", PackageKind::App, None)]),
+            )]);
+            assert!(!list.updates[0].is_self, "{source:?} {id}");
+        }
     }
 
     #[test]

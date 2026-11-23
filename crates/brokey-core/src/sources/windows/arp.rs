@@ -258,6 +258,26 @@ pub fn icon(e: &RawEntry, cache: &Path) -> Option<Picture> {
     Some(Picture::File(path))
 }
 
+/// The `DisplayName` and `Publisher` Brokey's own MSI writes, which are the
+/// `Name` and `Manufacturer` of the `Package` element in
+/// `packaging/windows/brokey.wxs`. A test reads that file and fails if the
+/// two drift apart.
+pub const SELF_DISPLAY_NAME: &str = "Brokey";
+pub const SELF_PUBLISHER: &str = "Brokey contributors";
+
+/// Whether this entry is Brokey's own MSI. The key name cannot say: WiX
+/// generates a new ProductCode for every build, and the UpgradeCode that
+/// stays the same is not written to the uninstall key. So it is told by
+/// the name and the publisher together, and only for an entry the Windows
+/// Installer owns under a well-formed ProductCode, which is what the MSI
+/// leaves and what a hand-made key called "Brokey" does not.
+pub fn is_self(e: &RawEntry) -> bool {
+    e.display_name.as_deref().map(str::trim) == Some(SELF_DISPLAY_NAME)
+        && e.publisher.as_deref().map(str::trim) == Some(SELF_PUBLISHER)
+        && e.windows_installer == Some(1)
+        && product_code(&e.key_name).is_some()
+}
+
 /// The id this source uses, naming the hive as well as the key, because the
 /// same key name can appear in more than one of the three.
 pub fn package_id(e: &RawEntry) -> String {
@@ -775,6 +795,64 @@ mod tests {
         assert_eq!(product_code, "{0b7e3f6a-2c41-4d8e-9a55-000000000003}");
     }
 
+    /// Brokey's own MSI entry is recognised by its name and publisher on a
+    /// key the Windows Installer owns. Another product called Brokey, a
+    /// hand-made key, or the same name without the Windows Installer's flag
+    /// is not Brokey.
+    #[test]
+    fn brokey_knows_its_own_entry_and_nothing_else() {
+        let entries = fixture();
+        let own: Vec<&RawEntry> = entries.iter().filter(|e| is_self(e)).collect();
+        assert_eq!(own.len(), 1, "{own:?}");
+        assert_eq!(own[0].key_name, "{3D5A2C8E-7B14-4F0A-9C61-2E8B7D4A1F05}");
+        assert!(is_application(own[0]), "it is listed like any application");
+
+        let impostor = entries
+            .iter()
+            .find(|e| e.display_name.as_deref() == Some("Brokey") && e.hive == Hive::User)
+            .expect("the fixture has another Brokey");
+        assert!(!is_self(impostor), "another publisher's Brokey");
+
+        let unowned = RawEntry {
+            windows_installer: None,
+            ..own[0].clone()
+        };
+        assert!(
+            !is_self(&unowned),
+            "a key the Windows Installer does not own"
+        );
+        let renamed = RawEntry {
+            key_name: "Brokey".to_string(),
+            ..own[0].clone()
+        };
+        assert!(!is_self(&renamed), "a key name that is not a ProductCode");
+    }
+
+    /// The two values Brokey recognises itself by are the ones the MSI
+    /// writes. A rename in `brokey.wxs` that is not made here would leave
+    /// every installed copy unable to see itself.
+    #[test]
+    fn the_names_brokey_looks_for_are_the_ones_its_installer_writes() {
+        let wxs = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/windows/brokey.wxs"
+        ))
+        .expect("the installer source is in the repository");
+        let package = wxs
+            .split("<Package ")
+            .nth(1)
+            .and_then(|rest| rest.split('>').next())
+            .expect("brokey.wxs has a Package element");
+        assert!(
+            package.contains(&format!("Name=\"{SELF_DISPLAY_NAME}\"")),
+            "{package}"
+        );
+        assert!(
+            package.contains(&format!("Manufacturer=\"{SELF_PUBLISHER}\"")),
+            "{package}"
+        );
+    }
+
     /// What counts as a number written as text, and what does not.
     #[test]
     fn a_number_written_as_text_is_read_and_anything_else_is_absent() {
@@ -844,14 +922,14 @@ mod tests {
     /// The whole fixture at once, so a heuristic added later cannot quietly
     /// change the answer for everything.
     #[test]
-    fn the_fixture_yields_exactly_the_six_applications() {
+    fn the_fixture_yields_exactly_the_eight_applications() {
         let entries = fixture();
         let kept: Vec<&str> = entries
             .iter()
             .filter(|e| is_application(e))
             .filter_map(|e| e.display_name.as_deref())
             .collect();
-        assert_eq!(kept.len(), 6, "{kept:?}");
+        assert_eq!(kept.len(), 8, "{kept:?}");
     }
 
     /// Windows quoting: a quoted first token can hold spaces, and what
@@ -1308,7 +1386,7 @@ mod tests {
     fn installed_is_the_filtered_entries_as_packages() {
         let (arp, _cache) = source_from_fixture();
         let installed = arp.installed().unwrap();
-        assert_eq!(installed.len(), 6);
+        assert_eq!(installed.len(), 8);
         assert!(installed.iter().all(|p| p.installed));
         assert!(
             installed
@@ -1424,7 +1502,7 @@ mod tests {
         let status = arp.status();
         assert!(status.available);
         assert_eq!(status.reason, None);
-        assert_eq!(status.detail.as_deref(), Some("6 applications"));
+        assert_eq!(status.detail.as_deref(), Some("8 applications"));
     }
 
     /// A machine with exactly one is not told it has "1 applications".

@@ -74,6 +74,11 @@ pub enum Installation {
     /// A copy under the user's own directories, `/opt`, `/tmp` or
     /// `/usr/local`. Brokey may replace the binary.
     Portable,
+    /// Windows: the MSI Brokey publishes, installed as
+    /// `Program Files\Brokey\brokey.exe` with its own Add/Remove Programs
+    /// entry. Windows Installer owns the files, so a newer release goes in
+    /// through a newer installer, which replaces this one in place.
+    Msi,
     /// A system path with no manager behind it, or a path that could not be
     /// read. Not ours to touch.
     Unknown,
@@ -89,6 +94,7 @@ impl Installation {
             Self::Dpkg { .. } => "dpkg",
             Self::Rpm { .. } => "rpm",
             Self::Portable => "portable",
+            Self::Msi => "msi",
             Self::Unknown => "unknown",
         }
     }
@@ -122,6 +128,7 @@ impl Installation {
                 "an rpm package without the Spillebulle archive".to_string()
             }
             Self::Portable => "a portable copy".to_string(),
+            Self::Msi => "the Windows installer package".to_string(),
             Self::Unknown => "an unrecognised location".to_string(),
         }
     }
@@ -170,22 +177,42 @@ pub struct Probe {
     /// one file whose contents matter: on pacman the archive is a section in
     /// it rather than a file of its own.
     pub pacman_conf: Option<String>,
+    /// Whether Add/Remove Programs has Brokey's own MSI entry
+    /// ([`crate::sources::windows::arp::is_self`]). Windows' equivalent of
+    /// pacman's local database entry: the record that Windows Installer owns
+    /// this copy. Always `false` off Windows.
+    pub msi_entry: bool,
 }
 
 impl Probe {
     /// The probe for the machine this is running on.
     pub fn current() -> Probe {
+        #[cfg(windows)]
+        let msi_entry = {
+            use crate::sources::windows::arp;
+            arp::read().iter().any(arp::is_self)
+        };
+        #[cfg(not(windows))]
+        let msi_entry = false;
         Probe {
             exe: std::env::current_exe().unwrap_or_default(),
             env: std::env::vars().collect(),
             exists: Box::new(path_exists),
             pacman_conf: std::fs::read_to_string(PACMAN_CONF).ok(),
+            msi_entry,
         }
     }
 
     /// This probe with `text` as the contents of [`PACMAN_CONF`], for tests.
     pub fn with_pacman_conf(mut self, text: &str) -> Probe {
         self.pacman_conf = Some(text.to_string());
+        self
+    }
+
+    /// This probe on a machine whose Add/Remove Programs has Brokey's own
+    /// MSI entry, for tests.
+    pub fn with_msi_entry(mut self) -> Probe {
+        self.msi_entry = true;
         self
     }
 
@@ -200,6 +227,7 @@ impl Probe {
                 .collect(),
             exists: Box::new(move |path| present.iter().any(|p| p == path)),
             pacman_conf: None,
+            msi_entry: false,
         }
     }
 
@@ -275,6 +303,17 @@ pub fn detect(probe: &Probe) -> Installation {
         return Installation::Unknown;
     }
 
+    // Windows: the MSI's entry in Add/Remove Programs, and this executable
+    // where the MSI puts it. Both, because either alone says too little: the
+    // entry is there while a portable copy runs from somewhere else, and a
+    // file at that path could have been copied there by hand. An install
+    // moved with the INSTALLFOLDER property fails the second test and is
+    // told the honest Unknown sentence rather than a remedy that would
+    // update a different copy.
+    if probe.msi_entry && is_msi_location(&probe.exe.to_string_lossy(), probe) {
+        return Installation::Msi;
+    }
+
     if is_portable_prefix(&probe.exe, probe.env("HOME")) {
         return Installation::Portable;
     }
@@ -337,6 +376,25 @@ pub fn has_archive_section(pacman_conf: &str) -> bool {
     pacman_conf
         .lines()
         .any(|line| line.trim() == PACMAN_ARCHIVE_SECTION)
+}
+
+/// Whether `exe` is `Brokey\brokey.exe` in the native Program Files, where
+/// `packaging/windows/brokey.wxs` installs it (`ProgramFiles6432Folder`).
+/// Compared as text, case-insensitively and with either separator, rather
+/// than through `Path`, so the answer is the same when the tests run on
+/// Linux. `ProgramW6432` first: it names the native directory from a 32-bit
+/// process too, where `ProgramFiles` would not.
+fn is_msi_location(exe: &str, probe: &Probe) -> bool {
+    let fold = |s: &str| s.replace('/', "\\").to_lowercase();
+    let exe = fold(exe);
+    // `current_exe` can answer in the `\\?\` form.
+    let exe = exe.strip_prefix(r"\\?\").unwrap_or(&exe);
+    ["ProgramW6432", "ProgramFiles"]
+        .into_iter()
+        .filter_map(|key| probe.env(key))
+        .map(|dir| fold(dir.trim()))
+        .filter(|dir| !dir.is_empty())
+        .any(|dir| exe == format!(r"{}\brokey\brokey.exe", dir.trim_end_matches('\\')))
 }
 
 /// Where a copy is the user's own. `/usr/local` is here rather than in the
