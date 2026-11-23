@@ -19,14 +19,20 @@ Windows side of that split and what it supersedes in `architecture.md`.
 **Early and building out.** The first machine is Arch (CachyOS): pacman and the
 AUR are the reference sources. apt and dnf are written to the same interface and
 are marked untested until they have run on a real Debian and Fedora. Windows
-has four sources, in the order the page draws them: Add/Remove Programs
+has seven sources, in the order the page draws them: Add/Remove Programs
 (`sources/windows/arp.rs`), winget (`sources/windows/winget/`), Chocolatey
-(`sources/windows/choco.rs`) and Scoop (`sources/windows/scoop.rs`). None of
-them shells out to read anything: winget's catalogue is downloaded and read by Brokey
-itself, which is why search works without winget installed, and its installed
-list is the registry joined to that catalogue; Chocolatey searches the
-community feed over HTTP and reads its own `lib` directory; Scoop reads the
-buckets on disk, or the main bucket over HTTP when there are none.
+(`sources/windows/choco.rs`), Scoop (`sources/windows/scoop.rs`), the
+Microsoft Store (`sources/windows/msix.rs`), GitHub releases
+(`sources/github/`, shared with Linux) and optional features
+(`sources/windows/features.rs`, drawn on the Features page in the Drivers
+slot). None of them shells out to read anything: winget's catalogue is
+downloaded and read by Brokey itself, which is why search works without winget
+installed, and its installed list is the registry joined to that catalogue;
+Chocolatey searches the community feed over HTTP and reads its own `lib`
+directory; Scoop reads the buckets on disk, or the main bucket over HTTP when
+there are none; the Store's installed list comes from the Windows Runtime's
+PackageManager and its search from the Store's own endpoint; features are read
+from WMI, because DISM will not list them for a user who is not elevated.
 `brokey-helper` runs on Windows too, elevated through `ShellExecuteEx` and
 answering on a pair of named pipes, so installing, updating and removing
 work there. `README.md`'s "What is not there yet" is the
@@ -108,11 +114,16 @@ crates/brokey-core/src/
   lib.rs            re-exports; the Source trait; Package, App, Update, Plan, Step, Event
   model.rs          the data types, serde-derived, shared with the page as JSON
   sources/          one module per source, split by platform and selected by #[cfg]
-    linux/          pacman.rs, aur.rs, flatpak.rs, snap.rs, apt.rs, dnf.rs, github.rs, fwupd.rs, chwd.rs
+    linux/          pacman.rs, aur.rs, flatpak.rs, snap.rs, apt.rs, dnf.rs, fwupd.rs, chwd.rs
+    github/         mod.rs (API, cache, install record, updates), linux.rs and
+                    windows.rs (asset choice and steps), both built and tested
+                    on either OS; the source picks by SystemInfo::platform
     windows/        arp.rs (Add/Remove Programs), winget/ (mod.rs, index.rs,
-                    query.rs, version.rs), choco.rs, scoop.rs, pe.rs and
-                    icon.rs (an installed application's own icon); the
-                    Microsoft Store comes next, per the Windows spec
+                    query.rs, version.rs, manifest.rs, normalise.rs: winget's
+                    own name normaliser, ported), choco.rs, scoop.rs, msix.rs
+                    (Microsoft Store), features.rs (optional features, WMI),
+                    shortcut.rs (.lnk reader for Open), pe.rs and icon.rs (an
+                    installed application's own icon)
   appstream/        catalogue XML parser, icon resolution, index
   group.rs          packages -> apps. Pure. Fixture-tested
   transaction/      Plan building and the Runner (spawns the helper and user-session steps)
@@ -130,6 +141,8 @@ crates/brokey/src/
   lib.rs            Tauri builder, plugins, state
   cli.rs            the text mode itself: argument parsing and its output
   commands.rs       every #[tauri::command], thin
+  show.rs           `brokey --show <source>:<id>`, the contract in
+                    docs/brokey-handoff.md that Heft depends on
   state.rs          the store and the settings the commands share
   settings.rs       key = value preferences
   setup/            the Windows setup executable, and the one sanctioned
@@ -147,7 +160,8 @@ frontend/src/
                     --accent-h, --accent-fixed and --accent-ink-fixed
   app.css           components, one block per §7 component, prefixed class names
   components/       Button, Dropdown, MultiSelect, Segmented, Toggle, Field, Badge, Row, Card, Panel, Dialog, Toast, Progress
-  pages/            Search, AppDetail, Installed, Updates, Drivers, Settings
+  pages/            Search, AppDetail, Installed, Updates, Drivers (Features on
+                    Windows), Settings
   activity/         the transaction panel and its event store
 ```
 
