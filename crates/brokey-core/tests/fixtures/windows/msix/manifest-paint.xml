@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- Microsoft.Paint 11.2609.441.0 as installed on the reference machine, cut
+     after its first two extensions. Nothing above the cut was changed. -->
+<Package IgnorableNamespaces="uap uap2 uap3 uap4 uap7 uap11 mp rescap rescap3 rescap4 com com2 com3 desktop desktop6 desktop7 systemai build" xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns:uap2="http://schemas.microsoft.com/appx/manifest/uap/windows10/2" xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3" xmlns:uap4="http://schemas.microsoft.com/appx/manifest/uap/windows10/4" xmlns:uap7="http://schemas.microsoft.com/appx/manifest/uap/windows10/7" xmlns:uap11="http://schemas.microsoft.com/appx/manifest/uap/windows10/11" xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities" xmlns:rescap3="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities/3" xmlns:rescap4="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities/4" xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10" xmlns:com2="http://schemas.microsoft.com/appx/manifest/com/windows10/2" xmlns:com3="http://schemas.microsoft.com/appx/manifest/com/windows10/3" xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10" xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4" xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5" xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6" xmlns:desktop7="http://schemas.microsoft.com/appx/manifest/desktop/windows10/7" xmlns:systemai="http://schemas.microsoft.com/appx/manifest/systemai/windows10" xmlns:build="http://schemas.microsoft.com/developer/appx/2015/build">
+
+  <Identity Name="Microsoft.Paint" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" Version="11.2609.441.0" ProcessorArchitecture="x64"/>
+  <mp:PhoneIdentity PhoneProductId="c565257f-0491-4937-9fbb-06c0bddaba65" PhonePublisherId="95d94207-0c7c-47ed-82db-d75c81153c35"/>
+  <Properties>
+    <DisplayName>ms-resource:AppDisplayName</DisplayName>
+    <PublisherDisplayName>Microsoft Corporation</PublisherDisplayName>
+    <Logo>Assets\PaintStoreLogo.png</Logo>
+    <desktop6:FileSystemWriteVirtualization>disabled</desktop6:FileSystemWriteVirtualization>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26226.0"/>
+    <PackageDependency Name="Microsoft.WindowsAppRuntime.2" MinVersion="2.3.1.0" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"/>
+    <PackageDependency Name="Microsoft.VCLibs.140.00" MinVersion="14.0.33519.0" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"/>
+    <PackageDependency Name="Microsoft.VCLibs.140.00.UWPDesktop" MinVersion="14.0.33728.0" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"/>
+  </Dependencies>
+  <Resources>
+    <Resource Language="EN-US"/>
+    <Resource Language="EN-GB"/>
+    <Resource uap:Scale="200"/>
+
+  </Resources>
+  <Applications>
+    <Application Id="App" Executable="PaintApp\mspaint.exe" EntryPoint="Windows.FullTrustApplication" uap11:CurrentDirectoryPath="$(env:USERPROFILE)">
+      <uap:VisualElements DisplayName="ms-resource:Resources/AppDisplayName" Description="ms-resource:Resources/AppDescription" BackgroundColor="#0078D4" Square150x150Logo="Assets\PaintMedTile.png" Square44x44Logo="Assets\PaintAppList.png">
+        <uap:DefaultTile ShortName="ms-resource:Resources/AppDisplayName">
+          <uap:ShowNameOnTiles>
+            <uap:ShowOn Tile="square150x150Logo"/>
+          </uap:ShowNameOnTiles>
+        </uap:DefaultTile>
+      </uap:VisualElements>
+      <Extensions>
+        <uap3:Extension Category="windows.appExecutionAlias" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="mspaint.exe"/>
+            <desktop:ExecutionAlias Alias="pbrush.exe"/>
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="paintprojectfile">
+            <uap:DisplayName>ms-resource:Resources/PaintProjectFileFormat</uap:DisplayName>
+            <uap:Logo>Assets\paintpicture.png</uap:Logo>
+            <uap:SupportedFileTypes>
+              <uap:FileType>.paint</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>

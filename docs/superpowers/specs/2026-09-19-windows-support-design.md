@@ -167,6 +167,8 @@ absent, search fetches the bucket JSON from GitHub directly.
 removal through the Appx API, and installation through winget's `msstore`
 source, so the source depends on winget being present. The only Windows source
 carrying real icons and screenshots, which the metadata ladder below leans on.
+Built as `sources/windows/msix.rs`; "The Store and MSIX source, as built"
+below records what reading the real Appx state changed.
 
 **GitHub releases.** The existing source. Its asset selection learns Windows:
 prefer `.msi`, then `-setup.exe` or `-installer.exe`, then a bare `.exe`, then
@@ -750,6 +752,103 @@ menu handlers. The source needs a filter of the same kind `arp` has, tested
 the same way against a checked-in fixture, and for the same reason: what
 Settings shows a user is a much smaller list than what the API returns.
 
+### The Store and MSIX source, as built
+
+**Added 2026-11-23**, with `sources/windows/msix.rs`. Measured on the
+reference machine, which by then had 176 Appx packages registered for its
+user.
+
+**The Appx state is read from the Windows Runtime, not the registry.**
+`HKCU\...\AppModel\Repository\Packages` looks like the list and is not: it
+held 1004 keys against 176 registered packages, because it keeps every
+package any user of the machine ever had. `PackageManager.FindPackagesByUserSecurityId`
+with an empty id lists exactly the calling user's packages and needs no
+elevation, and it resolves each package's `ms-resource:` display name,
+description and logo itself, so `SHLoadIndirectString` is never called. Each
+package's `AppxManifest.xml` is then read for its `<Application>` elements.
+The result is a `RawPackage`, and everything after `read()` is a pure
+function of it, tested against `tests/fixtures/windows/msix/packages.json`,
+exported from the reference machine and cut down to one package per rule.
+
+Resolving a display name is not free: the first `DisplayName` read loads the
+package's resource index, and doing it for all 176 took eleven seconds. So
+names, publishers and descriptions are resolved only for packages the filter
+below keeps, and the logo is the manifest's `<Logo>` with its scale variant
+picked from the directory listing rather than `Package.Logo`, which resolves
+the same index. Reading the whole state then takes well under a second.
+
+**The filter, and the number it lands on.** Of the 176, dropping frameworks,
+resource packages, bundles and what Windows signed leaves the 85 the section
+above counted. Stubs stay: Sticky Notes, Clock, Maps and To Do are stub
+packages on this machine and every one is in the Start menu. The rule that does the rest is the Start menu's own:
+a package is an application when at least one of its applications is listed,
+that is, does not declare `AppListEntry="none"`. That leaves **38**. What it
+removes is exactly the noise the section above names: PowerToys' context menu
+handlers, the codec extensions, the Windows App Runtime's main and singleton
+packages, winget's own source packages, Xbox overlays, and the identity
+packages that give a Win32 program a package identity (VS Code Insiders,
+Edge, WSL, Office's helpers), whose program is listed by Add/Remove Programs
+already. `Microsoft.Windows.Photos` falls out too, correctly: on this machine
+the Photos in Start is `Microsoft.OneDrive.Photos`, which stays.
+
+`NonRemovable`, which `Get-AppxPackage` reports, is not in the public API: it
+is a flag in the state repository, which an unelevated process cannot open,
+and in an undocumented registry cache. 49 of the machine's 51 non-removable
+packages are signed by Windows and fall to the signature rule. The other two
+are Store-signed, `Microsoft.DesktopAppInstaller` (which is winget) and
+`Microsoft.SecHealthUI`, and they are named in `PART_OF_WINDOWS`, with a
+fixture entry each.
+
+**Search is the Store's own `manifestSearch`.** The rule above that the
+Store is never searched by name is about artwork for *another* source's
+application, and it holds: nothing in `msix.rs` attaches a Store listing to
+anything but the Store product it came from. A Store search row is a Store
+product, identified by its product id, and is shown as one. Two things about
+the endpoint had to be found. Without a `Market` filter it answers nothing
+for names it carries (`spotify` gives no rows without one and Spotify with
+one), so the market and language come from `HKCU\Control Panel\International`,
+as the Store app's do. And its `PackageFamilyNames` field holds a path or a
+display string for a Win32 product (`zoom.us.Zoom Video Meetings`), so a
+family is only taken when it has a family's shape.
+
+**Icons and screenshots, all by exact key.** A page of search results gets
+its icons from one batched display catalogue request by product id. The
+display catalogue carries MSIX products only, so a Win32 product (`XP...`)
+draws its first letter in search and gets its artwork on the detail page,
+from `storeedgefd`'s `products/<id>`, which serves both kinds. An installed
+package's detail page reaches its listing by package family name, through the
+display catalogue's `lookup`, which is rung 4 of the ladder above. Its own
+logo, copied from the package into `$CACHE/icons`, is rung 2 and is kept over
+the Store's.
+
+**One id per application.** A package's id is its package family name,
+installed or not, which `docs/brokey-handoff.md` fixes as the contract:
+`msix:<family>` is the `PackageRef`. The installed list, a search and a plan
+therefore name one application the same way, `group.rs` joins the Store row
+to the installed row without a heuristic, and the launcher builds
+`shell:AppsFolder\<family>!<app>` from the same string
+(`Msix::app_user_model_ids`). `family_from_full_name` reduces a full name to
+it. The one exception is a Win32 product sold through the Store (`XP...`),
+which has no package family at all and is named by its Store product id.
+Installing by family asks the display catalogue's `lookup` for the product id
+winget needs, at plan time; it is a read-only question, as the spec's rules
+allow.
+
+**Installing and removing never elevate.** Install is `winget install --exact
+--id <product> --source msstore` with winget's usual silent flags, run in the
+user's session: a Store application belongs to the user who installed it, and
+an elevated winget would install it for whoever answered the prompt. Removal
+is `Remove-AppxPackage -Package '<full name>'`, the full name checked to
+contain only the characters a full name has before it goes into the literal.
+Neither step reaches the helper, so neither is on its closed list.
+
+**The setup chain is drawn by the page.** `Msix::setup` carries
+`Op::Setup { Winget }` and no steps of its own, as the table says. The source
+itself stays available without winget, because listing and removing need
+only the Appx state, so the page asks winget's status when an install from
+the Store needs a tool (`toolOf` in `pages/app/editions.ts`) and puts winget's
+setup first.
+
 ## Rejected
 
 - **A Windows service.** One consent at setup and no UAC afterwards, which is
@@ -888,6 +987,28 @@ plan's own workspace is scratch and these outlive it.
   recorded rather than coded around: if a machine turns one up, the fix is to
   fall back to reading the value as text and parsing it, with a fixture entry
   for each.
+
+**Left by the Store and MSIX source, 2026-11-23.**
+
+- **Store updates are not listed.** The Store updates what it installed on
+  its own schedule. The display catalogue's SKU lists every package version
+  of a product, so the newest is knowable exactly, but only one product at a
+  time from a family name, which is 38 requests for the Updates page on the
+  reference machine. Until that cost is weighed, `updates()` is empty rather
+  than a list that might be wrong, and `Op::Update` plans nothing.
+- **A Win32 product from the Store may need Administrator.** winget's
+  `msstore` source runs the publisher's own installer for an `XP...` product,
+  and the install step is never elevated. A machine-scope installer then
+  fails under `--disable-interactivity`. Choosing per product needs the
+  `Installer` block of its product page, which says only the URL and the
+  hash, not the scope.
+- **winget's `pfns2` table does not reach the Store yet.** Rung 4 of the
+  ladder names it: a winget package whose index row carries a family name
+  could take that family's Store artwork exactly. The winget source does not
+  read `pfns2`, so a winget search row draws its first letter.
+- **The page has no Windows mock.** `mock.ts` is a CachyOS machine, so the
+  Store is exercised against the real backend in the window and through the
+  text mode, not in a browser.
 
 - `rusqlite` with `bundled` links a statically compiled SQLite. The objection
   recorded in `docs/architecture.md` was to libalpm and libapt, which tie one

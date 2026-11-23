@@ -1,0 +1,195 @@
+{
+ "$type": "Microsoft.Marketplace.Storefront.Contracts.V1.ResponseItem, Microsoft.Marketplace.Storefront.Contracts",
+ "Path": "/products/9PCFS5B6T72H?market=NO&locale=en-GB&deviceFamily=Windows.Desktop",
+ "ExpiryUtc": "2026-11-23T22:49:11.7912646Z",
+ "Payload": {
+  "$type": "Microsoft.Marketplace.Storefront.Contracts.V3.ProductDetails, Microsoft.Marketplace.Storefront.Contracts",
+  "ProductId": "9PCFS5B6T72H",
+  "Title": "Paint",
+  "PublisherName": "Microsoft Corporation",
+  "DeveloperName": "Microsoft Corporation",
+  "Description": "Paint is a powerful but intuitive image editing app that has been a favorite on Windows. Quickly create and edit your masterpieces with the built-in tools, and when you’re ready, save your files in almost any format and share them anywhere.",
+  "AppWebsiteUrl": "http://windows.microsoft.com",
+  "Categories": [
+   "Multimedia design"
+  ],
+  "Images": [
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "logo",
+    "BackgroundColor": "#0078D4",
+    "ForegroundColor": "",
+    "Caption": "",
+    "ImagePositionInfo": "",
+    "Url": "https://store-images.s-microsoft.com/image/apps.30063.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.4c33a632-149f-4999-87c0-c927078f3b77",
+    "Height": 50,
+    "Width": 50
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "logo",
+    "BackgroundColor": "#0078D4",
+    "ForegroundColor": "",
+    "Caption": "",
+    "ImagePositionInfo": "",
+    "Url": "https://store-images.s-microsoft.com/image/apps.43934.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.798816ab-2937-493c-9980-677aefa06fc9",
+    "Height": 75,
+    "Width": 75
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "logo",
+    "BackgroundColor": "#0078D4",
+    "ForegroundColor": "",
+    "Caption": "",
+    "ImagePositionInfo": "",
+    "Url": "https://store-images.s-microsoft.com/image/apps.46922.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.f77fb30d-e433-46f1-9886-d8b1225ec60b",
+    "Height": 100,
+    "Width": 100
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "tile",
+    "BackgroundColor": "#0078D4",
+    "ForegroundColor": "",
+    "Caption": "",
+    "ImagePositionInfo": "",
+    "Url": "https://store-images.s-microsoft.com/image/apps.55512.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.7c13f943-ab79-46ed-95f7-c62542d9ebeb",
+    "Height": 150,
+    "Width": 150
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "tile",
+    "BackgroundColor": "#0078D4",
+    "ForegroundColor": "",
+    "Caption": "",
+    "ImagePositionInfo": "",
+    "Url": "https://store-images.s-microsoft.com/image/apps.16516.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.7cc88614-b337-41a3-8861-072375031629",
+    "Height": 225,
+    "Width": 225
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "tile",
+    "BackgroundColor": "#0078D4",
+    "ForegroundColor": "",
+    "Caption": "",
+    "ImagePositionInfo": "",
+    "Url": "https://store-images.s-microsoft.com/image/apps.24379.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.bee3afcb-7319-4c21-b5bf-066fd35a6f1e",
+    "Height": 300,
+    "Width": 300
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "tile",
+    "BackgroundColor": "#0078D4",
+    "ForegroundColor": "",
+    "Caption": "",
+    "ImagePositionInfo": "",
+    "Url": "https://store-images.s-microsoft.com/image/apps.29056.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.c395b9cb-885e-4c1d-b772-2faf1ec25cf7",
+    "Height": 44,
+    "Width": 44
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "tile",
+    "BackgroundColor": "#0078D4",
+    "ForegroundColor": "",
+    "Caption": "",
+    "ImagePositionInfo": "",
+    "Url": "https://store-images.s-microsoft.com/image/apps.52606.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.0b09fa8f-0707-4222-800f-ccb04739fc5f",
+    "Height": 66,
+    "Width": 66
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "tile",
+    "BackgroundColor": "#0078D4",
+    "ForegroundColor": "",
+    "Caption": "",
+    "ImagePositionInfo": "",
+    "Url": "https://store-images.s-microsoft.com/image/apps.14758.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.44b759ad-ef1c-49d2-bee4-af0e49ce73bc",
+    "Height": 88,
+    "Width": 88
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "screenshot",
+    "BackgroundColor": "#0078D4",
+    "ForegroundColor": "",
+    "Caption": "Simple and powerful creative toolset.",
+    "ImagePositionInfo": "Desktop/0",
+    "Url": "https://store-images.s-microsoft.com/image/apps.29977.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.3bdf2f41-882d-43de-bfdf-ed0647098ed7",
+    "Height": 776,
+    "Width": 1374
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "screenshot",
+    "BackgroundColor": "#0078D4",
+    "ForegroundColor": "",
+    "Caption": "Bring your ideas to life with CoCreator.",
+    "ImagePositionInfo": "Desktop/1",
+    "Url": "https://store-images.s-microsoft.com/image/apps.24197.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.a94d749f-2030-4d7d-af6f-283392868c77",
+    "Height": 776,
+    "Width": 1374
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "screenshot",
+    "BackgroundColor": "#0078D4",
+    "ForegroundColor": "",
+    "Caption": "Paint supports dark theme.",
+    "ImagePositionInfo": "Desktop/2",
+    "Url": "https://store-images.s-microsoft.com/image/apps.35328.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.96aad02f-5992-49fe-854a-cc98b460b64d",
+    "Height": 776,
+    "Width": 1374
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "screenshot",
+    "BackgroundColor": "#0078D4",
+    "ForegroundColor": "",
+    "Caption": "Edit like a pro with background removal.",
+    "ImagePositionInfo": "Desktop/3",
+    "Url": "https://store-images.s-microsoft.com/image/apps.56044.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.6693aed5-fa3e-434c-a294-eeacc9470989",
+    "Height": 776,
+    "Width": 1374
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "screenshot",
+    "BackgroundColor": "#0078D4",
+    "ForegroundColor": "",
+    "Caption": "Use layers to create and experiment with new ideas.",
+    "ImagePositionInfo": "Desktop/4",
+    "Url": "https://store-images.s-microsoft.com/image/apps.35751.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.55d9d7a9-4522-4716-a83f-6f562e35b8e6",
+    "Height": 776,
+    "Width": 1374
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "screenshot",
+    "BackgroundColor": "#0078D4",
+    "ForegroundColor": "",
+    "Caption": "Support for transparent images.",
+    "ImagePositionInfo": "Desktop/5",
+    "Url": "https://store-images.s-microsoft.com/image/apps.53994.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.5b89f110-7fc4-4756-a5e9-33396d96beeb",
+    "Height": 768,
+    "Width": 1366
+   }
+  ],
+  "AverageRating": 3.8,
+  "RatingCount": 16,
+  "PackageFamilyNames": [
+   "Microsoft.Paint_8wekyb3d8bbwe"
+  ],
+  "LastUpdateDateUtc": "2026-11-18T17:45:00Z",
+  "Installer": {
+   "$type": "Microsoft.Marketplace.Storefront.Contracts.V9.Installer, Microsoft.Marketplace.Storefront.Contracts",
+   "Type": "WindowsUpdate",
+   "Id": "9PCFS5B6T72H"
+  }
+ }
+}

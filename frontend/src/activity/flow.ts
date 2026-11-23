@@ -145,6 +145,8 @@ export function fromSource(kind: SourceKind): string {
       return "fwupd";
     case "chwd":
       return "chwd";
+    case "msix":
+      return "the Store";
     default:
       return sourceLabel(kind);
   }

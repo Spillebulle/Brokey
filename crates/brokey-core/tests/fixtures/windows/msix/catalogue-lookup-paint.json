@@ -1,0 +1,288 @@
+{
+ "BigIds": [
+  "9PCFS5B6T72H"
+ ],
+ "HasMorePages": false,
+ "Products": [
+  {
+   "LastModifiedDate": "2026-11-18T17:45:00.9122075Z",
+   "LocalizedProperties": [
+    {
+     "DeveloperName": "Microsoft Corporation",
+     "PublisherName": "Microsoft Corporation",
+     "PublisherWebsiteUri": "http://windows.microsoft.com",
+     "SupportUri": "",
+     "Images": [
+      {
+       "FileId": "3004083314328609787",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 1937,
+       "ForegroundColor": "",
+       "Height": 50,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Logo",
+       "UnscaledImageSHA256Hash": "b3VSFEfYclaqTwAj9QoXW8XQqSbgmxi/IOkPcFcuBsY=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.30063.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.4c33a632-149f-4999-87c0-c927078f3b77",
+       "Width": 50
+      },
+      {
+       "FileId": "3047521229575213025",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 3619,
+       "ForegroundColor": "",
+       "Height": 75,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Logo",
+       "UnscaledImageSHA256Hash": "nqt3NTvoe8ojdM5KWwvy/aMEwBwJ0cqFlfRU/nf0BaY=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.43934.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.798816ab-2937-493c-9980-677aefa06fc9",
+       "Width": 75
+      },
+      {
+       "FileId": "3029367050768691160",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 4582,
+       "ForegroundColor": "",
+       "Height": 100,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Logo",
+       "UnscaledImageSHA256Hash": "SrcvxS7XBdJACsd83I9840OvExsMGznkbgGMiy680jo=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.46922.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.f77fb30d-e433-46f1-9886-d8b1225ec60b",
+       "Width": 100
+      },
+      {
+       "FileId": "3071708700361040863",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 4578,
+       "ForegroundColor": "",
+       "Height": 150,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Tile",
+       "UnscaledImageSHA256Hash": "2Nitw03EgqsqjbIB3NXhbEJvzePFtKgMAWu2DlGA/IA=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.55512.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.7c13f943-ab79-46ed-95f7-c62542d9ebeb",
+       "Width": 150
+      },
+      {
+       "FileId": "3026906007082203243",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 8933,
+       "ForegroundColor": "",
+       "Height": 225,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Tile",
+       "UnscaledImageSHA256Hash": "hEByuiCN7OPp66VB0hC4bPYIPS+hY8fvMAKFx/ChqVQ=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.16516.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.7cc88614-b337-41a3-8861-072375031629",
+       "Width": 225
+      },
+      {
+       "FileId": "3032466322792654755",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 11797,
+       "ForegroundColor": "",
+       "Height": 300,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Tile",
+       "UnscaledImageSHA256Hash": "O1/w0xzNfssrKFsdJgU8o6Rt+Uj1GITY5UZd4JrY+RU=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.24379.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.bee3afcb-7319-4c21-b5bf-066fd35a6f1e",
+       "Width": 300
+      },
+      {
+       "FileId": "3040252360672919117",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 1732,
+       "ForegroundColor": "",
+       "Height": 44,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Tile",
+       "UnscaledImageSHA256Hash": "gHEqCEwZWqriY4QPJb+OfTcOgu1MVNtCF3E5rZz+JNU=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.29056.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.c395b9cb-885e-4c1d-b772-2faf1ec25cf7",
+       "Width": 44
+      },
+      {
+       "FileId": "3051360100492600752",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 2751,
+       "ForegroundColor": "",
+       "Height": 66,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Tile",
+       "UnscaledImageSHA256Hash": "fs353r00HWWHg11ZAHLu/qzY0vc/ZB/uBq6+PkJqz54=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.52606.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.0b09fa8f-0707-4222-800f-ccb04739fc5f",
+       "Width": 66
+      },
+      {
+       "FileId": "3019724241811278011",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 3991,
+       "ForegroundColor": "",
+       "Height": 88,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Tile",
+       "UnscaledImageSHA256Hash": "pjkUi5ooYZ5CewpRKJZ7ekPHsdGy5E6Z5xfmPoaJNZY=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.14758.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.44b759ad-ef1c-49d2-bee4-af0e49ce73bc",
+       "Width": 88
+      },
+      {
+       "FileId": "3012957236420830884",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "Bring your ideas to life with CoCreator.",
+       "FileSizeInBytes": 1012181,
+       "ForegroundColor": "",
+       "Height": 776,
+       "ImagePositionInfo": "Desktop/1",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "hV7yjO7oyITaB/T26hFReJAOOyCxv+wgIQJi77BJAvI=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.24197.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.a94d749f-2030-4d7d-af6f-283392868c77",
+       "Width": 1374
+      },
+      {
+       "FileId": "3004666162285197389",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "Paint supports dark theme.",
+       "FileSizeInBytes": 458729,
+       "ForegroundColor": "",
+       "Height": 776,
+       "ImagePositionInfo": "Desktop/2",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "AIovX050WWFMy49AUDRSI9tdt3tcMy6f4xhIbNg0vBo=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.35328.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.96aad02f-5992-49fe-854a-cc98b460b64d",
+       "Width": 1374
+      },
+      {
+       "FileId": "3010218976867920416",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "Edit like a pro with background removal.",
+       "FileSizeInBytes": 1035661,
+       "ForegroundColor": "",
+       "Height": 776,
+       "ImagePositionInfo": "Desktop/3",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "7NoN7pEjvcZ1mTP5s48eAJ+uXrwhQiMD1qoOEV51eCw=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.56044.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.6693aed5-fa3e-434c-a294-eeacc9470989",
+       "Width": 1374
+      },
+      {
+       "FileId": "3063544192414224995",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "Use layers to create and experiment with new ideas.",
+       "FileSizeInBytes": 690668,
+       "ForegroundColor": "",
+       "Height": 776,
+       "ImagePositionInfo": "Desktop/4",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "p4ucgcj0zRSK98yqFTa2py0q3oudvnn0KZvdJQpUfJM=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.35751.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.55d9d7a9-4522-4716-a83f-6f562e35b8e6",
+       "Width": 1374
+      },
+      {
+       "FileId": "3037765626141896997",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "Support for transparent images.",
+       "FileSizeInBytes": 671240,
+       "ForegroundColor": "",
+       "Height": 768,
+       "ImagePositionInfo": "Desktop/5",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "6tKlhjo9isC4Oobe33yeU62WIgOVt1kABLfBkd3B2wc=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.53994.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.5b89f110-7fc4-4756-a5e9-33396d96beeb",
+       "Width": 1366
+      },
+      {
+       "FileId": "3031534221102890263",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "Simple and powerful creative toolset.",
+       "FileSizeInBytes": 577290,
+       "ForegroundColor": "",
+       "Height": 776,
+       "ImagePositionInfo": "Desktop/0",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "GXWrRHQheDx+jq/TFnsU9SepxfWX7tPCpDP388VIzwU=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.29977.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.3bdf2f41-882d-43de-bfdf-ed0647098ed7",
+       "Width": 1374
+      }
+     ],
+     "ProductDescription": "Paint is a powerful but intuitive image editing app that has been a favorite on Windows. Quickly create and edit your masterpieces with the built-in tools, and when you’re ready, save your files in almost any format and share them anywhere.",
+     "ProductTitle": "Paint",
+     "ShortTitle": null,
+     "ShortDescription": null,
+     "Language": "en-gb"
+    }
+   ],
+   "MarketProperties": [
+    {
+     "OriginalReleaseDate": "2020-11-18T18:05:52.2167692Z",
+     "UsageData": [
+      {
+       "AggregateTimeSpan": "7Days",
+       "AverageRating": 4.1,
+       "PlayCount": 0,
+       "RatingCount": 36,
+       "RentalCount": "0",
+       "TrialCount": "0",
+       "PurchaseCount": "0"
+      },
+      {
+       "AggregateTimeSpan": "30Days",
+       "AverageRating": 4.0,
+       "PlayCount": 0,
+       "RatingCount": 123,
+       "RentalCount": "0",
+       "TrialCount": "0",
+       "PurchaseCount": "0"
+      },
+      {
+       "AggregateTimeSpan": "AllTime",
+       "AverageRating": 4.1,
+       "PlayCount": 0,
+       "RatingCount": 81556,
+       "RentalCount": "0",
+       "TrialCount": "0",
+       "PurchaseCount": "0"
+      }
+     ]
+    }
+   ],
+   "ProductId": "9PCFS5B6T72H",
+   "Properties": {
+    "Category": "Multimedia design",
+    "SubCategory": "",
+    "Categories": null,
+    "PackageFamilyName": "Microsoft.Paint_8wekyb3d8bbwe",
+    "PackageIdentityName": "Microsoft.Paint",
+    "PublisherCertificateName": "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+   },
+   "DomainDataVersion": null,
+   "IngestionSource": "DCE",
+   "IsMicrosoftProduct": true,
+   "PreferredSkuId": "0010",
+   "ProductType": "Application",
+   "ProductFamily": "Apps",
+   "SchemaVersion": "3",
+   "ProductKind": "Application"
+  }
+ ],
+ "TotalResultCount": 1
+}

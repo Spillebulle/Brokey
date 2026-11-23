@@ -1,0 +1,110 @@
+{
+ "$type": "Microsoft.Marketplace.Storefront.StoreEdgeFD.BusinessLogic.Response.ManifestSearch.ManifestSearchResponse, StoreEdgeFD",
+ "Data": [
+  {
+   "$type": "Microsoft.Marketplace.Storefront.StoreEdgeFD.BusinessLogic.Response.ManifestSearch.ManifestSearchData, StoreEdgeFD",
+   "PackageIdentifier": "9PCFS5B6T72H",
+   "PackageName": "Paint",
+   "Publisher": "Microsoft Corporation",
+   "Versions": [
+    {
+     "$type": "Microsoft.Marketplace.Storefront.StoreEdgeFD.BusinessLogic.Response.ManifestSearch.ManifestSearchVersion, StoreEdgeFD",
+     "PackageVersion": "Unknown",
+     "PackageFamilyNames": [
+      "Microsoft.Paint_8wekyb3d8bbwe"
+     ]
+    }
+   ]
+  },
+  {
+   "$type": "Microsoft.Marketplace.Storefront.StoreEdgeFD.BusinessLogic.Response.ManifestSearch.ManifestSearchData, StoreEdgeFD",
+   "PackageIdentifier": "9PFDF2ZD4Z4N",
+   "PackageName": "ibis Paint",
+   "Publisher": "ibis inc.",
+   "Versions": [
+    {
+     "$type": "Microsoft.Marketplace.Storefront.StoreEdgeFD.BusinessLogic.Response.ManifestSearch.ManifestSearchVersion, StoreEdgeFD",
+     "PackageVersion": "Unknown",
+     "PackageFamilyNames": [
+      "ibisinc.ibisPaint_sxbx2qs82h9wr"
+     ]
+    }
+   ]
+  },
+  {
+   "$type": "Microsoft.Marketplace.Storefront.StoreEdgeFD.BusinessLogic.Response.ManifestSearch.ManifestSearchData, StoreEdgeFD",
+   "PackageIdentifier": "9WZDNCRFJB13",
+   "PackageName": "Fresh Paint",
+   "Publisher": "Microsoft Corporation",
+   "Versions": [
+    {
+     "$type": "Microsoft.Marketplace.Storefront.StoreEdgeFD.BusinessLogic.Response.ManifestSearch.ManifestSearchVersion, StoreEdgeFD",
+     "PackageVersion": "Unknown",
+     "PackageFamilyNames": [
+      "Microsoft.FreshPaint_8wekyb3d8bbwe"
+     ]
+    }
+   ]
+  },
+  {
+   "$type": "Microsoft.Marketplace.Storefront.StoreEdgeFD.BusinessLogic.Response.ManifestSearch.ManifestSearchData, StoreEdgeFD",
+   "PackageIdentifier": "9N4KQS3KW1FM",
+   "PackageName": "Paint Universal",
+   "Publisher": "Fulvio Schiano",
+   "Versions": [
+    {
+     "$type": "Microsoft.Marketplace.Storefront.StoreEdgeFD.BusinessLogic.Response.ManifestSearch.ManifestSearchVersion, StoreEdgeFD",
+     "PackageVersion": "Unknown",
+     "PackageFamilyNames": [
+      "34619FulvioSchiano.PaintUniversal_3c8c9gjn25rww"
+     ]
+    }
+   ]
+  },
+  {
+   "$type": "Microsoft.Marketplace.Storefront.StoreEdgeFD.BusinessLogic.Response.ManifestSearch.ManifestSearchData, StoreEdgeFD",
+   "PackageIdentifier": "9PBSMX4XLV2C",
+   "PackageName": "PhotoMind - FREE Photo Editor & Photo Paint",
+   "Publisher": "Media Tools Studio",
+   "Versions": [
+    {
+     "$type": "Microsoft.Marketplace.Storefront.StoreEdgeFD.BusinessLogic.Response.ManifestSearch.ManifestSearchVersion, StoreEdgeFD",
+     "PackageVersion": "Unknown",
+     "PackageFamilyNames": [
+      "21226MediaToolsStudio.PhotoMind_s823g6yk0xj5p"
+     ]
+    }
+   ]
+  },
+  {
+   "$type": "Microsoft.Marketplace.Storefront.StoreEdgeFD.BusinessLogic.Response.ManifestSearch.ManifestSearchData, StoreEdgeFD",
+   "PackageIdentifier": "9WZDNCRDKG9B",
+   "PackageName": "Finger Paint (Ape Apps)",
+   "Publisher": "Ape Apps",
+   "Versions": [
+    {
+     "$type": "Microsoft.Marketplace.Storefront.StoreEdgeFD.BusinessLogic.Response.ManifestSearch.ManifestSearchVersion, StoreEdgeFD",
+     "PackageVersion": "Unknown",
+     "PackageFamilyNames": [
+      "61083ApeApps.FingerPaintApeApps_d2yynfvsn01f4"
+     ]
+    }
+   ]
+  },
+  {
+   "$type": "Microsoft.Marketplace.Storefront.StoreEdgeFD.BusinessLogic.Response.ManifestSearch.ManifestSearchData, StoreEdgeFD",
+   "PackageIdentifier": "XPDP32QDDFL4PK",
+   "PackageName": "Clip Studio Paint - Draw and Paint Anywhere -",
+   "Publisher": "CELSYS, Inc.",
+   "Versions": [
+    {
+     "$type": "Microsoft.Marketplace.Storefront.StoreEdgeFD.BusinessLogic.Response.ManifestSearch.ManifestSearchVersion, StoreEdgeFD",
+     "PackageVersion": "Unknown",
+     "PackageFamilyNames": [
+      "{6D809377-6AF0-444B-8957-A3773F02200E}\\CELSYS\\CLIP STUDIO 1.5\\CLIP STUDIO\\CLIPStudio.exe"
+     ]
+    }
+   ]
+  }
+ ]
+}
