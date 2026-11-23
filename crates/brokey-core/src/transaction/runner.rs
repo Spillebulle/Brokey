@@ -631,6 +631,12 @@ impl Runner {
                             if let Some(s) = plan.steps.get(step) {
                                 transcript.step_succeeded(&s.command.program);
                             }
+                            // A success with something left to do, such as
+                            // a feature waiting on a restart, is said again
+                            // at the end of the plan.
+                            if let Some(note) = &message {
+                                transcript.note(note);
+                            }
                         } else if let Some(better) = plan
                             .steps
                             .get(step)

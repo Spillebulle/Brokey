@@ -65,6 +65,9 @@ pub struct Transcript {
     pacnew: Vec<String>,
     /// Whether a chwd step finished, which means a driver profile changed.
     driver_changed: bool,
+    /// Sentences steps that succeeded left for the end of the plan, in
+    /// order: a Windows feature waiting on a restart.
+    notes: Vec<String>,
 }
 
 impl Transcript {
@@ -96,6 +99,14 @@ impl Transcript {
     pub fn step_succeeded(&mut self, program: &str) {
         if program == "chwd" {
             self.driver_changed = true;
+        }
+    }
+
+    /// A step that succeeded said something the user should still hear
+    /// when the plan ends. Said once however many steps say it.
+    pub fn note(&mut self, sentence: &str) {
+        if !self.notes.iter().any(|n| n == sentence) {
+            self.notes.push(sentence.to_string());
         }
     }
 
@@ -146,6 +157,7 @@ impl Transcript {
                 rest.len() + 1
             )),
         }
+        out.extend(self.notes.iter().cloned());
         out
     }
 }
@@ -617,6 +629,16 @@ mod tests {
             "{}",
             after[0]
         );
+    }
+
+    #[test]
+    fn a_note_from_a_step_that_succeeded_ends_the_plan_once() {
+        let mut t = Transcript::new();
+        let note = crate::sources::windows::features::RESTART_NOTE;
+        t.note(note);
+        t.begin_step();
+        t.note(note);
+        assert_eq!(t.afterword(), [note]);
     }
 
     #[test]
