@@ -35,7 +35,7 @@ import type {
   Update,
   UpdateList,
 } from "./types";
-import { sourceLabel } from "./types";
+import { SOURCE_KINDS, sourceLabel } from "./types";
 
 const NOW = Math.floor(Date.now() / 1000);
 const DAY = 86400;
@@ -1451,7 +1451,7 @@ let showWaiting: PackageRef | null = (() => {
   const colon = text.indexOf(":");
   const source = text.slice(0, colon).toLowerCase() as SourceKind;
   const id = text.slice(colon + 1);
-  return colon > 0 && id && SOURCES.some((s) => s.kind === source) ? { source, id } : null;
+  return colon > 0 && id && SOURCE_KINDS.includes(source) ? { source, id } : null;
 })();
 
 export async function show_take(): Promise<PackageRef | null> {
