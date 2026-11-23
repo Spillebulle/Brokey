@@ -9,6 +9,7 @@ import { startOps } from "../activity/flow";
 import { launchKey, openPackage, useLaunchTargets } from "../activity/launch";
 import { AppRow, Button, Count, Dropdown, EmptyState, Figure, ICON, ICON_EMPTY, MultiSelect, Notice, SearchField, Segmented, Skeleton, SkeletonAppRows } from "../components";
 import type { DropdownOption } from "../components";
+import { missingSentence, useShow } from "../shell/show";
 import { useShell } from "../shell/store";
 import { SOURCE_KINDS, sourceLabel, type App, type Edition, type SourceKind } from "../types";
 import { useInstalled, type InstalledSort, type Scope } from "./lists/installedStore";
@@ -173,6 +174,10 @@ export function InstalledPage() {
   const scope = useInstalled((s) => s.scope);
   const sort = useInstalled((s) => s.sort);
   const { load, setQuery, setSources, setScope, setSort } = useInstalled.getState();
+  // `brokey --show` named something that is not installed (shell/show.ts). It stays until dismissed or the page is left.
+  const missing = useShow((s) => s.missing);
+  const clearMissing = useShow((s) => s.clearMissing);
+  useEffect(() => clearMissing, [clearMissing]);
 
   useEffect(() => {
     void load();
@@ -274,6 +279,17 @@ export function InstalledPage() {
             <HeadLine apps={apps} loading={loading} />
           </div>
         </div>
+        {missing ? (
+          <Notice
+            actions={
+              <Button kind="ghost" onClick={clearMissing}>
+                Dismiss
+              </Button>
+            }
+          >
+            {missingSentence(missing)}
+          </Notice>
+        ) : null}
         {error ? (
           <Notice
             actions={

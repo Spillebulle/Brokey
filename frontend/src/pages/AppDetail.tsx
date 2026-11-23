@@ -26,6 +26,7 @@ import {
   type DropdownOption,
 } from "../components";
 import { formatCount, looksNumeric } from "../format";
+import { useShow } from "../shell/show";
 import { useShell } from "../shell/store";
 import type { App, Edition, Package as Pkg, Screenshot } from "../types";
 import { editionKey, editionLabel, installTitle, needsSetup, opsToInstall, refKey, refOf, setupNote, useBusyRefs } from "./app/editions";
@@ -175,6 +176,25 @@ function Detail({ app }: { app: App }) {
   const chosen = editions.find((e) => editionKey(e) === chosenKey) ?? editions.find((e) => e.package.installed) ?? editions[0];
   const pkg = chosen.package;
 
+  // `brokey --show`: select the edition it named and focus its Remove button,
+  // once. Focus only; nothing is removed until the user presses it.
+  const showFocus = useShow((s) => s.focus);
+  const [focusRemove, setFocusRemove] = useState(false);
+  useEffect(() => {
+    if (!showFocus) return;
+    useShow.getState().clearFocus();
+    // A fresher search result under the same key may lack the edition; its installed one is then the one to remove.
+    if (app.editions.some((e) => editionKey(e) === showFocus)) setChosenKey(showFocus);
+    setFocusRemove(true);
+  }, [showFocus, app]);
+  useEffect(() => {
+    if (!focusRemove) return;
+    const button = document.querySelector<HTMLButtonElement>(".bk-appdetail [data-remove]");
+    if (!button) return;
+    button.focus();
+    setFocusRemove(false);
+  });
+
   const shots: Screenshot[] = pkg.screenshots.length > 0 ? pkg.screenshots : (editions.find((e) => e.package.screenshots.length > 0)?.package.screenshots ?? []);
   const backdrop = shots[0] ?? null;
   const description = pkg.description ?? editions.find((e) => e.package.description)?.package.description ?? null;
@@ -304,7 +324,7 @@ function Detail({ app }: { app: App }) {
                         Removing…
                       </Button>
                     ) : (
-                      <Button icon={<Trash {...ICON} aria-hidden="true" />} onClick={remove} title="Asks before anything is removed.">
+                      <Button icon={<Trash {...ICON} aria-hidden="true" />} onClick={remove} title="Asks before anything is removed." data-remove>
                         Remove…
                       </Button>
                     )}

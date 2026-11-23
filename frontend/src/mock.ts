@@ -27,6 +27,7 @@ import type {
   SearchResult,
   SelfUpdate,
   Settings,
+  Shown,
   SourceKind,
   SourceStatus,
   Step,
@@ -1433,6 +1434,50 @@ export async function open_app(pkg: PackageRef): Promise<void> {
   await delay(150);
   const target = (await launch_targets([pkg]))[0];
   if (!target) throw new Error(`${pkg.id} is not something Brokey can open. It may not be installed, or it has no application to start.`);
+}
+
+// ── brokey --show ───────────────────────────────────────────────────────────
+//
+//   ?show=pacman:steam                    Steam's page, the pacman edition, Remove focused
+//   ?show=aur:visual-studio-code-bin      the same for an AUR edition
+//   ?show=winget:Valve.Steam              nothing installed matches: Installed with a notice
+//
+// A reference the window would refuse at the command line is ignored here.
+// Resolving follows crates/brokey/src/show.rs: Windows ids fold case, msix
+// takes a full name for its family name, everything else is exact.
+
+let showWaiting: PackageRef | null = (() => {
+  const text = PARAMS.get("show") ?? "";
+  const colon = text.indexOf(":");
+  const source = text.slice(0, colon).toLowerCase() as SourceKind;
+  const id = text.slice(colon + 1);
+  return colon > 0 && id && SOURCES.some((s) => s.kind === source) ? { source, id } : null;
+})();
+
+export async function show_take(): Promise<PackageRef | null> {
+  const taken = showWaiting;
+  showWaiting = null;
+  return taken;
+}
+
+function familyName(id: string): string {
+  const parts = id.split("_");
+  return parts.length === 5 && parts[0] && parts[4] ? `${parts[0]}_${parts[4]}` : id;
+}
+
+function sameId(source: SourceKind, wanted: string, have: string): boolean {
+  if (source === "msix") return familyName(wanted).toLowerCase() === familyName(have).toLowerCase();
+  if (source === "arp" || source === "winget" || source === "choco" || source === "scoop") return wanted.toLowerCase() === have.toLowerCase();
+  return wanted === have;
+}
+
+export async function show_resolve(reference: PackageRef): Promise<Shown | null> {
+  const { apps } = await installed();
+  for (const app of apps) {
+    const edition = app.editions.find((e) => e.package.installed && e.package.source === reference.source && sameId(reference.source, reference.id, e.package.id));
+    if (edition) return { app, edition: { source: edition.package.source, id: edition.package.id } };
+  }
+  return null;
 }
 
 export async function launcher_notices(): Promise<[SourceKind, string][]> {
