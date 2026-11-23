@@ -258,6 +258,11 @@ pub fn icon(e: &RawEntry, cache: &Path) -> Option<Picture> {
     Some(Picture::File(path))
 }
 
+/// The fact that names an entry's uninstall key, as [`package_id`] spells it.
+/// Every entry carries it, and so does a package manager's package that was
+/// matched to an entry, which is how `group.rs` joins the two exactly.
+pub const REGISTRY_KEY_FACT: &str = "Registry key";
+
 /// The `DisplayName` and `Publisher` Brokey's own MSI writes, which are the
 /// `Name` and `Manufacturer` of the `Package` element in
 /// `packaging/windows/brokey.wxs`. A test reads that file and fails if the
@@ -326,7 +331,7 @@ pub fn to_package(e: &RawEntry, cache: &Path) -> Package {
         p.facts
             .push(("Installed to".to_string(), dir.display().to_string()));
     }
-    p.facts.push(("Registry key".to_string(), package_id(e)));
+    p.facts.push((REGISTRY_KEY_FACT.to_string(), package_id(e)));
     p
 }
 
@@ -586,6 +591,13 @@ impl Source for Arp {
                     ),
                 )
             })
+    }
+
+    /// The Start Menu shortcut whose target lies inside the directory the
+    /// uninstaller lives in. See [`super::shortcut`].
+    fn launcher(&self, id: &str) -> Option<crate::launch::Launch> {
+        let entry = self.find(id)?;
+        super::shortcut::launch_for_entries(&[entry], &super::shortcut::start_menu())
     }
 
     /// Removal is the only operation this source has. Any other kind is

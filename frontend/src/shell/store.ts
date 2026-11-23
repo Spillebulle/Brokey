@@ -7,7 +7,8 @@ import { create } from "zustand";
 import * as api from "../api";
 import type { SelfUpdate, Settings, SourceStatus, SystemInfo } from "../types";
 
-export type View = "search" | "app" | "installed" | "updates" | "drivers" | "settings";
+/** "drivers" is Linux's machine page and "features" Windows's; the sidebar shows the one this machine has. */
+export type View = "search" | "app" | "installed" | "updates" | "drivers" | "features" | "settings";
 
 export interface Location {
   view: View;
@@ -15,7 +16,7 @@ export interface Location {
   appKey?: string;
 }
 
-const VIEWS: View[] = ["search", "app", "installed", "updates", "drivers", "settings"];
+const VIEWS: View[] = ["search", "app", "installed", "updates", "drivers", "features", "settings"];
 const HISTORY_LIMIT = 50;
 
 /** Only a browser has a query string; the window never does. Screenshots and the dev server use ?view=. */

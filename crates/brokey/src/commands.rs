@@ -23,8 +23,8 @@ use crate::settings::Settings;
 use crate::state::{AppState, PlanStatus};
 use brokey_core::updates::UpdateList;
 use brokey_core::{
-    DriversReport, Event, Op, Package, PackageRef, Plan, Query, SearchResult, SourceStatus,
-    SystemInfo,
+    DriversReport, Event, FeaturesReport, Op, Package, PackageRef, Plan, Query, SearchResult,
+    SourceStatus, SystemInfo,
 };
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Invoke;
@@ -54,6 +54,7 @@ pub fn handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + 'static 
         cancel_plan,
         active_plans,
         drivers,
+        features,
         settings_get,
         settings_set,
         self_update_check,
@@ -143,19 +144,7 @@ async fn launcher_notices(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<(brokey_core::SourceKind, String)>, String> {
     let state = state.inner().clone();
-    blocking(move || {
-        #[cfg(unix)]
-        {
-            Ok(state.store().launcher_notices())
-        }
-        #[cfg(windows)]
-        {
-            // No source lists applications a session cannot see yet.
-            let _ = state;
-            Ok(Vec::new())
-        }
-    })
-    .await
+    blocking(move || Ok(state.store().launcher_notices())).await
 }
 
 #[tauri::command]
@@ -204,6 +193,13 @@ fn active_plans(state: tauri::State<'_, AppState>) -> Result<Vec<PlanStatus>, St
 async fn drivers(state: tauri::State<'_, AppState>) -> Result<DriversReport, String> {
     let state = state.inner().clone();
     blocking(move || Ok(logic::drivers(&state))).await
+}
+
+/// The Features page, Windows's counterpart of the Drivers page. One WMI
+/// query; nothing is started.
+#[tauri::command]
+async fn features() -> Result<FeaturesReport, String> {
+    blocking(|| Ok(brokey_core::sources::windows::features::report())).await
 }
 
 #[tauri::command]
@@ -390,19 +386,10 @@ pub mod logic {
     }
 
     pub fn launch_targets(state: &AppState, refs: &[PackageRef]) -> Vec<Option<String>> {
-        #[cfg(unix)]
-        {
-            let store = state.store();
-            refs.iter()
-                .map(|r| store.launcher(r).map(|l| l.describe()))
-                .collect()
-        }
-        #[cfg(windows)]
-        {
-            // No source opens anything on Windows yet; see `open_app`.
-            let _ = state;
-            refs.iter().map(|_| None).collect()
-        }
+        let store = state.store();
+        refs.iter()
+            .map(|r| store.launcher(r).map(|l| l.describe()))
+            .collect()
     }
 
     /// Opening an application is not a transaction, so it does not go
@@ -411,25 +398,19 @@ pub mod logic {
     /// answer is waited for and a failure is a sentence; a command that runs
     /// for the application's lifetime (`flatpak run`) is started in a
     /// process group of its own and left to run, with a thread reaping it.
+    /// On Windows the shortcut, Apps folder entry or shim is handed to
+    /// `explorer.exe`; see [`brokey_core::launch`].
     pub fn open_app(state: &AppState, package: &PackageRef) -> Result<(), String> {
-        #[cfg(unix)]
-        {
-            let store = state.store();
-            let Some(launch) = store.launcher(package) else {
-                return not_something_to_open(package);
-            };
-            start(&launch)
-        }
-        #[cfg(windows)]
-        {
-            let _ = state;
-            not_something_to_open(package)
-        }
+        let store = state.store();
+        let Some(launch) = store.launcher(package) else {
+            return not_something_to_open(package);
+        };
+        start(&launch)
     }
 
     /// The sentence for a package with nothing to open: not installed
-    /// through a source that has a launcher, or (Windows, for now) no
-    /// source has one at all.
+    /// through a source that has a launcher, or nothing in it a person
+    /// opens.
     fn not_something_to_open(package: &PackageRef) -> Result<(), String> {
         Err(format!(
             "{} is not something Brokey can open. It may not be installed, or it has no application to start.",
@@ -495,6 +476,51 @@ pub mod logic {
             .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(not_started)?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
+    }
+
+    /// Start what a [`brokey_core::launch::Launch`] describes on Windows:
+    /// hand the shortcut, the Apps folder entry or the shim to
+    /// `explorer.exe`, which passes it to the running shell. The shell
+    /// starts the application at the user's own level whatever level
+    /// Brokey runs at, so this never elevates and never starts anything
+    /// elevated; it is not an elevation call site and has no `runas`.
+    /// Explorer's exit code says nothing (it is 1 when it worked), so a
+    /// shortcut or shim that has gone is caught before it is handed over.
+    #[cfg(windows)]
+    pub fn start(launch: &brokey_core::launch::Launch) -> Result<(), String> {
+        use brokey_core::launch::Launch;
+        use std::os::windows::process::CommandExt;
+        let (Launch::Shortcut(_) | Launch::Shim(_) | Launch::AppsFolder(_)) = launch else {
+            return Err(format!(
+                "{} is a Linux launcher and cannot be opened on Windows.",
+                launch.describe()
+            ));
+        };
+        if let Launch::Shortcut(path) | Launch::Shim(path) = launch
+            && !path.is_file()
+        {
+            return Err(format!(
+                "{} is no longer there, so Brokey cannot open it. It may have been removed or moved since the list was drawn.",
+                launch.describe()
+            ));
+        }
+        let spec = launch.command();
+        let argument = launch.windows_argument().unwrap_or_default();
+        // Quoted by hand: Explorer reads an unquoted comma as the end of a
+        // switch, and std quotes only an argument with a space in it. None
+        // of these can hold a quote: a path cannot, and `apps_folder`
+        // refuses one in an AUMID.
+        let mut child = std::process::Command::new(&spec.program)
+            .raw_arg(format!("\"{argument}\""))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Could not start {}: {e}.", spec.program))?;
         std::thread::spawn(move || {
             let _ = child.wait();
         });

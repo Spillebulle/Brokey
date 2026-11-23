@@ -909,6 +909,153 @@ impl Source for Choco {
     fn setup(&self) -> Option<Setup> {
         None
     }
+
+    /// A Start Menu shortcut into the package's own directory under `lib`
+    /// or into the install directory of an uninstall key its installer
+    /// added; see [`homes`].
+    fn launcher(&self, id: &str) -> Option<crate::launch::Launch> {
+        let n = read_installed(&self.lib_dir)
+            .into_iter()
+            .find(|n| n.id.eq_ignore_ascii_case(id))?;
+        let homes = homes(&self.lib_dir, &n);
+        super::shortcut::choose(&super::shortcut::start_menu(), &homes)
+            .map(|s| crate::launch::Launch::Shortcut(s.path.clone()))
+    }
+}
+
+/// Where an installed package's application lives: its own directory
+/// under `lib`, where a portable package unpacks its program, and the
+/// install directory of each uninstall key in the `.registry` snapshot
+/// Chocolatey took when the package's installer ran
+/// (`.chocolatey\<id>.<version>\.registry`). The snapshot names the very
+/// keys that install added, so the join to Add/Remove Programs is
+/// Chocolatey's own record and not a guess from the package's name.
+pub fn homes(lib_dir: &std::path::Path, n: &Nuspec) -> Vec<super::shortcut::Home> {
+    let name = n.title.clone().unwrap_or_else(|| n.id.clone());
+    let mut out = vec![super::shortcut::Home {
+        dir: lib_dir.join(&n.id).display().to_string(),
+        uninstaller: None,
+        name: Some(name.clone()),
+    }];
+    let snapshot = lib_dir
+        .parent()
+        .and_then(|root| state_dir(&root.join(".chocolatey"), n))
+        .and_then(|dir| std::fs::read(dir.join(".registry")).ok());
+    for e in snapshot
+        .as_deref()
+        .map(parse_registry_snapshot)
+        .unwrap_or_default()
+    {
+        if let Some(mut home) = super::shortcut::Home::of(&e) {
+            home.name.get_or_insert_with(|| name.clone());
+            out.push(home);
+        }
+    }
+    out
+}
+
+/// The package's directory under `.chocolatey`, named `<id>.<version>`.
+/// Chocolatey names it by the version with trailing zero parts dropped
+/// (`hxd.2.5.0` for a `.nuspec` that says `2.5.0.0`), so the versions are
+/// compared that way and the id without regard to case.
+fn state_dir(state: &std::path::Path, n: &Nuspec) -> Option<PathBuf> {
+    fn trimmed(v: &str) -> &str {
+        let mut v = v.trim();
+        while let Some(shorter) = v.strip_suffix(".0") {
+            v = shorter;
+        }
+        v
+    }
+    let prefix = format!("{}.", n.id.to_lowercase());
+    std::fs::read_dir(state).ok()?.flatten().find_map(|entry| {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        let version = name.strip_prefix(&prefix)?;
+        (trimmed(version) == trimmed(&n.version.to_lowercase())).then(|| entry.path())
+    })
+}
+
+/// The uninstall keys in a `.registry` snapshot, as far as finding the
+/// application needs: the key's path, `InstallLocation` and
+/// `UninstallString`. A snapshot that is not well-formed gives the keys
+/// read before the fault, and none at all is not an error: the package
+/// still has its own directory to look in.
+pub fn parse_registry_snapshot(bytes: &[u8]) -> Vec<super::arp::RawEntry> {
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    let mut reader = Reader::from_reader(bytes);
+    let mut buf = Vec::new();
+    let mut out = Vec::new();
+    // KeyPath, InstallLocation, UninstallString of the key being read.
+    let mut key: Option<[String; 3]> = None;
+    let mut field: Option<usize> = None;
+    let mut text = String::new();
+    while let Ok(event) = reader.read_event_into(&mut buf) {
+        match event {
+            Event::Start(e) => match e.local_name().into_inner() {
+                "key" => key = Some(Default::default()),
+                "KeyPath" => field = Some(0),
+                "InstallLocation" => field = Some(1),
+                "UninstallString" => field = Some(2),
+                _ => field = None,
+            },
+            Event::Text(t) if field.is_some() => text.push_str(&t),
+            Event::CData(t) if field.is_some() => text.push_str(&t),
+            Event::GeneralRef(r) if field.is_some() => append_ref(&mut text, &r),
+            Event::End(e) => {
+                if let (Some(i), Some(values)) = (field.take(), key.as_mut()) {
+                    values[i] = text.trim().to_string();
+                }
+                text.clear();
+                if e.local_name().into_inner() == "key"
+                    && let Some([path, location, uninstall]) = key.take()
+                    && let Some(e) = snapshot_entry(&path, &location, &uninstall)
+                {
+                    out.push(e);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// One snapshot key as an uninstall entry. `None` when its path is not
+/// under one of the three uninstall keys.
+fn snapshot_entry(path: &str, location: &str, uninstall: &str) -> Option<super::arp::RawEntry> {
+    use super::arp::Hive;
+    let upper = path.to_ascii_uppercase();
+    let hive = if upper.starts_with(r"HKEY_CURRENT_USER\") {
+        Hive::User
+    } else if upper.starts_with(r"HKEY_LOCAL_MACHINE\") && upper.contains(r"\WOW6432NODE\") {
+        Hive::Machine32
+    } else if upper.starts_with(r"HKEY_LOCAL_MACHINE\") {
+        Hive::Machine
+    } else {
+        return None;
+    };
+    let (parent, key_name) = path.rsplit_once('\\')?;
+    if !parent.to_ascii_uppercase().ends_with(r"\UNINSTALL") || key_name.is_empty() {
+        return None;
+    }
+    let some = |s: &str| (!s.is_empty()).then(|| s.to_string());
+    Some(super::arp::RawEntry {
+        hive,
+        key_name: key_name.to_string(),
+        display_name: None,
+        display_version: None,
+        publisher: None,
+        install_location: some(location),
+        uninstall_string: some(uninstall),
+        quiet_uninstall_string: None,
+        windows_installer: None,
+        display_icon: None,
+        system_component: None,
+        parent_key_name: None,
+        release_type: None,
+        estimated_size: None,
+        url_info_about: None,
+    })
 }
 
 #[cfg(test)]
@@ -1751,5 +1898,108 @@ mod tests {
         ] {
             assert!(choco.plan(&op).unwrap().is_empty(), "{op:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod launcher_tests {
+    use super::*;
+    use crate::sources::windows::arp::Hive;
+    use crate::sources::windows::shortcut::{Shortcut, choose};
+
+    fn snapshot() -> Vec<u8> {
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/choco/hxd.registry"
+        ))
+        .expect("the fixture is checked in")
+    }
+
+    fn hxd() -> Nuspec {
+        Nuspec {
+            id: "hxd".to_string(),
+            version: "2.5.0".to_string(),
+            title: Some("HxD Hex Editor".to_string()),
+            ..Nuspec::default()
+        }
+    }
+
+    fn lnk(path: &str, target: &str) -> Shortcut {
+        Shortcut {
+            path: path.into(),
+            target: target.into(),
+            arguments: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_registry_snapshot_names_the_key_its_installer_added() {
+        let keys = parse_registry_snapshot(&snapshot());
+        assert_eq!(keys.len(), 1);
+        let k = &keys[0];
+        assert_eq!(k.hive, Hive::Machine);
+        assert_eq!(k.key_name, "HxD_is1");
+        assert_eq!(
+            k.install_location.as_deref(),
+            Some(r"C:\Program Files\HxD\")
+        );
+        assert_eq!(
+            k.uninstall_string.as_deref(),
+            Some(r#""C:\Program Files\HxD\unins000.exe" /SILENT"#)
+        );
+    }
+
+    #[test]
+    fn a_snapshot_that_is_not_one_gives_no_keys() {
+        assert!(parse_registry_snapshot(b"").is_empty());
+        assert!(parse_registry_snapshot(b"<not xml").is_empty());
+        let elsewhere = br"<registrySnapshot><keys><key><KeyPath>HKEY_LOCAL_MACHINE\SOFTWARE\Something\Else</KeyPath></key></keys></registrySnapshot>";
+        assert!(parse_registry_snapshot(elsewhere).is_empty());
+        let wow = br"<registrySnapshot><keys><key><KeyPath>HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\X</KeyPath></key></keys></registrySnapshot>";
+        assert_eq!(parse_registry_snapshot(wow)[0].hive, Hive::Machine32);
+    }
+
+    #[test]
+    fn a_package_s_homes_are_its_lib_directory_and_its_installer_s_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let lib = root.path().join("lib");
+        let state = root.path().join(".chocolatey").join("hxd.2.5.0");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join(".registry"), snapshot()).unwrap();
+        let found = homes(&lib, &hxd());
+        let dirs: Vec<String> = found.iter().map(|h| h.dir.clone()).collect();
+        assert_eq!(
+            dirs,
+            [
+                lib.join("hxd").display().to_string(),
+                r"C:\Program Files\HxD".to_string()
+            ]
+        );
+        let menu = vec![
+            lnk(r"M\HxD.lnk", r"C:\Program Files\HxD\HxD.exe"),
+            lnk(r"M\Uninstall HxD.lnk", r"C:\Program Files\HxD\unins000.exe"),
+        ];
+        assert_eq!(
+            choose(&menu, &found).map(|s| s.path.clone()),
+            Some(r"M\HxD.lnk".into())
+        );
+        let four_parts = Nuspec {
+            version: "2.5.0.0".to_string(),
+            ..hxd()
+        };
+        assert_eq!(
+            homes(&lib, &four_parts).len(),
+            2,
+            "Chocolatey names the directory without the trailing zero"
+        );
+        let other = Nuspec {
+            version: "9.9.9".to_string(),
+            ..hxd()
+        };
+        assert_eq!(
+            homes(&lib, &other).len(),
+            1,
+            "another version's snapshot is not this one's"
+        );
     }
 }

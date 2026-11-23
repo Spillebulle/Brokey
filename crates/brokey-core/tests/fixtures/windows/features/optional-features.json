@@ -1,0 +1,632 @@
+[
+    {
+        "Name":  "AppServerClient",
+        "Caption":  "Remote Desktop Services Application Server",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Client-DeviceLockdown",
+        "Caption":  "Device Lockdown",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Client-EmbeddedBootExp",
+        "Caption":  "Unbranded Boot",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Client-EmbeddedLogon",
+        "Caption":  "Custom Logon",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Client-EmbeddedShellLauncher",
+        "Caption":  "Shell Launcher",
+        "InstallState":  2
+    },
+    {
+        "Name":  "ClientForNFS-Infrastructure",
+        "Caption":  "Client for NFS",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Client-KeyboardFilter",
+        "Caption":  "Keyboard Filter",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Client-ProjFS",
+        "Caption":  "Windows Projected File System",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Client-UnifiedWriteFilter",
+        "Caption":  "Unified Write Filter",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Containers",
+        "Caption":  "Containers",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Containers-DisposableClientVM",
+        "Caption":  "Windows Sandbox",
+        "InstallState":  1
+    },
+    {
+        "Name":  "Containers-HNS",
+        "Caption":  "",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Containers-SDN",
+        "Caption":  "",
+        "InstallState":  2
+    },
+    {
+        "Name":  "DataCenterBridging",
+        "Caption":  "Data Center Bridging",
+        "InstallState":  2
+    },
+    {
+        "Name":  "DirectoryServices-ADAM-Client",
+        "Caption":  "Active Directory Lightweight Directory Services",
+        "InstallState":  2
+    },
+    {
+        "Name":  "DirectPlay",
+        "Caption":  "DirectPlay",
+        "InstallState":  2
+    },
+    {
+        "Name":  "HostGuardian",
+        "Caption":  "Guarded Host",
+        "InstallState":  2
+    },
+    {
+        "Name":  "HypervisorPlatform",
+        "Caption":  "Windows Hypervisor Platform",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-ApplicationDevelopment",
+        "Caption":  "Application Development Features",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-ApplicationInit",
+        "Caption":  "Application Initialization",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-ASP",
+        "Caption":  "ASP",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-ASPNET45",
+        "Caption":  "ASP.NET 4.8",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-BasicAuthentication",
+        "Caption":  "Basic Authentication",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-CertProvider",
+        "Caption":  "Centralized SSL Certificate Support",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-CGI",
+        "Caption":  "CGI",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-ClientCertificateMappingAuthentication",
+        "Caption":  "Client Certificate Mapping Authentication",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-CommonHttpFeatures",
+        "Caption":  "Common HTTP Features",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-CustomLogging",
+        "Caption":  "Custom Logging",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-DefaultDocument",
+        "Caption":  "Default Document",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-DigestAuthentication",
+        "Caption":  "Digest Authentication",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-DirectoryBrowsing",
+        "Caption":  "Directory Browsing",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-FTPExtensibility",
+        "Caption":  "FTP Extensibility",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-FTPServer",
+        "Caption":  "FTP Server",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-FTPSvc",
+        "Caption":  "FTP Service",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-HealthAndDiagnostics",
+        "Caption":  "Health and Diagnostics",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-HostableWebCore",
+        "Caption":  "Internet Information Services Hostable Web Core",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-HttpCompressionDynamic",
+        "Caption":  "Dynamic Content Compression",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-HttpCompressionStatic",
+        "Caption":  "Static Content Compression",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-HttpErrors",
+        "Caption":  "HTTP Errors",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-HttpLogging",
+        "Caption":  "HTTP Logging",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-HttpRedirect",
+        "Caption":  "HTTP Redirection",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-HttpTracing",
+        "Caption":  "Tracing",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-IIS6ManagementCompatibility",
+        "Caption":  "IIS 6 Management Compatibility",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-IISCertificateMappingAuthentication",
+        "Caption":  "IIS Client Certificate Mapping Authentication",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-IPSecurity",
+        "Caption":  "IP Security",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-ISAPIExtensions",
+        "Caption":  "ISAPI Extensions",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-ISAPIFilter",
+        "Caption":  "ISAPI Filters",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-LegacyScripts",
+        "Caption":  "IIS 6 Scripting Tools",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-LoggingLibraries",
+        "Caption":  "Logging Tools",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-ManagementConsole",
+        "Caption":  "IIS Management Console",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-ManagementScriptingTools",
+        "Caption":  "IIS Management Scripts and Tools",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-ManagementService",
+        "Caption":  "IIS Management Service",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-Metabase",
+        "Caption":  "IIS Metabase and IIS 6 configuration compatibility",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-NetFxExtensibility45",
+        "Caption":  ".NET Extensibility 4.8",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-ODBCLogging",
+        "Caption":  "ODBC Logging",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-Performance",
+        "Caption":  "Performance Features",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-RequestFiltering",
+        "Caption":  "Request Filtering",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-RequestMonitor",
+        "Caption":  "Request Monitor",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-Security",
+        "Caption":  "Security",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-ServerSideIncludes",
+        "Caption":  "Server-Side Includes",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-StaticContent",
+        "Caption":  "Static Content",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-URLAuthorization",
+        "Caption":  "URL Authorization",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-WebDAV",
+        "Caption":  "WebDAV Publishing",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-WebServer",
+        "Caption":  "World Wide Web Services",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-WebServerManagementTools",
+        "Caption":  "Web Management Tools",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-WebServerRole",
+        "Caption":  "Internet Information Services",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-WebSockets",
+        "Caption":  "WebSocket Protocol",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-WindowsAuthentication",
+        "Caption":  "Windows Authentication",
+        "InstallState":  2
+    },
+    {
+        "Name":  "IIS-WMICompatibility",
+        "Caption":  "IIS 6 WMI Compatibility",
+        "InstallState":  2
+    },
+    {
+        "Name":  "LegacyComponents",
+        "Caption":  "Legacy Components",
+        "InstallState":  2
+    },
+    {
+        "Name":  "MediaPlayback",
+        "Caption":  "Media Features",
+        "InstallState":  1
+    },
+    {
+        "Name":  "Microsoft-Hyper-V",
+        "Caption":  "Hyper-V Platform",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Microsoft-Hyper-V-All",
+        "Caption":  "Hyper-V",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Microsoft-Hyper-V-Hypervisor",
+        "Caption":  "Hyper-V Hypervisor",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Microsoft-Hyper-V-Management-Clients",
+        "Caption":  "Hyper-V GUI Management Tools",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Microsoft-Hyper-V-Management-PowerShell",
+        "Caption":  "Hyper-V Module for Windows PowerShell",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Microsoft-Hyper-V-Services",
+        "Caption":  "Hyper-V Services",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Microsoft-Hyper-V-Tools-All",
+        "Caption":  "Hyper-V Management Tools",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Microsoft-Windows-Subsystem-Linux",
+        "Caption":  "Windows Subsystem for Linux (WSL1 support)",
+        "InstallState":  1
+    },
+    {
+        "Name":  "MSMQ-ADIntegration",
+        "Caption":  "MSMQ Active Directory Domain Services Integration",
+        "InstallState":  2
+    },
+    {
+        "Name":  "MSMQ-Container",
+        "Caption":  "Microsoft Message Queue (MSMQ) Server",
+        "InstallState":  2
+    },
+    {
+        "Name":  "MSMQ-DCOMProxy",
+        "Caption":  "MSMQ DCOM Proxy",
+        "InstallState":  2
+    },
+    {
+        "Name":  "MSMQ-HTTP",
+        "Caption":  "MSMQ HTTP Support",
+        "InstallState":  2
+    },
+    {
+        "Name":  "MSMQ-Multicast",
+        "Caption":  "Multicasting Support",
+        "InstallState":  2
+    },
+    {
+        "Name":  "MSMQ-Server",
+        "Caption":  "Microsoft Message Queue (MSMQ) Server Core",
+        "InstallState":  2
+    },
+    {
+        "Name":  "MSMQ-Triggers",
+        "Caption":  "MSMQ Triggers",
+        "InstallState":  2
+    },
+    {
+        "Name":  "MSRDC-Infrastructure",
+        "Caption":  "Remote Differential Compression API Support",
+        "InstallState":  1
+    },
+    {
+        "Name":  "MultiPoint-Connector",
+        "Caption":  "MultiPoint Connector",
+        "InstallState":  2
+    },
+    {
+        "Name":  "MultiPoint-Connector-Services",
+        "Caption":  "MultiPoint Connector Services",
+        "InstallState":  2
+    },
+    {
+        "Name":  "MultiPoint-Tools",
+        "Caption":  "MultiPoint Manager and MultiPoint Dashboard",
+        "InstallState":  2
+    },
+    {
+        "Name":  "NetFx4-AdvSrvs",
+        "Caption":  ".NET Framework 4.8 Advanced Services",
+        "InstallState":  1
+    },
+    {
+        "Name":  "NetFx4Extended-ASPNET45",
+        "Caption":  "ASP.NET 4.8",
+        "InstallState":  2
+    },
+    {
+        "Name":  "NFS-Administration",
+        "Caption":  "Administrative Tools",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Printing-Foundation-Features",
+        "Caption":  "Print and Document Services",
+        "InstallState":  1
+    },
+    {
+        "Name":  "Printing-Foundation-InternetPrinting-Client",
+        "Caption":  "Internet Printing Client",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Printing-Foundation-LPDPrintService",
+        "Caption":  "LPD Print Service",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Printing-Foundation-LPRPortMonitor",
+        "Caption":  "LPR Port Monitor",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Printing-PrintToPDFServices-Features",
+        "Caption":  "Microsoft Print to PDF",
+        "InstallState":  1
+    },
+    {
+        "Name":  "Printing-XPSServices-Features",
+        "Caption":  "Microsoft XPS Document Writer",
+        "InstallState":  2
+    },
+    {
+        "Name":  "SearchEngine-Client-Package",
+        "Caption":  "Windows Search",
+        "InstallState":  1
+    },
+    {
+        "Name":  "ServicesForNFS-ClientOnly",
+        "Caption":  "Services for NFS",
+        "InstallState":  2
+    },
+    {
+        "Name":  "SimpleTCP",
+        "Caption":  "Simple TCPIP services (i.e. echo, daytime etc)",
+        "InstallState":  2
+    },
+    {
+        "Name":  "SMB1Protocol",
+        "Caption":  "SMB 1.0/CIFS File Sharing Support",
+        "InstallState":  2
+    },
+    {
+        "Name":  "SMB1Protocol-Client",
+        "Caption":  "SMB 1.0/CIFS Client",
+        "InstallState":  2
+    },
+    {
+        "Name":  "SMB1Protocol-Deprecation",
+        "Caption":  "SMB 1.0/CIFS Automatic Removal",
+        "InstallState":  2
+    },
+    {
+        "Name":  "SMB1Protocol-Server",
+        "Caption":  "SMB 1.0/CIFS Server",
+        "InstallState":  2
+    },
+    {
+        "Name":  "SmbDirect",
+        "Caption":  "SMB Direct",
+        "InstallState":  1
+    },
+    {
+        "Name":  "Sysmon",
+        "Caption":  "Sysmon",
+        "InstallState":  2
+    },
+    {
+        "Name":  "Sysmon-Service",
+        "Caption":  "",
+        "InstallState":  2
+    },
+    {
+        "Name":  "TelnetClient",
+        "Caption":  "Telnet Client",
+        "InstallState":  2
+    },
+    {
+        "Name":  "TFTP",
+        "Caption":  "TFTP Client",
+        "InstallState":  2
+    },
+    {
+        "Name":  "TIFFIFilter",
+        "Caption":  "Windows TIFF IFilter",
+        "InstallState":  2
+    },
+    {
+        "Name":  "VirtualMachinePlatform",
+        "Caption":  "Virtual Machine Platform",
+        "InstallState":  1
+    },
+    {
+        "Name":  "WAS-ConfigurationAPI",
+        "Caption":  "Configuration APIs",
+        "InstallState":  2
+    },
+    {
+        "Name":  "WAS-ProcessModel",
+        "Caption":  "Process Model",
+        "InstallState":  2
+    },
+    {
+        "Name":  "WAS-WindowsActivationService",
+        "Caption":  "Windows Process Activation Service",
+        "InstallState":  2
+    },
+    {
+        "Name":  "WCF-HTTP-Activation45",
+        "Caption":  "HTTP Activation",
+        "InstallState":  2
+    },
+    {
+        "Name":  "WCF-MSMQ-Activation45",
+        "Caption":  "Message Queuing (MSMQ) Activation",
+        "InstallState":  2
+    },
+    {
+        "Name":  "WCF-Pipe-Activation45",
+        "Caption":  "Named Pipe Activation",
+        "InstallState":  2
+    },
+    {
+        "Name":  "WCF-Services45",
+        "Caption":  "WCF Services",
+        "InstallState":  1
+    },
+    {
+        "Name":  "WCF-TCP-Activation45",
+        "Caption":  "TCP Activation",
+        "InstallState":  2
+    },
+    {
+        "Name":  "WCF-TCP-PortSharing45",
+        "Caption":  "TCP Port Sharing",
+        "InstallState":  1
+    },
+    {
+        "Name":  "Windows-Defender-Default-Definitions",
+        "Caption":  "",
+        "InstallState":  3
+    },
+    {
+        "Name":  "Windows-Identity-Foundation",
+        "Caption":  "Windows Identity Foundation 3.5",
+        "InstallState":  2
+    },
+    {
+        "Name":  "WindowsMediaPlayer",
+        "Caption":  "Windows Media Player Legacy (App)",
+        "InstallState":  1
+    },
+    {
+        "Name":  "WorkFolders-Client",
+        "Caption":  "Work Folders Client",
+        "InstallState":  1
+    }
+]

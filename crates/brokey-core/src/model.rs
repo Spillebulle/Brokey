@@ -238,6 +238,11 @@ pub enum MatchedBy {
     AppStream,
     /// The same normalised name (`steam`, `steam-bin`, `com.valvesoftware.Steam`).
     Name,
+    /// The same Add/Remove Programs uninstall key: a package manager matched
+    /// its package to the entry that install left in the registry, by
+    /// product code or by name and publisher together. Exact, like an
+    /// AppStream join.
+    Registry,
     /// The only member; nothing to match.
     Alone,
 }
@@ -528,6 +533,43 @@ pub struct DriversReport {
     pub firmware_available: bool,
     pub firmware_note: Option<String>,
     pub firmware: Vec<FirmwareDevice>,
+}
+
+/// Where a Windows optional feature stands. `Absent` is Windows's
+/// "disabled with payload removed": turning it on downloads it from
+/// Windows Update first, which the page says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FeatureState {
+    Enabled,
+    Disabled,
+    Absent,
+    Unknown,
+}
+
+/// One Windows optional feature, or one of the few Windows capabilities
+/// (the OpenSSH client and server) the Features page treats the same way.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsFeature {
+    /// Windows's own name for it: "Microsoft-Windows-Subsystem-Linux",
+    /// "OpenSSH.Client~~~~0.0.1.0". What a plan's `PackageRef` carries.
+    pub id: String,
+    /// What a person calls it: "Windows Subsystem for Linux".
+    pub name: String,
+    /// One sentence for the well-known ones, `None` for the rest.
+    pub summary: Option<String>,
+    pub state: FeatureState,
+    /// One of the handful the page lists first.
+    pub well_known: bool,
+}
+
+/// What the Features page draws, Windows's counterpart of [`DriversReport`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeaturesReport {
+    pub available: bool,
+    /// One sentence for the page when the list could not be read.
+    pub note: Option<String>,
+    pub features: Vec<WindowsFeature>,
 }
 
 #[cfg(test)]

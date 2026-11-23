@@ -1698,3 +1698,121 @@ fn gimp_fixture_groups_as_the_page_expects() {
     );
     assert!(close(gmic.relevance, 0.9));
 }
+
+// Windows: the Add/Remove Programs uninstall key.
+
+/// An installed package on Windows the way the two sources give it: winget's
+/// edition named by the catalogue, the registry's by its `DisplayName`, both
+/// naming the uninstall key. The values are the development machine's.
+fn arp_entry(key: &str, name: &str, version: &str) -> Package {
+    let mut p = app(SourceKind::Arp, key, name);
+    p.installed = true;
+    p.installed_version = Some(version.to_string());
+    p.facts.push(("Registry key".to_string(), key.to_string()));
+    p
+}
+
+fn winget_installed(id: &str, name: &str, version: &str, key: Option<&str>) -> Package {
+    let mut p = app(SourceKind::Winget, id, name);
+    p.installed = true;
+    p.installed_version = Some(version.to_string());
+    if let Some(key) = key {
+        p.facts.push(("Registry key".to_string(), key.to_string()));
+    }
+    p
+}
+
+/// The rule fires: `Advanced IP Scanner` and `Advanced IP Scanner 2.5.1`
+/// share no name key, and before this rule they were two rows on the
+/// Installed page. The uninstall key both name is exact, so the join says
+/// so with full confidence rather than "matched by name".
+#[test]
+fn a_shared_uninstall_key_joins_editions_whose_names_differ() {
+    let key = r"HKLM32\{8A6B3B7E-3E2D-4E5B-9C47-5F2B8A2C1D10}";
+    let apps = group(
+        vec![
+            arp_entry(key, "Advanced IP Scanner 2.5.1", "2.5.4594.1"),
+            winget_installed(
+                "Famatech.AdvancedIPScanner",
+                "Advanced IP Scanner",
+                "2.5.4594.1",
+                Some(key),
+            ),
+        ],
+        "",
+    );
+    assert_eq!(names(&apps), vec!["Advanced IP Scanner"]);
+    let mut got = editions(&apps[0]);
+    got.sort_by_key(|(s, _, _)| s.id());
+    assert_eq!(
+        got,
+        vec![
+            (SourceKind::Arp, MatchedBy::Registry, 1.0),
+            (SourceKind::Winget, MatchedBy::Registry, 1.0),
+        ]
+    );
+}
+
+/// It must not fire across two different keys, even with the same name:
+/// two versions of Beeper installed side by side are two entries, and each
+/// winget package joins only the entry it was matched to.
+#[test]
+fn different_uninstall_keys_stay_apart_whatever_the_names() {
+    let (old, new) = (r"HKCU\beeper-3", r"HKCU\beeper-4");
+    let apps = group(
+        vec![
+            arp_entry(old, "Beeper 3.111.7", "3.111.7"),
+            arp_entry(new, "Beeper 4.2.957", "4.2.957"),
+            winget_installed("Beeper.Beeper.3", "Beeper", "3.111.7", Some(old)),
+            winget_installed("Beeper.Beeper", "Beeper", "4.2.957", Some(new)),
+        ],
+        "",
+    );
+    assert_eq!(apps.len(), 2, "{:?}", names(&apps));
+    for a in &apps {
+        let keys: Vec<&str> = a
+            .editions
+            .iter()
+            .flat_map(|e| e.package.facts.iter())
+            .filter(|(k, _)| k == "Registry key")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        assert_eq!(keys[0], keys[1], "one entry per row: {keys:?}");
+    }
+}
+
+/// Nor does it fire for a package with no key, or for an entry nothing was
+/// matched to: those fall to the name rule as before, and `7-Zip` and
+/// `7-Zip 26.03 (x64)` share no name key.
+#[test]
+fn without_a_shared_key_nothing_joins_on_the_registry() {
+    let apps = group(
+        vec![
+            arp_entry(r"HKLM\7-Zip", "7-Zip 26.03 (x64)", "26.03"),
+            winget_installed("7zip.7zip", "7-Zip", "26.03", None),
+        ],
+        "",
+    );
+    assert_eq!(apps.len(), 2);
+    assert!(
+        apps.iter()
+            .all(|a| a.editions.len() == 1 && a.editions[0].matched_by == MatchedBy::Alone)
+    );
+}
+
+/// One source never lists one entry twice, and if a source ever repeats a key
+/// across two of its own packages the registry rule does not join them: the
+/// rule is across sources only, as the name rule is.
+#[test]
+fn one_source_naming_one_key_twice_is_not_joined_by_it() {
+    let key = r"HKLM\Something";
+    let apps = group(
+        vec![
+            winget_installed("Vendor.One", "One", "1.0", Some(key)),
+            winget_installed("Vendor.Two", "Two", "1.0", Some(key)),
+        ],
+        "",
+    );
+    assert_eq!(apps.len(), 2);
+}

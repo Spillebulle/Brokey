@@ -422,6 +422,7 @@ pub fn check_step(step: &Step, allowed: &Allowed) -> Result<(), String> {
     match step.source {
         SourceKind::Winget => check_winget(&step.command)?,
         SourceKind::Choco => check_choco(&step.command)?,
+        SourceKind::Features => check_features(&step.command)?,
         SourceKind::Arp => {
             if !allowed.removals.contains(&step.command) {
                 return Err(not_allowed(&step.command.program));
@@ -540,6 +541,40 @@ fn check_choco(command: &Command) -> Result<(), String> {
         Ok(())
     } else {
         Err(not_a_choco_command(&describe(command)))
+    }
+}
+
+/// Whether `command` is one the Features source would have built: DISM
+/// from the system directory, turning one feature or one known capability
+/// on or off, rebuilt from the command's own id and compared whole.
+///
+/// Stricter than the winget and Chocolatey arms in one respect. Those
+/// rebuild with the command's own program, because winget and Chocolatey
+/// live wherever they were installed; DISM lives in exactly one place, so
+/// the program must be
+/// [`dism_program`](crate::sources::windows::features::dism_program)
+/// itself, and a `dism.exe` anywhere else is refused before its arguments
+/// are read. The id is the one argument that varies, and
+/// [`step`](crate::sources::windows::features::step) refuses to build one
+/// that could be read as an option, so an id such as `/Source:x`, or a
+/// capability that is not one of the two the source knows, rebuilds into
+/// nothing and is refused. `/LimitAccess`, `/Source`, `/Image`,
+/// `/Cleanup-Image` and every other DISM option are refused by the same
+/// comparison, because the source never builds them.
+#[cfg(windows)]
+fn check_features(command: &Command) -> Result<(), String> {
+    use crate::sources::windows::features::{dism_program, read_back, step};
+
+    if command.program != dism_program() {
+        return Err(not_allowed(&command.program));
+    }
+    let refused = || not_a_features_command(&describe(command));
+    let (change, id) = read_back(command).ok_or_else(refused)?;
+    let expected = step(change, &id, "", &command.program).ok_or_else(refused)?;
+    if *command == expected.command {
+        Ok(())
+    } else {
+        Err(refused())
     }
 }
 
@@ -1301,13 +1336,24 @@ fn not_a_choco_command(what: &str) -> String {
     )
 }
 
+/// The sentence a DISM step Brokey did not build produces, naming the
+/// whole command for the reason the winget one does.
+#[cfg(windows)]
+fn not_a_features_command(what: &str) -> String {
+    format!(
+        "The helper refused a DISM step Brokey did not build: {what}. Only turning one Windows \
+         feature on or off, exactly as the Features source builds it, may run as Administrator."
+    )
+}
+
 /// The one sentence a refusal produces, in the register the Linux list
 /// uses: what was refused, and what the rule is.
 #[cfg(windows)]
 fn not_allowed(what: &str) -> String {
     format!(
-        "The helper refused a step it does not allow: {what}. Only winget, Chocolatey and a \
-         removal Windows itself recorded may run as Administrator."
+        "The helper refused a step it does not allow: {what}. Only winget, Chocolatey, DISM \
+         turning a Windows feature on or off, and a removal Windows itself recorded may run as \
+         Administrator."
     )
 }
 
@@ -3463,5 +3509,168 @@ mod windows_tests {
             "the winget this machine really runs is one only an administrator can replace"
         );
         eprintln!("admitted: {program}");
+    }
+
+    // ---------------------------------------------------------- features
+
+    fn features_step(change: crate::sources::windows::features::Change, id: &str) -> Step {
+        use crate::sources::windows::features::{dism_program, step};
+        step(change, id, "Test", &dism_program()).expect("a valid id builds a step")
+    }
+
+    /// Turning a feature or a known capability on and off, exactly as the
+    /// source builds it, is admitted, against the real `dism.exe` in the
+    /// system directory, which only an administrator can replace.
+    #[test]
+    fn the_features_steps_the_source_builds_are_allowed() {
+        use crate::sources::windows::features::Change;
+        for change in [Change::On, Change::Off] {
+            for id in [
+                "Microsoft-Windows-Subsystem-Linux",
+                "NetFx3",
+                "OpenSSH.Client~~~~0.0.1.0",
+            ] {
+                let plan = plan_of(vec![features_step(change, id)]);
+                assert_eq!(validate(&plan), Ok(()), "{change:?} {id} should be allowed");
+            }
+        }
+    }
+
+    /// A `dism.exe` that is not the system's is refused before its
+    /// arguments are read, whatever they are.
+    #[test]
+    fn a_dism_anywhere_but_the_system_directory_is_refused() {
+        use crate::sources::windows::features::Change;
+        for program in [
+            r"C:\Users\me\Downloads\dism.exe",
+            r"C:\Windows\System32\cmd.exe",
+            "dism.exe",
+            r"\\somewhere\share\dism.exe",
+        ] {
+            let mut step = features_step(Change::On, "NetFx3");
+            step.command.program = program.to_string();
+            assert_eq!(
+                check_step(&step, &Allowed::system()),
+                Err(not_allowed(program)),
+                "{program}"
+            );
+        }
+    }
+
+    /// Every way of changing the arguments is refused: another verb, an
+    /// extra option pointing DISM at a source of the caller's choosing, a
+    /// missing `/NoRestart`, an id that is an option, a capability the
+    /// source does not know, an offline image, and a working directory or
+    /// an environment.
+    #[test]
+    fn a_dism_command_the_source_never_builds_is_refused() {
+        use crate::sources::windows::features::{Change, dism_program};
+        let dism = dism_program();
+        let shapes: Vec<Vec<&str>> = vec![
+            vec![],
+            vec!["/Online", "/Cleanup-Image", "/RestoreHealth"],
+            vec![
+                "/English",
+                "/Online",
+                "/Enable-Feature",
+                "/FeatureName:NetFx3",
+                "/All",
+                "/NoRestart",
+                r"/Source:\\host\share",
+            ],
+            vec![
+                "/English",
+                "/Online",
+                "/Enable-Feature",
+                "/FeatureName:NetFx3",
+                "/All",
+                "/LimitAccess",
+                "/NoRestart",
+            ],
+            vec![
+                "/English",
+                "/Online",
+                "/Enable-Feature",
+                "/FeatureName:NetFx3",
+                "/All",
+            ],
+            vec![
+                "/English",
+                "/Online",
+                "/Enable-Feature",
+                "/FeatureName:NetFx3",
+                "/NoRestart",
+            ],
+            vec![
+                "/English",
+                "/Online",
+                "/Enable-Feature",
+                "/FeatureName:/Source:x",
+                "/All",
+                "/NoRestart",
+            ],
+            vec![
+                "/English",
+                "/Online",
+                "/Enable-Feature",
+                "/FeatureName:",
+                "/All",
+                "/NoRestart",
+            ],
+            vec![
+                "/English",
+                "/Online",
+                "/Add-Capability",
+                "/CapabilityName:Some.Capability~~~~1.0",
+                "/NoRestart",
+            ],
+            vec![
+                "/English",
+                "/Online",
+                "/Add-Capability",
+                "/FeatureName:NetFx3",
+                "/NoRestart",
+            ],
+            vec![
+                "/English",
+                r"/Image:C:\mount",
+                "/Enable-Feature",
+                "/FeatureName:NetFx3",
+                "/All",
+                "/NoRestart",
+            ],
+        ];
+        for args in shapes {
+            let step = step_from(SourceKind::Features, &dism, &args);
+            assert_eq!(
+                check_step(&step, &Allowed::system()),
+                Err(not_a_features_command(&describe(&step.command))),
+                "{args:?}"
+            );
+        }
+        let mut with_cwd = features_step(Change::On, "NetFx3");
+        with_cwd.command.cwd = Some(r"C:\Users\me".into());
+        assert!(check_step(&with_cwd, &Allowed::system()).is_err());
+        let mut with_env = features_step(Change::On, "NetFx3");
+        with_env.command.env = vec![("PATH".into(), r"C:\Users\me".into())];
+        assert!(check_step(&with_env, &Allowed::system()).is_err());
+    }
+
+    /// A genuine DISM command labelled as another source is asked that
+    /// source's question, and fails it: the label chooses the question, it
+    /// does not answer it.
+    #[test]
+    fn a_dism_step_labelled_as_another_source_is_refused() {
+        use crate::sources::windows::features::Change;
+        for source in [
+            SourceKind::Winget,
+            SourceKind::Choco,
+            SourceKind::Arp,
+            SourceKind::Scoop,
+        ] {
+            let mut step = features_step(Change::On, "NetFx3");
+            step.source = source;
+            assert!(check_step(&step, &Allowed::system()).is_err(), "{source:?}");
+        }
     }
 }

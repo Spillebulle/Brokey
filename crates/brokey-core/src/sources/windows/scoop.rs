@@ -220,6 +220,78 @@ impl Manifest {
                 .collect(),
         }
     }
+
+    /// The names of the shims Scoop makes for `bin`: an aliased entry's
+    /// alias, otherwise the executable's file name without its extension,
+    /// which is what Scoop calls the shim.
+    pub fn shim_names(&self) -> Vec<String> {
+        let stem = |path: &str| {
+            let name = &path[path.rfind(['\\', '/']).map_or(0, |c| c + 1)..];
+            match name.rfind('.') {
+                Some(dot) if dot > 0 => name[..dot].to_string(),
+                _ => name.to_string(),
+            }
+        };
+        let entries: Vec<(String, Option<String>)> = match &self.bin {
+            None => Vec::new(),
+            Some(BinField::One(s)) => vec![(s.clone(), None)],
+            Some(BinField::Many(entries)) => entries
+                .iter()
+                .filter_map(|e| match e {
+                    BinEntry::Name(s) => Some((s.clone(), None)),
+                    BinEntry::Aliased(parts) => {
+                        Some((parts.first()?.clone(), parts.get(1).cloned()))
+                    }
+                })
+                .collect(),
+        };
+        entries
+            .into_iter()
+            .map(|(path, alias)| {
+                alias
+                    .filter(|a| !a.is_empty())
+                    .unwrap_or_else(|| stem(&path))
+            })
+            .filter(|n| !n.is_empty() && !n.contains(['\\', '/']))
+            .collect()
+    }
+}
+
+/// The program a shim starts, from the `.shim` file beside it: a line
+/// `path = "C:\...\app.exe"`, quoted or not.
+pub fn shim_target(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key.trim().eq_ignore_ascii_case("path"))
+            .then(|| value.trim().trim_matches('"').to_string())
+            .filter(|v| !v.is_empty())
+    })
+}
+
+/// The shim that opens a windowed application, for an app Scoop made no
+/// shortcut for. Each of `bin`'s shims in `shims` is considered in the
+/// manifest's order, and the first whose `.shim` names a windowed program
+/// (see [`super::pe::is_windowed`]) is the answer. A console tool's shim is
+/// never one: opening it would flash a terminal that closes at once, which
+/// is the Windows face of the Linux rule that a command-line tool has
+/// nothing to open.
+pub fn windowed_shim(shims: &Path, m: &Manifest) -> Option<PathBuf> {
+    use std::io::Read;
+    m.shim_names().into_iter().find_map(|name| {
+        let shim = shims.join(format!("{name}.exe"));
+        if !shim.is_file() {
+            return None;
+        }
+        let text = std::fs::read_to_string(shims.join(format!("{name}.shim"))).ok()?;
+        let target = shim_target(&text)?;
+        let mut head = Vec::new();
+        std::fs::File::open(&target)
+            .ok()?
+            .take(4096)
+            .read_to_end(&mut head)
+            .ok()?;
+        super::pe::is_windowed(&head).then_some(shim)
+    })
 }
 
 fn manifest_json_error(e: &serde_json::Error) -> Error {
@@ -854,6 +926,38 @@ impl Source for Scoop {
     fn setup(&self) -> Option<Setup> {
         None
     }
+
+    /// The shortcut Scoop made in the Start Menu (it points into
+    /// `apps\<name>`), else the shim of a windowed program; see
+    /// [`launcher_in`].
+    fn launcher(&self, id: &str) -> Option<crate::launch::Launch> {
+        launcher_in(&self.root, id, &super::shortcut::start_menu())
+    }
+}
+
+/// How to open the app `id` installed under `root`, given the machine's
+/// Start Menu shortcuts: a shortcut whose target lies inside `apps\<id>`
+/// first, as for every other source, then the shim in `shims` of the first
+/// `bin` that is a windowed program. `None` for an app that is not
+/// installed and for a command-line tool.
+pub fn launcher_in(
+    root: &Path,
+    id: &str,
+    shortcuts: &[super::shortcut::Shortcut],
+) -> Option<crate::launch::Launch> {
+    let apps = root.join("apps");
+    let (name, manifest) = read_installed(&apps)
+        .into_iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(id))?;
+    let home = super::shortcut::Home {
+        dir: apps.join(&name).display().to_string(),
+        uninstaller: None,
+        name: Some(name),
+    };
+    if let Some(s) = super::shortcut::choose(shortcuts, &[home]) {
+        return Some(crate::launch::Launch::Shortcut(s.path.clone()));
+    }
+    windowed_shim(&root.join("shims"), &manifest).map(crate::launch::Launch::Shim)
 }
 
 #[cfg(test)]
@@ -1989,6 +2093,112 @@ mod tests {
             http.asked().contains(&manifest_url("nodejs")),
             "{:?}",
             http.asked()
+        );
+    }
+
+    /// The first bytes of a PE whose subsystem is `subsystem`: 2 windowed,
+    /// 3 console.
+    fn program(subsystem: u16) -> Vec<u8> {
+        let mut b = vec![0u8; 0x200];
+        b[0..2].copy_from_slice(b"MZ");
+        b[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        b[0x80..0x84].copy_from_slice(b"PE\0\0");
+        let optional = 0x84 + 20;
+        b[optional..optional + 2].copy_from_slice(&0x20bu16.to_le_bytes());
+        b[optional + 68..optional + 70].copy_from_slice(&subsystem.to_le_bytes());
+        b
+    }
+
+    /// An app with a shim for each `(bin, subsystem)`, the way Scoop lays
+    /// one out: the program under `apps`, `<name>.exe` and `<name>.shim`
+    /// under `shims`.
+    fn install_with_shims(root: &Path, app: &str, bins: &[(&str, u16)]) {
+        let names: Vec<String> = bins.iter().map(|(b, _)| format!("\"{b}.exe\"")).collect();
+        let manifest = format!(r#"{{"version": "1.0", "bin": [{}]}}"#, names.join(", "));
+        write_installed_app(root, app, manifest.as_bytes());
+        let shims = root.join("shims");
+        std::fs::create_dir_all(&shims).unwrap();
+        for (bin, subsystem) in bins {
+            let target = root
+                .join("apps")
+                .join(app)
+                .join("current")
+                .join(format!("{bin}.exe"));
+            std::fs::write(&target, program(*subsystem)).unwrap();
+            std::fs::write(shims.join(format!("{bin}.exe")), b"shim").unwrap();
+            std::fs::write(
+                shims.join(format!("{bin}.shim")),
+                format!("path = \"{}\"\n", target.display()),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn shim_names_follow_every_bin_shape() {
+        let m = parse_manifest(
+            br#"{"version": "1", "bin": ["bin\\one.exe", ["two.exe", "deux"], ["three.ps1"], "four"]}"#,
+        )
+        .unwrap();
+        assert_eq!(m.shim_names(), ["one", "deux", "three", "four"]);
+        assert!(nodejs().shim_names().is_empty());
+    }
+
+    #[test]
+    fn a_shim_file_names_its_program_quoted_or_not() {
+        assert_eq!(
+            shim_target("path = \"C:\\a b\\x.exe\"\nargs = -y\n").as_deref(),
+            Some(r"C:\a b\x.exe")
+        );
+        assert_eq!(shim_target("PATH=C:\\x.exe").as_deref(), Some(r"C:\x.exe"));
+        assert_eq!(shim_target("args = -y"), None);
+    }
+
+    #[test]
+    fn a_scoop_shortcut_into_the_app_is_opened_first() {
+        let root = tempfile::tempdir().unwrap();
+        install_with_shims(root.path(), "vscode", &[("code", 2)]);
+        let target = root
+            .path()
+            .join("apps")
+            .join("vscode")
+            .join("current")
+            .join("Code.exe");
+        let menu = vec![super::super::shortcut::Shortcut {
+            path: PathBuf::from(r"U\Scoop Apps\Visual Studio Code.lnk"),
+            target: target.display().to_string(),
+            arguments: String::new(),
+        }];
+        assert_eq!(
+            launcher_in(root.path(), "vscode", &menu),
+            Some(crate::launch::Launch::Shortcut(PathBuf::from(
+                r"U\Scoop Apps\Visual Studio Code.lnk"
+            )))
+        );
+    }
+
+    #[test]
+    fn without_a_shortcut_a_windowed_program_s_shim_is_opened() {
+        let root = tempfile::tempdir().unwrap();
+        install_with_shims(root.path(), "app", &[("app-cli", 3), ("app", 2)]);
+        assert_eq!(
+            launcher_in(root.path(), "app", &[]),
+            Some(crate::launch::Launch::Shim(
+                root.path().join("shims").join("app.exe")
+            )),
+            "the windowed one, not the first"
+        );
+    }
+
+    #[test]
+    fn a_command_line_tool_has_nothing_to_open() {
+        let root = tempfile::tempdir().unwrap();
+        install_with_shims(root.path(), "ripgrep", &[("rg", 3)]);
+        assert_eq!(launcher_in(root.path(), "ripgrep", &[]), None);
+        assert_eq!(
+            launcher_in(root.path(), "not-installed", &[]),
+            None,
+            "nor does an app that is not installed"
         );
     }
 }

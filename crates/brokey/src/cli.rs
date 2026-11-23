@@ -34,6 +34,9 @@ Commands:
       The steps a transaction would run. Nothing is executed.
   drivers
       Devices, the driver profiles offered for them, and firmware.
+  features [--all]
+      Windows optional features and whether each is on. Only the
+      well-known ones unless --all is given. Windows only.
   open <source>:<id> [--dry-run]
       Open an installed application the way the window's Open button does.
       --dry-run says what would be opened and opens nothing.
@@ -76,6 +79,7 @@ pub fn run(args: &[String]) -> i32 {
         "installed" => installed(rest),
         "plan" => plan(rest),
         "drivers" => drivers(rest),
+        "features" => features(rest),
         "self-update" => self_update(rest),
         "open" => open(rest),
         other => usage_error(&format!("{other} is not a command.")),
@@ -110,58 +114,48 @@ fn install(args: &[String]) -> i32 {
 /// `open <source>:<id>`: what the window's Open button does, and what it
 /// would open, so a launcher problem can be looked at from a terminal.
 fn open(args: &[String]) -> i32 {
-    #[cfg(unix)]
-    {
-        let dry_run = args.iter().any(|a| a == "--dry-run");
-        let rest: Vec<&String> = args.iter().filter(|a| *a != "--dry-run").collect();
-        let [reference] = rest.as_slice() else {
-            return usage_error(
-                "open takes one package reference, for example open flatpak:flathub/app/com.notepadqq.Notepadqq/x86_64/stable.",
-            );
-        };
-        let package = match parse_ref(reference) {
-            Ok(p) => p,
-            Err(e) => return usage_error(&e),
-        };
-        let store = brokey_core::Store::detect();
-        let Some(launch) = store.launcher(&package) else {
-            eprintln!(
-                "{} is not something Brokey can open. It may not be installed, or it has no application to start.",
-                package.id
-            );
-            return 1;
-        };
-        if dry_run {
-            println!("Would open {}, with: {}.", launch.describe(), {
-                let c = launch.command();
-                std::iter::once(c.program)
-                    .chain(c.args)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            });
-        } else {
-            println!("Opening {}.", launch.describe());
-        }
-        for (_, notice) in store.launcher_notices() {
-            println!("{notice}");
-        }
-        if dry_run {
-            return 0;
-        }
-        match logic::start(&launch) {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("{e}");
-                1
-            }
-        }
+    let dry_run = args.iter().any(|a| a == "--dry-run");
+    let rest: Vec<&String> = args.iter().filter(|a| *a != "--dry-run").collect();
+    let [reference] = rest.as_slice() else {
+        return usage_error(
+            "open takes one package reference, for example open flatpak:flathub/app/com.notepadqq.Notepadqq/x86_64/stable.",
+        );
+    };
+    let package = match parse_ref(reference) {
+        Ok(p) => p,
+        Err(e) => return usage_error(&e),
+    };
+    let store = brokey_core::Store::detect();
+    let Some(launch) = store.launcher(&package) else {
+        eprintln!(
+            "{} is not something Brokey can open. It may not be installed, or it has no application to start.",
+            package.id
+        );
+        return 1;
+    };
+    if dry_run {
+        println!("Would open {}, with: {}.", launch.describe(), {
+            let c = launch.command();
+            std::iter::once(c.program)
+                .chain(c.args)
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
+    } else {
+        println!("Opening {}.", launch.describe());
     }
-    #[cfg(windows)]
-    {
-        // No source has a launcher on Windows yet; see `logic::open_app`.
-        let _ = args;
-        eprintln!("Opening an installed application is not available on Windows yet.");
-        1
+    for (_, notice) in store.launcher_notices() {
+        println!("{notice}");
+    }
+    if dry_run {
+        return 0;
+    }
+    match logic::start(&launch) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
     }
 }
 
@@ -708,6 +702,53 @@ fn drivers(args: &[String]) -> i32 {
             ]);
         }
         print!("{}", table.render(terminal_width()));
+    }
+    0
+}
+
+// -------------------------------------------------------------- features
+
+fn features(args: &[String]) -> i32 {
+    let all = match args {
+        [] => false,
+        [flag] if flag == "--all" => true,
+        _ => return usage_error("features takes only --all."),
+    };
+    let report = brokey_core::sources::windows::features::report();
+    if !report.available {
+        eprintln!(
+            "{}",
+            sentence(
+                report
+                    .note
+                    .as_deref()
+                    .unwrap_or("The features could not be read.")
+            )
+        );
+        return 1;
+    }
+    let mut table = Table::new(&["Feature", "State", "Windows name"]);
+    let mut shown = 0;
+    for f in report.features.iter().filter(|f| all || f.well_known) {
+        shown += 1;
+        table.row(vec![
+            f.name.clone(),
+            match f.state {
+                brokey_core::FeatureState::Enabled => "on",
+                brokey_core::FeatureState::Disabled => "off",
+                brokey_core::FeatureState::Absent => "off, not downloaded",
+                brokey_core::FeatureState::Unknown => "unknown",
+            }
+            .to_string(),
+            f.id.clone(),
+        ]);
+    }
+    print!("{}", table.render(terminal_width()));
+    if !all {
+        println!(
+            "{shown} of {} features. brokey features --all lists every one.",
+            report.features.len()
+        );
     }
     0
 }

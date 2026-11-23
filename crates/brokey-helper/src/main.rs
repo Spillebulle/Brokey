@@ -391,13 +391,16 @@ fn serve_plan(line: &str, cancel: &AtomicBool, writer: &mut impl Write) -> i32 {
         );
         let outcome = run_step(&plan.id, index, step, writer);
         match outcome {
-            Ok(()) => emit(
+            // A step that succeeded can still have something to say: DISM
+            // made the change and Windows finishes it on a restart. The
+            // runner carries it to the end of the plan.
+            Ok(note) => emit(
                 writer,
                 &Event::StepFinished {
                     plan: plan.id.clone(),
                     step: index,
                     ok: true,
-                    message: None,
+                    message: note,
                 },
             ),
             Err(message) => {
@@ -434,12 +437,19 @@ fn serve_plan(line: &str, cancel: &AtomicBool, writer: &mut impl Write) -> i32 {
 }
 
 /// Run one step with a minimal environment, streaming its output as log
-/// events to `writer`. `Err` is the sentence for the step's failure. The
+/// events to `writer`. `Err` is the sentence for the step's failure, and
+/// `Ok(Some(_))` a sentence for one that succeeded with something left to
+/// do, which [`stream_and_wait`] decides. The
 /// environment scrub and `CHILD_PATH` resolution below are the Linux half
 /// of how a step's program is found and what it is given; the Windows half
 /// is the function beneath this one and is deliberately different.
 #[cfg(unix)]
-fn run_step(plan: &str, index: usize, step: &Step, writer: &mut impl Write) -> Result<(), String> {
+fn run_step(
+    plan: &str,
+    index: usize,
+    step: &Step,
+    writer: &mut impl Write,
+) -> Result<Option<String>, String> {
     let Some(program) = resolve(&step.command.program) else {
         return Err(format!(
             "{} is not installed in any of {}.",
@@ -506,7 +516,12 @@ fn run_step(plan: &str, index: usize, step: &Step, writer: &mut impl Write) -> R
 /// is why there is no Windows `ALLOWED_ENV` to consult: the list has
 /// already asked the stronger question.
 #[cfg(windows)]
-fn run_step(plan: &str, index: usize, step: &Step, writer: &mut impl Write) -> Result<(), String> {
+fn run_step(
+    plan: &str,
+    index: usize,
+    step: &Step,
+    writer: &mut impl Write,
+) -> Result<Option<String>, String> {
     if !Path::new(&step.command.program).is_absolute() {
         return Err(format!(
             "The helper was asked to run {}, which is not a full path, and it never searches for a program itself. Start the operation again from Brokey, which resolves the program before it elevates.",
@@ -533,13 +548,18 @@ fn run_step(plan: &str, index: usize, step: &Step, writer: &mut impl Write) -> R
 /// wait for it and turn its exit into a sentence. Shared, because a
 /// running child behaves the same on either platform; only how it was
 /// started differs.
+///
+/// One exit that is not zero is a success: DISM's 3010 for a Features step,
+/// which means the change was made and Windows finishes it on a restart.
+/// `brokey_core`'s `features::restart_note` is what decides, so the rule
+/// and its test live beside the step that produces it.
 fn stream_and_wait(
     plan: &str,
     index: usize,
     step: &Step,
     mut child: std::process::Child,
     writer: &mut impl Write,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let (tx, rx) = mpsc::channel::<(String, bool)>();
     if let Some(out) = child.stdout.take() {
         let tx = tx.clone();
@@ -565,7 +585,11 @@ fn stream_and_wait(
         .wait()
         .map_err(|e| format!("Could not wait for {}: {e}.", step.command.program))?;
     if status.success() {
-        Ok(())
+        Ok(None)
+    } else if let Some(note) =
+        brokey_core::sources::windows::features::restart_note(step, status.code())
+    {
+        Ok(Some(note.to_string()))
     } else {
         Err(match status.code() {
             Some(code) => format!(
@@ -935,6 +959,53 @@ mod tests {
     #[test]
     fn the_helpers_closed_list_is_the_registry_backed_one() {
         assert_eq!(allowed(), Allowed::with_registered_removals());
+    }
+
+    /// DISM's 3010 is a success that waits on a restart, for a Features
+    /// step and for nothing else. `cmd /c exit 3010` stands in for DISM,
+    /// since what is being tested is how the exit is read, not what ran.
+    #[cfg(windows)]
+    #[test]
+    fn exit_3010_from_a_features_step_succeeds_with_a_restart_note() {
+        let step_for = |source: SourceKind| Step {
+            source,
+            title: "Turning on Test".to_string(),
+            command: Command {
+                program: "cmd.exe".to_string(),
+                args: Vec::new(),
+                env: Vec::new(),
+                cwd: None,
+            },
+            needs_root: true,
+            weight: 1,
+        };
+        let exit_3010 = || {
+            std::process::Command::new("cmd.exe")
+                .args(["/c", "exit 3010"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("cmd.exe starts")
+        };
+        let mut out = Vec::new();
+        let ok = stream_and_wait(
+            "p",
+            0,
+            &step_for(SourceKind::Features),
+            exit_3010(),
+            &mut out,
+        );
+        assert_eq!(
+            ok,
+            Ok(Some(
+                brokey_core::sources::windows::features::RESTART_NOTE.to_string()
+            ))
+        );
+        let failed = stream_and_wait("p", 0, &step_for(SourceKind::Winget), exit_3010(), &mut out);
+        assert_eq!(
+            failed,
+            Err("Turning on Test failed with exit code 3010. The log has the details.".to_string())
+        );
     }
 
     /// A step the closed list on this platform does not admit: `curl` is
