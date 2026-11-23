@@ -77,9 +77,14 @@ export function useBusyRefs(): Map<string, Op["op"]> {
 
 // ── Sources whose tool is missing ───────────────────────────────────────────
 
-/** The setup a source still needs: it is not available and the application knows how to make it so. */
+/** The source whose tool an install from `source` runs: the Store installs through winget, everything else through itself. */
+export function toolOf(source: SourceKind): SourceKind {
+  return source === "msix" ? "winget" : source;
+}
+
+/** The setup a source still needs: the tool it installs through is not available and the application knows how to make it so. */
 export function setupFor(source: SourceKind, statuses: SourceStatus[]): SourceSetup | null {
-  const status = statuses.find((s) => s.kind === source);
+  const status = statuses.find((s) => s.kind === toolOf(source));
   if (!status || status.available) return null;
   return status.setup;
 }
@@ -89,28 +94,29 @@ export function needsSetup(edition: Edition, statuses: SourceStatus[]): boolean 
   return setupFor(edition.package.source, statuses) !== null;
 }
 
-/** The operations that install an edition: the source's setup first when its tool is missing, then the package. */
+/** The operations that install an edition: the tool's setup first when it is missing, then the package. A Store install sets winget up. */
 export function opsToInstall(edition: Edition, statuses: SourceStatus[]): Op[] {
   const install: Op = { op: "install", package: refOf(edition) };
-  return needsSetup(edition, statuses) ? [{ op: "setup", source: edition.package.source }, install] : [install];
+  return needsSetup(edition, statuses) ? [{ op: "setup", source: toolOf(edition.package.source) }, install] : [install];
 }
 
 /** "Install GIMP", or "Set up Flatpak and install GIMP" when the tool comes first. */
 export function installTitle(app: App, edition: Edition, statuses: SourceStatus[]): string {
-  return needsSetup(edition, statuses) ? `Set up ${sourceLabel(edition.package.source)} and install ${app.name}` : `Install ${app.name}`;
+  return needsSetup(edition, statuses) ? `Set up ${sourceLabel(toolOf(edition.package.source))} and install ${app.name}` : `Install ${app.name}`;
 }
 
 /** The badge's tooltip for an edition whose tool is missing: "Flatpak is not installed. Installing from it sets Flatpak up first." */
 export function setupHint(source: SourceKind, statuses: SourceStatus[]): string | null {
   if (setupFor(source, statuses) === null) return null;
-  const label = sourceLabel(source);
-  return `${label} is not installed. Installing from it sets ${label} up first.`;
+  const tool = sourceLabel(toolOf(source));
+  if (toolOf(source) !== source) return `${tool} is not installed. Installing from the ${sourceLabel(source)} sets ${tool} up first.`;
+  return `${tool} is not installed. Installing from it sets ${tool} up first.`;
 }
 
 /** The hero's note under the edition picker: "Flatpak is not installed. Install sets it up first." */
 export function setupNote(source: SourceKind, statuses: SourceStatus[]): string | null {
   if (setupFor(source, statuses) === null) return null;
-  return `${sourceLabel(source)} is not installed. Install sets it up first.`;
+  return `${sourceLabel(toolOf(source))} is not installed. Install sets it up first.`;
 }
 
 /** "pacman, AUR and Flatpak": plain English, no Oxford comma. */
