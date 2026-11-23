@@ -238,6 +238,11 @@ pub enum MatchedBy {
     AppStream,
     /// The same normalised name (`steam`, `steam-bin`, `com.valvesoftware.Steam`).
     Name,
+    /// The same Add/Remove Programs uninstall key: a package manager matched
+    /// its package to the entry that install left in the registry, by
+    /// product code or by name and publisher together. Exact, like an
+    /// AppStream join.
+    Registry,
     /// The only member; nothing to match.
     Alone,
 }

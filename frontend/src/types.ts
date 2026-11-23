@@ -135,7 +135,7 @@ export interface Package {
   facts: [string, string][];
 }
 
-export type MatchedBy = "appstream" | "name" | "alone";
+export type MatchedBy = "appstream" | "name" | "registry" | "alone";
 
 export interface Edition {
   package: Package;
