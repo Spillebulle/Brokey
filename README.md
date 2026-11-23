@@ -16,7 +16,7 @@
 
 ![The Brokey window: a search for "steam" with the pacman, AUR and Flatpak editions grouped as one row, the sidebar and the status bar](docs/images/window.png)
 
-> **Early days.** Searching, installing, removing and updating work on Arch and its derivatives, with Flatpak and Snap wherever they are installed, and on Windows through winget, Add or remove programs, Chocolatey and Scoop. apt and dnf are written but have not yet run on a real Debian or Fedora. [What is not there yet](#what-is-not-there-yet) is honest about the rest.
+> **Early days.** Searching, installing, removing and updating work on Arch and its derivatives, with Flatpak and Snap wherever they are installed, and on Windows through winget, Add or remove programs, Chocolatey, Scoop and the Microsoft Store. apt and dnf are written but have not yet run on a real Debian or Fedora. [What is not there yet](#what-is-not-there-yet) is honest about the rest.
 
 ## Install
 
@@ -116,11 +116,12 @@ guessing.
 
 - apt and dnf are written to the same interface as pacman but have not run on a real Debian or Fedora. They are marked untested in the sources list until they have.
 - Drivers are managed only through chwd (CachyOS). Elsewhere they install as ordinary packages.
-- No reviews or ratings.
+- No reviews, and no ratings outside the Microsoft Store's own.
 - An application installed by hand, such as a browser unpacked into your home folder, is not listed: no package manager has a record of it.
 - AppImages from GitHub releases are placed in `~/.local/bin` without a menu entry yet.
 - A Flatpak of Brokey itself is not published: a sandboxed store cannot reach the helper.
-- Windows joined the platforms Brokey supports in 0.1.5. Brokey searches winget's catalogue, which it downloads and reads itself, so search works on a machine that has never had winget. It lists what Add/Remove Programs knows about and works out how each entry would be removed, and where winget itself is installed it matches those entries to winget packages to find what has an update. Installing, updating and removing work: the window never elevates, and each stretch of steps that needs Administrator costs one prompt to allow. Take the setup executable, or the `.msi` beside it, from the table above. An installed application shows its own icon, lifted out of the file its Add/Remove Programs entry names, and a winget detail page shows the description from the package's manifest. A search result draws the first letter of its name rather than an icon, unless the Chocolatey package behind it names one. Chocolatey and Scoop are sources as well, each searchable whether or not it is installed on the machine. An application whose Add/Remove Programs name carries its version is still listed more than once. The Microsoft Store comes next.
+- Windows joined the platforms Brokey supports in 0.1.5. Brokey searches winget's catalogue, which it downloads and reads itself, so search works on a machine that has never had winget. It lists what Add/Remove Programs knows about and works out how each entry would be removed, and where winget itself is installed it matches those entries to winget packages to find what has an update. Installing, updating and removing work: the window never elevates, and each stretch of steps that needs Administrator costs one prompt to allow. Take the setup executable, or the `.msi` beside it, from the table above. An installed application shows its own icon, lifted out of the file its Add/Remove Programs entry names, and a winget detail page shows the description from the package's manifest. A search result draws the first letter of its name rather than an icon, unless the Chocolatey package behind it names one. Chocolatey and Scoop are sources as well, each searchable whether or not it is installed on the machine. An application whose Add/Remove Programs name carries its version is still listed more than once.
+- The Microsoft Store is a source on Windows. It lists the Store and MSIX applications installed for you, leaving out frameworks, codecs, context menu handlers and the parts of Windows that cannot be removed, and removes one without asking for Administrator. Search asks the Store itself and shows each result's own icon, and a Store detail page has the Store's description, screenshots and rating. Installing from the Store goes through winget, which is set up first where it is missing. Store applications are not listed on the Updates page: the Store keeps them up to date itself. A Store application that is a classic installer, rather than an MSIX package, draws its first letter in search until its detail page is opened.
 
 ## Controls
 
