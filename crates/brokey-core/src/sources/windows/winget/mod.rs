@@ -7,6 +7,7 @@
 
 pub mod index;
 pub mod manifest;
+pub mod normalise;
 pub mod query;
 pub mod version;
 
@@ -387,10 +388,13 @@ WHERE p.rowid = (SELECT package FROM productcodes2 WHERE productcode = :code LIM
 LIMIT 1
 ";
 
+/// `DISTINCT` because one package is stored under several forms of its name
+/// (`python`, `python(X64)`, `python(X86)`), and two hits on one package are
+/// still one package, not the ambiguity the caller refuses.
 const BY_NAME_AND_PUBLISHER_SQL: &str = "
-SELECT p.id, p.name, p.moniker, p.latest_version, np.norm_publisher
+SELECT DISTINCT p.id, p.name, p.moniker, p.latest_version, np.norm_publisher
 FROM packages p
-JOIN norm_names2 nn ON nn.package = p.rowid AND nn.norm_name = :name
+JOIN norm_names2 nn ON nn.package = p.rowid AND nn.norm_name IN (:name, :name_x64, :name_x86)
 JOIN norm_publishers2 np ON np.package = p.rowid AND np.norm_publisher = :publisher
 LIMIT 2
 ";
@@ -398,7 +402,10 @@ LIMIT 2
 /// The catalogue package an uninstall entry is, if it is one.
 ///
 /// Three rungs, exact first. The product and upgrade code rungs are exact.
-/// The name rung requires the publisher to agree as well, and then requires
+/// The name rung folds the display name and the publisher the way winget
+/// folded the catalogue's ([`normalise`]), so `Advanced IP Scanner 2.5.1`
+/// by `Famatech Corp.` meets `advancedipscanner` by `famatech`. It requires
+/// the publisher to agree as well as the name, and then requires
 /// the answer to be unique: the index folds version families, so `python` and
 /// `pythonsoftwarefoundation` name every Python at once. Nothing is returned
 /// when more than one package fits, because a wrong join offers an update
@@ -419,12 +426,19 @@ pub fn match_entry(
     let (Some(name), Some(publisher)) = (&e.display_name, &e.publisher) else {
         return Ok(None);
     };
+    let [bare, x64, x86] = normalise::architecture_suffixes(&normalise::name(name));
+    let publisher = normalise::publisher(publisher);
+    if bare.is_empty() || publisher.is_empty() {
+        return Ok(None);
+    }
     let found = query::rows(
         db,
         BY_NAME_AND_PUBLISHER_SQL,
         &[
-            (":name", &query::normalise(name)),
-            (":publisher", &query::normalise(publisher)),
+            (":name", &bare),
+            (":name_x64", &x64),
+            (":name_x86", &x86),
+            (":publisher", &publisher),
         ],
     )?;
     // Exactly one, or none. See the note above about version families.
@@ -448,6 +462,13 @@ pub fn installed_from(
             let mut p = to_package(&row);
             p.installed = true;
             p.installed_version = e.display_version.clone();
+            // Which Add/Remove Programs entry this is. `group.rs` joins the
+            // two on it, because the names alone (`7-Zip` and
+            // `7-Zip 26.03 (x64)`) share nothing it could join on.
+            p.facts.push((
+                crate::sources::windows::arp::REGISTRY_KEY_FACT.to_string(),
+                crate::sources::windows::arp::package_id(e),
+            ));
             out.push(p);
         }
     }
