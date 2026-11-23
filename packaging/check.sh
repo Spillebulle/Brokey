@@ -158,17 +158,17 @@ identifier=$(sed -n 's/^[[:space:]]*"identifier"[[:space:]]*:[[:space:]]*"\([^"]
     fail "the shortcut's System.AppUserModel.ID is '$aumid' and tauri.conf.json's identifier is '$identifier'; spell them the same, or the taskbar cannot match a running window to the installed shortcut"
 ok "the shortcut's AppUserModel.ID is $identifier"
 
-# Five GUIDs: the UpgradeCode and one per component. Two components sharing a
+# Six GUIDs: the UpgradeCode and one per component. Two components sharing a
 # GUID makes Windows Installer treat them as one component, so an upgrade or a
 # removal reference-counts the wrong files.
 guids=$(sed -n -e 's/.*UpgradeCode="\([^"]*\)".*/\1/p' -e 's/.*Guid="\([^"]*\)".*/\1/p' "$wxs")
 written=$(printf '%s\n' "$guids" | wc -l | tr -d ' ')
-[ "$written" -eq 5 ] || \
-    fail "$wxs writes $written GUIDs and this check expects five, the UpgradeCode and one for each of its four components. If a component lost its Guid attribute, give it a fresh one from python -c \"import uuid; print(uuid.uuid4())\". If you added or removed a component on purpose, change the five here to match"
+[ "$written" -eq 6 ] || \
+    fail "$wxs writes $written GUIDs and this check expects six, the UpgradeCode and one for each of its five components. If a component lost its Guid attribute, give it a fresh one from python -c \"import uuid; print(uuid.uuid4())\". If you added or removed a component on purpose, change the six here to match"
 dupe=$(printf '%s\n' "$guids" | sort | uniq -d | head -1)
 [ -z "$dupe" ] || \
     fail "$wxs uses the GUID $dupe more than once; every GUID in it is Brokey's alone, so generate a fresh one for the second"
-ok "the five GUIDs are five and are all different"
+ok "the six GUIDs are six and are all different"
 
 # WiX's stock dialog set takes exactly two bitmap sizes and no others, and a
 # wrong one is a stretched picture with no error anywhere. The sizes are read

@@ -65,15 +65,47 @@ fn is_setup_run(has_arguments: bool, carries_a_package: bool) -> bool {
     !has_arguments && carries_a_package
 }
 
+/// What a launch does, decided from its arguments alone.
+#[derive(Debug, PartialEq)]
+enum Launch {
+    /// `cli::run` answers.
+    Text,
+    /// `--show` was given something that is not a reference: the sentence
+    /// goes to standard error, the exit is 2, and no window opens.
+    /// `docs/brokey-handoff.md` promises both to the caller.
+    Refused(String),
+    /// The window, sent to an installed application's page when a
+    /// reference was given.
+    Window(Option<brokey_core::PackageRef>),
+}
+
+/// The exit code of a refused `--show`, as the contract states it.
+const REFUSED: i32 = 2;
+
+/// Which of the three this launch is. `--show` is asked first because it
+/// begins with a dash and would otherwise be the window with the argument
+/// ignored, which is what a Brokey older than 0.1.8 does with it.
+fn launch(args: &[String]) -> Launch {
+    match brokey_lib::show::argument(args) {
+        Some(Err(sentence)) => Launch::Refused(sentence),
+        Some(Ok(reference)) => Launch::Window(Some(reference)),
+        None if is_text_mode(args) => Launch::Text,
+        None => Launch::Window(None),
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let launch = launch(&args);
     #[cfg(windows)]
     {
-        // Before anything prints. A text-mode run is the only one with
-        // something to say to a terminal: the window and the setup window say
-        // it on the screen, and a setup run reaches neither of the two
-        // branches below.
-        if is_text_mode(&args) {
+        // Before anything prints. A text-mode run and a refused `--show` are
+        // the only ones with something to say to a terminal: the window and
+        // the setup window say it on the screen, and a setup run reaches
+        // none of the branches below. A caller that captured standard error
+        // through a pipe keeps its pipe, which is what `console.rs` is
+        // careful about.
+        if matches!(launch, Launch::Text | Launch::Refused(_)) {
             console::attach_to_the_terminal_that_started_this();
         }
         let carries_a_package = std::env::current_exe()
@@ -83,15 +115,19 @@ fn main() {
             std::process::exit(brokey_lib::setup::install());
         }
     }
-    if is_text_mode(&args) {
-        std::process::exit(brokey_lib::cli::run(&args));
+    match launch {
+        Launch::Text => std::process::exit(brokey_lib::cli::run(&args)),
+        Launch::Refused(sentence) => {
+            eprintln!("brokey: {sentence}");
+            std::process::exit(REFUSED);
+        }
+        Launch::Window(show) => brokey_lib::run_showing(show),
     }
-    brokey_lib::run();
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_text_mode;
+    use super::{Launch, REFUSED, is_text_mode, launch};
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()
@@ -159,5 +195,40 @@ mod tests {
         for flag in ["--", "--some-tauri-flag", "-x"] {
             assert!(!is_text_mode(&args(&[flag])), "{flag}");
         }
+    }
+
+    /// `--show` begins with a dash, so it is the window path rather than
+    /// text mode, and it carries its reference there.
+    #[test]
+    fn show_with_a_reference_opens_the_window_on_it() {
+        assert!(!is_text_mode(&args(&["--show", "winget:Valve.Steam"])));
+        let Launch::Window(Some(reference)) = launch(&args(&["--show", "winget:Valve.Steam"]))
+        else {
+            panic!("--show with a reference is the window");
+        };
+        assert_eq!(reference.id, "Valve.Steam");
+    }
+
+    /// The contract's exit 2: no colon, an unknown source word, an empty id,
+    /// and no window.
+    #[test]
+    fn show_with_a_reference_that_is_not_understood_exits_2() {
+        assert_eq!(REFUSED, 2);
+        for bad in [
+            &["--show", "steam"][..],
+            &["--show", "nix:steam"],
+            &["--show", "winget:"],
+            &["--show"],
+        ] {
+            assert!(matches!(launch(&args(bad)), Launch::Refused(_)), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn every_other_launch_is_what_it_was() {
+        assert_eq!(launch(&args(&[])), Launch::Window(None));
+        assert_eq!(launch(&args(&["--some-tauri-flag"])), Launch::Window(None));
+        assert_eq!(launch(&args(&["search", "steam"])), Launch::Text);
+        assert_eq!(launch(&args(&["--version"])), Launch::Text);
     }
 }

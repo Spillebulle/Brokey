@@ -159,6 +159,12 @@ export interface App {
   editions: Edition[];
 }
 
+/** Where `brokey --show <source>:<id>` lands (`show_resolve`): the installed application and the edition to select, spelt as the installed list spells it. */
+export interface Shown {
+  app: App;
+  edition: PackageRef;
+}
+
 export interface Update {
   package: PackageRef;
   name: string;

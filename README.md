@@ -123,6 +123,23 @@ Turning one on or off asks to allow it as Administrator. When Windows needs a
 restart to finish the change, the end of the transaction says so; Brokey never
 restarts the machine. `brokey features` lists them in a terminal.
 
+## For other applications
+
+From 0.1.8 another application can hand the user to Brokey for one installed
+application:
+
+```sh
+brokey --show winget:Valve.Steam
+```
+
+Brokey opens that application's page with the named edition selected and its
+Remove button focused, and removes nothing until the user presses it and
+confirms. If Brokey is already open, the running window goes to the page. A
+reference Brokey does not understand exits with code 2 and a sentence on
+standard error, and opens no window. The references, the exit codes, how to
+find `brokey.exe` on Windows and how to tell whether the installed Brokey
+supports this are in [`docs/brokey-handoff.md`](docs/brokey-handoff.md).
+
 ## What is not there yet
 
 - apt and dnf are written to the same interface as pacman but have not run on a real Debian or Fedora. They are marked untested in the sources list until they have.

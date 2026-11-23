@@ -63,6 +63,8 @@ pub fn handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + 'static 
         launch_targets,
         open_app,
         launcher_notices,
+        crate::show::show_take,
+        crate::show::show_resolve,
     ]
 }
 

@@ -2,6 +2,11 @@
 
 Newest first. Each section is the release's notes, published verbatim.
 
+## 0.1.8
+
+- Another application can open Brokey on one installed application with `brokey --show <source>:<id>`, for example `brokey --show winget:Valve.Steam` or `brokey --show arp:HKLM32\Steam`. Brokey opens that application's page with the edition selected and its Remove button focused, and removes nothing until you press it and confirm. If Brokey is already open, the running window comes forward and goes to the page. If nothing installed matches, Installed opens with a notice naming the reference. A reference Brokey does not understand exits with code 2 and a sentence on standard error, and opens no window. `docs/brokey-handoff.md` is the contract; Heft uses it for Uninstall with Brokey.
+- The Windows installer registers `brokey.exe` under App Paths, so `Win+R` finds `brokey` and other applications can find where Brokey is installed.
+
 ## 0.1.7
 
 - The Arch package adds the Spillebulle archive as it installs, so `sudo pacman -Syu` and the Updates page carry Brokey along with everything else on Arch, CachyOS, EndeavourOS and Manjaro. It appends a `[spillebulle]` section to the end of `/etc/pacman.conf`, after your distribution's repositories, writes `/etc/pacman.d/spillebulle` and trusts the archive's key with pacman-key. Removing Brokey leaves them in place for the other applications from the archive; `sudo touch /etc/pacman.d/spillebulle.disabled` before installing keeps the archive off.

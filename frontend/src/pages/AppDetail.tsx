@@ -26,6 +26,7 @@ import {
   type DropdownOption,
 } from "../components";
 import { formatCount, looksNumeric } from "../format";
+import { useShow } from "../shell/show";
 import { useShell } from "../shell/store";
 import type { App, Edition, Package as Pkg, Screenshot } from "../types";
 import { editionKey, editionLabel, installTitle, needsSetup, opsToInstall, refKey, refOf, setupNote, useBusyRefs } from "./app/editions";
@@ -169,11 +170,41 @@ function Detail({ app }: { app: App }) {
   }, [refsKey, doneStamp]);
 
   const editions = useMemo<Edition[]>(
-    () => app.editions.map((e) => ({ ...e, package: details[editionKey(e)] ?? e.package })),
+    () =>
+      app.editions.map((e) => {
+        const fresh = details[editionKey(e)];
+        if (!fresh) return e;
+        // A catalogue's details (winget's manifest) know nothing of this machine; the installed list does, so it keeps Remove on the page.
+        if (e.package.installed && !fresh.installed) return { ...e, package: { ...fresh, installed: true, installed_version: e.package.installed_version } };
+        return { ...e, package: fresh };
+      }),
     [app, details],
   );
   const chosen = editions.find((e) => editionKey(e) === chosenKey) ?? editions.find((e) => e.package.installed) ?? editions[0];
   const pkg = chosen.package;
+
+  // `brokey --show`: select the edition it named and focus its Remove button,
+  // once. Focus only; nothing is removed until the user presses it.
+  const showFocus = useShow((s) => s.focus);
+  const [focusRemove, setFocusRemove] = useState(false);
+  useEffect(() => {
+    if (!showFocus) return;
+    useShow.getState().clearFocus();
+    // A fresher search result under the same key may lack the edition; its installed one is then the one to remove.
+    if (app.editions.some((e) => editionKey(e) === showFocus)) setChosenKey(showFocus);
+    setFocusRemove(true);
+  }, [showFocus, app]);
+  useEffect(() => {
+    if (!focusRemove) return;
+    const button = document.querySelector<HTMLButtonElement>(".bk-appdetail [data-remove]");
+    if (!button) {
+      // Wait for the details; if there is still no Remove (being removed already), there is nothing to focus.
+      if (!loading) setFocusRemove(false);
+      return;
+    }
+    button.focus();
+    setFocusRemove(false);
+  });
 
   const shots: Screenshot[] = pkg.screenshots.length > 0 ? pkg.screenshots : (editions.find((e) => e.package.screenshots.length > 0)?.package.screenshots ?? []);
   const backdrop = shots[0] ?? null;
@@ -304,7 +335,7 @@ function Detail({ app }: { app: App }) {
                         Removing…
                       </Button>
                     ) : (
-                      <Button icon={<Trash {...ICON} aria-hidden="true" />} onClick={remove} title="Asks before anything is removed.">
+                      <Button icon={<Trash {...ICON} aria-hidden="true" />} onClick={remove} title="Asks before anything is removed." data-remove>
                         Remove…
                       </Button>
                     )}

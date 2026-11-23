@@ -561,6 +561,31 @@ fn everything_the_page_receives_matches_types_ts() {
             }],
         },
     );
+    // `show_resolve`: where `brokey --show <source>:<id>` lands.
+    c.value(
+        "Shown",
+        &brokey_lib::show::Shown {
+            app: App {
+                key: "name:steam".into(),
+                name: "Steam".into(),
+                kind: PackageKind::App,
+                summary: None,
+                icon: None,
+                developer: None,
+                categories: Vec::new(),
+                installed: true,
+                updated: None,
+                popularity: None,
+                relevance: 1.0,
+                editions: vec![Edition {
+                    package: package(),
+                    matched_by: MatchedBy::Alone,
+                    confidence: 1.0,
+                }],
+            },
+            edition: reference(),
+        },
+    );
     for kind in [
         PackageKind::App,
         PackageKind::Package,

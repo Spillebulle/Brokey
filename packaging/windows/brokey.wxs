@@ -22,7 +22,7 @@
   refused with a baffling message or uninstalled the wrong application. Shared
   component GUIDs are the same hazard one level down: Windows Installer
   reference counts by them, so removing one product can take another's files
-  with it. The five below were generated for Brokey and for nothing else.
+  with it. The six below were generated for Brokey and for nothing else.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
@@ -244,16 +244,43 @@
       Umber's package registers five document types and an in-process COM server
       to draw their thumbnails. Brokey opens no documents at all: it is a store,
       and the whole of what it installs is two executables, a Start menu
-      shortcut and three text files. The rule Umber learned is recorded here in
+      shortcut, three text files and its App Paths key. The rule Umber learned is recorded here in
       case a document type ever arrives: register with `OpenWithProgIds` and
       never with a bare `ProgId`, because the latter makes the application the
       default handler for a type and takes it away from whatever owned it,
       silently.
     -->
 
+    <!--
+      App Paths, so another application can find brokey.exe.
+
+      `docs/brokey-handoff.md` promises callers such as Heft that from 0.1.8
+      the default value of this key is the full path to brokey.exe, which is
+      also where Win+R and ShellExecute look for a bare `brokey`. It is the
+      documented place for this and it touches no PATH: nothing else on the
+      machine changes what it runs.
+
+      A component of its own, with the registry value as its keypath, rather
+      than a value added to `Executable`: a component's contents are fixed for
+      its GUID, and this one is per machine data in HKLM with nothing per user
+      beside it, so ICE57 has nothing to object to. The package is built for
+      x64 or ARM64, so the key lands in the native view of the registry, the
+      one a 64 bit caller reads, and not under WOW6432Node.
+    -->
+    <ComponentGroup Id="AppPaths" Directory="INSTALLFOLDER">
+      <Component Id="AppPath" Guid="0db79ce2-ba97-4874-ba64-e0499572c253">
+        <RegistryValue Root="HKLM"
+                       Key="SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\brokey.exe"
+                       Type="string"
+                       Value="[#BrokeyExe]"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
     <Feature Id="Main" Title="Brokey" Level="1">
       <ComponentGroupRef Id="Files" />
       <ComponentGroupRef Id="StartMenu" />
+      <ComponentGroupRef Id="AppPaths" />
     </Feature>
 
     <!--

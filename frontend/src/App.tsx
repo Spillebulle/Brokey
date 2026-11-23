@@ -10,6 +10,7 @@ import { toast } from "./components/toastStore";
 import { AppDetailPage, DriversPage, FeaturesPage, InstalledPage, SearchPage, SettingsPage, UpdatesPage } from "./pages";
 import { useShortcuts } from "./shell/keys";
 import { Shell } from "./shell/Shell";
+import { startShowing } from "./shell/show";
 import { useShell } from "./shell/store";
 import { applyTheme } from "./shell/theme";
 import { useSearch } from "./pages/search/store";
@@ -168,6 +169,8 @@ export default function App() {
   useEffect(() => onPlanDone((status) => void afterPlan(status, packageName)), []);
   useEffect(() => void useLaunch.getState().loadNotices(), []);
   useEffect(() => startUpdateTimer(checkMinutes ?? 0), [checkMinutes]);
+  // `brokey --show <source>:<id>`: an installed application's page, Remove focused (shell/show.ts).
+  useEffect(() => startShowing(), []);
 
   useEffect(() => {
     if (switched.current) return;

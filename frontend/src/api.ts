@@ -21,6 +21,7 @@ import type {
   SearchResult,
   SelfUpdate,
   Settings,
+  Shown,
   SourceKind,
   SourceStatus,
   SystemInfo,
@@ -175,6 +176,29 @@ export function onTransactionEvent(handler: (event: Event) => void): () => void 
     };
   }
   const pending = listen<Event>("transaction://event", (e) => handler(e.payload));
+  return () => {
+    void pending.then((unlisten) => unlisten());
+  };
+}
+
+/** The reference Brokey was started with (`--show <source>:<id>`) or handed by a second launch, taken: null almost always, and null the second time it is asked. */
+export function show_take(): Promise<PackageRef | null> {
+  return inTauri ? call("show_take") : mock().then((m) => m.show_take());
+}
+
+/** The installed application holding a reference, or null when nothing installed matches it. */
+export function show_resolve(reference: PackageRef): Promise<Shown | null> {
+  return inTauri ? call("show_resolve", { reference }) : mock().then((m) => m.show_resolve(reference));
+}
+
+/**
+ * A second `brokey --show` handed the running window a reference, sent as
+ * `brokey://show` with nothing in it: the reference waits for show_take.
+ * A browser has no second launch, so it never fires there.
+ */
+export function onShow(handler: () => void): () => void {
+  if (!inTauri) return () => {};
+  const pending = listen("brokey://show", () => handler());
   return () => {
     void pending.then((unlisten) => unlisten());
   };
