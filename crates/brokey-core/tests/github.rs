@@ -1,25 +1,30 @@
 //! The GitHub source against answers captured from the public API
 //! (`fixtures/github/`): a search for "heroic", Heroic's latest release
 //! (every Linux package kind plus macOS and Windows noise) and neovim's
-//! (AppImages for both architectures). One live search at the end.
+//! (AppImages for both architectures, and Windows zips). For Windows,
+//! KeePassXC's (an MSI and a portable zip per architecture, among digests
+//! and signatures) and yt-dlp's (bare programs). One live search at the end.
 //!
-//! The source itself is Linux only for now (`sources::linux::github`).
-
-#![cfg(unix)]
+//! The source runs on both platforms and picks its half by the
+//! `SystemInfo` it is given, so every test here builds a Linux source or a
+//! Windows one whatever machine runs it. Only the tests that compare paths
+//! spelt with forward slashes are kept to unix.
 
 use brokey_core::appstream::Catalogue;
 use brokey_core::http::Client;
-use brokey_core::sources::linux::github::{
-    self, Arch, AssetKind, Github, InstallRecord, InstallTarget,
-};
+use brokey_core::sources::github::{self, Arch, AssetKind, Github, InstallRecord, linux, windows};
 use brokey_core::system::from_os_release;
-use brokey_core::{Op, PackageKind, PackageRef, Picture, Query, Source, SourceKind, SystemInfo};
+use brokey_core::{
+    Op, PackageKind, PackageRef, Picture, Platform, Query, Source, SourceKind, SystemInfo,
+};
 use std::path::Path;
 use std::sync::Arc;
 
 const SEARCH: &str = include_str!("fixtures/github/search.json");
 const HEROIC: &str = include_str!("fixtures/github/release-heroic.json");
 const NEOVIM: &str = include_str!("fixtures/github/release-neovim.json");
+const KEEPASSXC: &str = include_str!("fixtures/github/release-keepassxc.json");
+const YT_DLP: &str = include_str!("fixtures/github/release-yt-dlp.json");
 
 const HEROIC_ID: &str = "Heroic-Games-Launcher/HeroicGamesLauncher";
 
@@ -55,6 +60,7 @@ fn heroic_record(kind: AssetKind) -> InstallRecord {
         version: "2.22.1".to_string(),
         kind,
         pkgname: None,
+        path: None,
     }
 }
 
@@ -80,7 +86,7 @@ fn the_search_answer_parses() {
 fn heroic_prefers_the_distributions_own_package_kind() {
     let release = github::parse_release(HEROIC).unwrap();
     assert_eq!(release.tag_name, "v2.22.1");
-    let pick = |native| github::pick_asset(&release.assets, Some(Arch::X86_64), native).unwrap();
+    let pick = |native| linux::pick_asset(&release.assets, Some(Arch::X86_64), native).unwrap();
     assert_eq!(
         pick(Some(AssetKind::Pacman)).asset.name,
         "Heroic-2.22.1-linux-x64.pacman"
@@ -101,7 +107,7 @@ fn heroic_prefers_the_distributions_own_package_kind() {
     assert_eq!(none.kind, AssetKind::AppImage);
     assert_eq!(none.arch, Some(Arch::X86_64));
     assert!(
-        github::pick_asset(&release.assets, Some(Arch::Aarch64), None).is_none(),
+        linux::pick_asset(&release.assets, Some(Arch::Aarch64), None).is_none(),
         "Heroic publishes nothing for Linux on ARM; the macOS arm64 zip is not it"
     );
 }
@@ -110,10 +116,10 @@ fn heroic_prefers_the_distributions_own_package_kind() {
 fn neovim_prefers_the_machines_architecture() {
     let release = github::parse_release(NEOVIM).unwrap();
     let x =
-        github::pick_asset(&release.assets, Some(Arch::X86_64), Some(AssetKind::Pacman)).unwrap();
+        linux::pick_asset(&release.assets, Some(Arch::X86_64), Some(AssetKind::Pacman)).unwrap();
     assert_eq!(x.asset.name, "nvim-linux-x86_64.appimage");
     assert_eq!(x.kind, AssetKind::AppImage);
-    let a = github::pick_asset(&release.assets, Some(Arch::Aarch64), None).unwrap();
+    let a = linux::pick_asset(&release.assets, Some(Arch::Aarch64), None).unwrap();
     assert_eq!(a.asset.name, "nvim-linux-arm64.appimage");
     assert_eq!(a.arch, Some(Arch::Aarch64));
     // An archive is found when nothing better exists.
@@ -123,7 +129,7 @@ fn neovim_prefers_the_machines_architecture() {
         .filter(|a| a.name.ends_with(".tar.gz"))
         .cloned()
         .collect();
-    let t = github::pick_asset(&archives, Some(Arch::X86_64), None).unwrap();
+    let t = linux::pick_asset(&archives, Some(Arch::X86_64), None).unwrap();
     assert_eq!(t.asset.name, "nvim-linux-x86_64.tar.gz");
     assert_eq!(t.kind, AssetKind::Archive);
 }
@@ -133,7 +139,7 @@ fn a_repository_maps_to_a_package() {
     let repo = github::parse_search(SEARCH).unwrap().remove(1);
     let release = github::parse_release(HEROIC).unwrap();
     let chosen =
-        github::pick_asset(&release.assets, Some(Arch::X86_64), Some(AssetKind::Pacman)).unwrap();
+        linux::pick_asset(&release.assets, Some(Arch::X86_64), Some(AssetKind::Pacman)).unwrap();
     let p = github::package(&repo, &release, &chosen, &Catalogue::default());
     assert_eq!(p.source, SourceKind::Github);
     assert_eq!(p.id, HEROIC_ID);
@@ -178,7 +184,7 @@ fn a_repository_maps_to_a_package() {
     );
     assert_eq!(fact(&p.facts, "Install"), None);
 
-    let appimage = github::pick_asset(&release.assets, Some(Arch::X86_64), None).unwrap();
+    let appimage = linux::pick_asset(&release.assets, Some(Arch::X86_64), None).unwrap();
     let p = github::package(&repo, &release, &appimage, &Catalogue::default());
     assert!(fact(&p.facts, "Install").unwrap().contains("~/.local/bin"));
 
@@ -204,6 +210,7 @@ fn a_rate_limit_is_one_sentence() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn plans_per_asset_kind() {
     let release = github::parse_release(HEROIC).unwrap();
@@ -212,8 +219,8 @@ fn plans_per_asset_kind() {
     let steps_for = |name: &str, native: Option<AssetKind>, has_curl: bool| {
         let asset = release.assets.iter().find(|a| a.name == name).unwrap();
         let chosen =
-            github::pick_asset(std::slice::from_ref(asset), Some(Arch::X86_64), native).unwrap();
-        github::install_steps(&InstallTarget {
+            linux::pick_asset(std::slice::from_ref(asset), Some(Arch::X86_64), native).unwrap();
+        linux::install_steps(&linux::InstallTarget {
             name: "HeroicGamesLauncher",
             chosen: &chosen,
             downloads,
@@ -258,7 +265,7 @@ fn plans_per_asset_kind() {
         pacman[1].command.args,
         vec![
             "-c",
-            github::CHECK_SCRIPT,
+            linux::CHECK_SCRIPT,
             "sh",
             "66ed041a93ac2817b744d3d0985194adfa408c8d35f64d9a8967fa5e2a58f2c1",
             path
@@ -312,14 +319,14 @@ fn plans_per_asset_kind() {
         .iter()
         .find(|a| a.name == "Heroic-2.22.1-linux-x86_64.AppImage")
         .unwrap();
-    let chosen = github::pick_asset(
+    let chosen = linux::pick_asset(
         std::slice::from_ref(asset),
         Some(Arch::X86_64),
         Some(AssetKind::Pacman),
     )
     .unwrap();
     let without_fuse = |native: Option<AssetKind>| {
-        github::install_steps(&InstallTarget {
+        linux::install_steps(&linux::InstallTarget {
             name: "HeroicGamesLauncher",
             chosen: &chosen,
             downloads,
@@ -403,8 +410,8 @@ fn plans_per_asset_kind() {
         digest: None,
     };
     let chosen =
-        github::pick_asset(&[flatpak], Some(Arch::X86_64), Some(AssetKind::Pacman)).unwrap();
-    let steps = github::install_steps(&InstallTarget {
+        linux::pick_asset(&[flatpak], Some(Arch::X86_64), Some(AssetKind::Pacman)).unwrap();
+    let steps = linux::install_steps(&linux::InstallTarget {
         name: "heroic",
         chosen: &chosen,
         downloads,
@@ -464,7 +471,7 @@ fn the_record_file_drives_installed_and_removal() {
         .unwrap();
     assert_eq!(remove.len(), 1);
     assert_eq!(remove[0].command.program, "rm");
-    assert!(remove[0].command.args[1].ends_with("/.local/bin/HeroicGamesLauncher"));
+    assert!(Path::new(&remove[0].command.args[1]).ends_with(".local/bin/HeroicGamesLauncher"));
     assert!(!remove[0].needs_root);
 
     source
@@ -509,7 +516,8 @@ fn an_install_plan_comes_from_a_remembered_release_and_never_the_network() {
     assert_eq!(steps[1].command.program, "sh");
     assert_eq!(steps[2].command.program, "pacman");
     assert!(
-        steps[0].command.args[5].starts_with(dir.path().join("cache/downloads").to_str().unwrap())
+        steps[0].command.args[5]
+            .starts_with(dir.path().join("cache").join("downloads").to_str().unwrap())
     );
     let update = arch
         .plan(&Op::Update {
@@ -584,6 +592,318 @@ fn the_source_is_always_available_and_checks_ids() {
     assert!(e.message.contains("owner/repo"), "{}", e.message);
 }
 
+fn windows_system(arch: &str) -> SystemInfo {
+    let mut s = from_os_release("");
+    s.platform = Platform::Windows;
+    s.distro_id = "windows".to_string();
+    s.arch = arch.to_string();
+    s
+}
+
+const KEEPASSXC_ID: &str = "keepassxreboot/keepassxc";
+
+#[test]
+fn on_windows_keepassxc_is_its_msi_for_this_architecture() {
+    let release = github::parse_release(KEEPASSXC).unwrap();
+    let x64 = windows::pick_asset(&release.assets, Some(Arch::X86_64)).unwrap();
+    assert_eq!(x64.asset.name, "KeePassXC-2.8.0-x64.msi");
+    assert_eq!(x64.kind, AssetKind::Msi);
+    assert_eq!(x64.arch, Some(Arch::X86_64));
+    let arm = windows::pick_asset(&release.assets, Some(Arch::Aarch64)).unwrap();
+    assert_eq!(arm.asset.name, "KeePassXC-2.8.0-ARM64.msi");
+    // Without the MSIs, the zip says only "x64": not enough to be taken as
+    // a Windows build, so nothing is offered rather than a guess.
+    let zips: Vec<_> = release
+        .assets
+        .iter()
+        .filter(|a| a.name.ends_with(".zip"))
+        .cloned()
+        .collect();
+    assert!(windows::pick_asset(&zips, Some(Arch::X86_64)).is_none());
+    // And the Linux half still reads the same release its own way.
+    let linux = linux::pick_asset(&release.assets, Some(Arch::X86_64), None).unwrap();
+    assert_eq!(linux.kind, AssetKind::AppImage);
+}
+
+#[test]
+fn on_windows_heroic_is_its_installer_and_arm_takes_it_through_emulation() {
+    let release = github::parse_release(HEROIC).unwrap();
+    let x64 = windows::pick_asset(&release.assets, Some(Arch::X86_64)).unwrap();
+    assert_eq!(x64.asset.name, "Heroic-2.22.1-Setup-x64.exe");
+    assert_eq!(x64.kind, AssetKind::Installer);
+    let arm = windows::pick_asset(&release.assets, Some(Arch::Aarch64)).unwrap();
+    assert_eq!(
+        arm.asset.name, "Heroic-2.22.1-Setup-x64.exe",
+        "Windows on ARM runs x64, and Heroic publishes nothing else for Windows"
+    );
+}
+
+#[test]
+fn on_windows_neovim_is_a_portable_zip() {
+    let release = github::parse_release(NEOVIM).unwrap();
+    let x64 = windows::pick_asset(&release.assets, Some(Arch::X86_64)).unwrap();
+    assert_eq!(x64.asset.name, "nvim-win64.zip");
+    assert_eq!(x64.kind, AssetKind::Zip);
+    let arm = windows::pick_asset(&release.assets, Some(Arch::Aarch64)).unwrap();
+    assert_eq!(arm.asset.name, "nvim-win-arm64.zip");
+}
+
+#[test]
+fn on_windows_yt_dlp_is_its_bare_program() {
+    let release = github::parse_release(YT_DLP).unwrap();
+    let x64 = windows::pick_asset(&release.assets, Some(Arch::X86_64)).unwrap();
+    assert_eq!(
+        x64.asset.name, "yt-dlp.exe",
+        "the program that does not say beats the 32-bit one and the zip"
+    );
+    assert_eq!(x64.kind, AssetKind::Exe);
+    let arm = windows::pick_asset(&release.assets, Some(Arch::Aarch64)).unwrap();
+    assert_eq!(arm.asset.name, "yt-dlp_arm64.exe");
+    assert_eq!(arm.arch, Some(Arch::Aarch64));
+}
+
+#[test]
+fn a_windows_install_downloads_checks_and_runs_windows_installer_as_the_user() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = source(&windows_system("x86_64"), dir.path());
+    let reference = PackageRef {
+        source: SourceKind::Github,
+        id: KEEPASSXC_ID.to_string(),
+    };
+    source.remember_release(KEEPASSXC_ID, github::parse_release(KEEPASSXC).unwrap());
+    let steps = source
+        .plan(&Op::Install {
+            package: reference.clone(),
+        })
+        .unwrap();
+    assert_eq!(steps.len(), 3, "{steps:#?}");
+    assert!(
+        steps.iter().all(|s| !s.needs_root),
+        "nothing goes to the helper"
+    );
+    assert!(steps.iter().all(|s| s.source == SourceKind::Github));
+
+    let msi = dir
+        .path()
+        .join("cache")
+        .join("downloads")
+        .join("keepassxreboot")
+        .join("keepassxc")
+        .join("KeePassXC-2.8.0-x64.msi");
+    let msi = msi.to_string_lossy();
+    assert_eq!(steps[0].command.program, "curl.exe");
+    assert_eq!(
+        steps[0].command.args,
+        [
+            "-L",
+            "-sS",
+            "--fail",
+            "--create-dirs",
+            "-o",
+            &msi,
+            "https://github.com/keepassxreboot/keepassxc/releases/download/2.8.0/KeePassXC-2.8.0-x64.msi"
+        ]
+    );
+    assert_eq!(steps[1].command.program, "powershell.exe");
+    assert_eq!(steps[1].title, "Checking KeePassXC-2.8.0-x64.msi");
+    let check = steps[1].command.args.last().unwrap();
+    assert!(
+        check.contains("'4f105af5ba780428718c8be5614cf95deceed5cb3b474a9bd624c5df81cec6e5'"),
+        "{check}"
+    );
+    assert!(check.contains(windows::MISMATCH));
+    assert_eq!(steps[2].command.program, "powershell.exe");
+    assert_eq!(steps[2].title, "Installing keepassxc");
+    let install = steps[2].command.args.last().unwrap();
+    assert!(
+        install.contains("'/i'") && install.contains("'/passive'"),
+        "{install}"
+    );
+    assert!(install.contains(&format!("'{msi}'")), "{install}");
+    assert!(install.contains("msiexec"), "{install}");
+    for s in &steps {
+        for a in &s.command.args {
+            assert!(!a.contains('\u{2014}'), "no em dash in {a}");
+        }
+    }
+
+    let update = source.plan(&Op::Update { package: reference }).unwrap();
+    assert_eq!(update, steps, "an update is the same download and install");
+}
+
+#[test]
+fn a_windows_installer_runs_in_its_own_window_and_a_program_is_copied() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = source(&windows_system("x86_64"), dir.path());
+    source.remember_release(HEROIC_ID, github::parse_release(HEROIC).unwrap());
+    let steps = source
+        .plan(&Op::Install {
+            package: PackageRef {
+                source: SourceKind::Github,
+                id: HEROIC_ID.to_string(),
+            },
+        })
+        .unwrap();
+    assert_eq!(
+        steps[2].title,
+        "Running the installer for HeroicGamesLauncher; finish it in its own window"
+    );
+    assert!(
+        steps[2]
+            .command
+            .args
+            .last()
+            .unwrap()
+            .contains("Start-Process")
+    );
+    assert!(!steps[2].needs_root);
+
+    source.remember_release("yt-dlp/yt-dlp", github::parse_release(YT_DLP).unwrap());
+    let steps = source
+        .plan(&Op::Install {
+            package: PackageRef {
+                source: SourceKind::Github,
+                id: "yt-dlp/yt-dlp".to_string(),
+            },
+        })
+        .unwrap();
+    let copy = steps.last().unwrap().command.args.last().unwrap();
+    let folder = dir
+        .path()
+        .join("data")
+        .join("Programs")
+        .join("yt-dlp")
+        .join("yt-dlp");
+    assert!(copy.contains(&format!("'{}'", folder.display())), "{copy}");
+    assert!(copy.contains("'yt-dlp.exe'"), "{copy}");
+}
+
+#[test]
+fn a_windows_record_says_where_a_portable_application_went_and_removes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = source(&windows_system("x86_64"), dir.path());
+    let nvim = "neovim/neovim";
+    source.remember_release(nvim, github::parse_release(NEOVIM).unwrap());
+    let reference = PackageRef {
+        source: SourceKind::Github,
+        id: nvim.to_string(),
+    };
+    source.finished(
+        &Op::Install {
+            package: reference.clone(),
+        },
+        true,
+    );
+    let records = source.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].kind, AssetKind::Zip);
+    assert_eq!(records[0].asset, "nvim-win64.zip");
+    let folder = dir
+        .path()
+        .join("data")
+        .join("Programs")
+        .join("neovim")
+        .join("neovim");
+    assert_eq!(
+        records[0].path.as_deref(),
+        Some(folder.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        fact(&source.installed().unwrap()[0].facts, "Installed as"),
+        Some("a portable application")
+    );
+
+    let remove = source
+        .plan(&Op::Remove {
+            package: reference.clone(),
+        })
+        .unwrap();
+    assert_eq!(remove.len(), 1);
+    assert!(!remove[0].needs_root);
+    assert_eq!(remove[0].title, "Removing neovim");
+    assert!(
+        remove[0]
+            .command
+            .args
+            .last()
+            .unwrap()
+            .contains(&format!("'{}'", folder.display()))
+    );
+    source.finished(&Op::Remove { package: reference }, true);
+    assert!(source.records().is_empty());
+}
+
+#[test]
+fn a_windows_removal_says_what_it_cannot_do() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = source(&windows_system("x86_64"), dir.path());
+    let reference = PackageRef {
+        source: SourceKind::Github,
+        id: KEEPASSXC_ID.to_string(),
+    };
+    let record = InstallRecord {
+        repo: KEEPASSXC_ID.to_string(),
+        name: "keepassxc".to_string(),
+        asset: "KeePassXC-2.8.0-x64.msi".to_string(),
+        version: "2.8.0".to_string(),
+        kind: AssetKind::Msi,
+        pkgname: None,
+        path: None,
+    };
+    source.record_install(record.clone()).unwrap();
+    // The MSI it was installed from is gone, so there is nothing to hand
+    // Windows Installer, and the sentence says where to go instead.
+    let e = source
+        .plan(&Op::Remove {
+            package: reference.clone(),
+        })
+        .unwrap_err();
+    assert!(e.message.contains("Add/Remove Programs"), "{}", e.message);
+
+    let msi = windows::download_path(
+        &dir.path().join("cache").join("downloads"),
+        KEEPASSXC_ID,
+        &record.asset,
+    );
+    std::fs::create_dir_all(msi.parent().unwrap()).unwrap();
+    std::fs::write(&msi, b"").unwrap();
+    let steps = source
+        .plan(&Op::Remove {
+            package: reference.clone(),
+        })
+        .unwrap();
+    let script = steps[0].command.args.last().unwrap();
+    assert!(script.contains("'/x'"), "{script}");
+    assert!(script.contains("$p.ExitCode -eq 1605"), "{script}");
+    assert!(!steps[0].needs_root);
+
+    source
+        .record_install(InstallRecord {
+            kind: AssetKind::Installer,
+            ..record
+        })
+        .unwrap();
+    let e = source.plan(&Op::Remove { package: reference }).unwrap_err();
+    assert!(
+        e.message
+            .contains("publisher's own installer, which Brokey cannot run backwards"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn a_windows_package_says_how_it_will_be_installed() {
+    let repo = github::parse_search(SEARCH).unwrap().remove(1);
+    let release = github::parse_release(HEROIC).unwrap();
+    let chosen = windows::pick_asset(&release.assets, Some(Arch::X86_64)).unwrap();
+    let p = github::package(&repo, &release, &chosen, &Catalogue::default());
+    assert_eq!(fact(&p.facts, "Asset"), Some("Heroic-2.22.1-Setup-x64.exe"));
+    assert_eq!(
+        fact(&p.facts, "Install"),
+        Some("The publisher's installer opens in its own window; finish it there.")
+    );
+}
 /// Needs the network and a share of the unauthenticated limit: one search
 /// plus up to eight release look-ups.
 #[test]
@@ -598,6 +918,7 @@ fn live_github_search_finds_heroic() {
             found.iter().map(|p| &p.id).collect::<Vec<_>>()
         )
     });
+    #[cfg(unix)]
     assert!(fact(&heroic.facts, "Asset").unwrap().contains("linux"));
     assert!(heroic.version.is_some());
 

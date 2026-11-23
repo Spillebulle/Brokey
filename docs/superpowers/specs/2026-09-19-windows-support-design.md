@@ -173,6 +173,60 @@ prefer `.msi`, then `-setup.exe` or `-installer.exe`, then a bare `.exe`, then
 a `.zip` treated as portable and unpacked into the user's local application
 directory. Architecture matching gains `x64`, `amd64`, `arm64` and `win`.
 
+*Built 2026-11-23; what was settled in building it.* The source moved from
+`sources/linux/github.rs` to `sources/github/`, which is not under either
+platform: `mod.rs` holds the API, the cache, the install record and the
+version order of updates, and `linux.rs` and `windows.rs` each hold one
+platform's asset choice and steps. Both halves are pure and compiled on
+both platforms, and the source picks between them by `SystemInfo::platform`
+rather than by `#[cfg]`, so each platform's choice and plans are tested on
+the other. `sources::linux::github` stays as a re-export.
+
+- **Choice.** A build that runs natively, or whose name does not say,
+  comes before one that would run through emulation (32-bit on x64; x64,
+  then 32-bit, on ARM64), and then the kind decides: `.msi`, an `.exe`
+  whose name says setup or installer, a bare `.exe`, a `.zip`. A zip has to
+  carry `win`, `windows`, `win32` or `win64` as a word of its name, because
+  `KeePassXC-2.8.0-x64.zip` says nothing about which system it is for, and
+  `darwin` contains `win`. Fixtures: KeePassXC (MSI), Heroic (installer),
+  neovim (zip), yt-dlp (bare program), all real release JSON.
+- **A bare `.exe` is the application, not an installer.** The spec listed
+  it after the installers without saying which it was. On GitHub it is
+  almost always a single-file program (yt-dlp, electron-builder's
+  `portable` target), so it is copied, never run, into the same per-user
+  folder a zip is unpacked into: `%LOCALAPPDATA%\Programs\Brokey\<owner>\<repo>`.
+  That folder is written into the install record (`path`) once the install
+  worked, because nothing else on the machine knows where it is.
+- **No GitHub step goes to the helper.** An elevated `msiexec /i` on a
+  file in the user's own cache would install whatever an unprivileged
+  process put there after the checksum was taken, which is the hole the
+  closed list's "program this process cannot replace" rule exists to
+  close. So `msiexec /i <file> /passive /norestart` runs as the user, and a
+  per-machine package gets its consent prompt from Windows Installer
+  itself, naming the package. `/passive` and not `/qn`, because an
+  unelevated `/qn` cannot show that prompt and fails. 3010 is reported as
+  done with a restart owed.
+- **An installer is run interactively.** The silent switch depends on what
+  built it (NSIS, Inno Setup, WiX, Squirrel), and the file name does not
+  say, so no switch is guessed. It is started through `Start-Process`,
+  which goes through the shell and so honours a manifest that asks for
+  Administrator; started directly, such an installer fails with "the
+  requested operation requires elevation".
+- **Unpacking is `tar.exe`** from the system directory, which refuses a
+  member whose path climbs out with `..` and strips a drive letter, both
+  measured on the reference machine. An update unpacks over the folder so a
+  portable application's settings beside it survive.
+- **Removal.** An MSI is removed with the package it was installed from,
+  kept in `<cache>\downloads\<owner>\<repo>` for that, 1605 counting as
+  already removed; a portable application is its folder. What a
+  publisher's installer put on the machine is left to its Add/Remove
+  Programs entry, and the sentence says so.
+- **Checksums.** Every download whose asset carries GitHub's `sha256`
+  digest is checked with `Get-FileHash` before anything else touches it,
+  and deleted if it does not match. An asset uploaded before GitHub
+  computed digests (June 2025) has none, and is installed unchecked, as on
+  Linux.
+
 **Windows optional features.** Hyper-V, WSL, the OpenSSH client, .NET
 Framework 3.5, Windows Sandbox: software already on the machine that is
 switched on rather than downloaded. Enabling and disabling are steps through
