@@ -575,7 +575,12 @@ fn everything_the_page_receives_matches_types_ts() {
     for kind in SourceKind::ALL {
         c.value("SourceKind", &kind);
     }
-    for matched in [MatchedBy::AppStream, MatchedBy::Name, MatchedBy::Alone] {
+    for matched in [
+        MatchedBy::AppStream,
+        MatchedBy::Name,
+        MatchedBy::Registry,
+        MatchedBy::Alone,
+    ] {
         c.value("MatchedBy", &matched);
     }
     c.value(

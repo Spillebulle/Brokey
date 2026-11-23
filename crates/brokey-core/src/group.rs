@@ -94,6 +94,29 @@ pub fn group(packages: Vec<Package>, query: &str) -> Vec<App> {
         }
     }
 
+    // Pass one and a half: the Add/Remove Programs uninstall key. A package
+    // manager on Windows that matched its package to the entry its install
+    // left behind says so with a `Registry key` fact naming that entry, and
+    // the entry itself carries the same fact. That is exact, the way an
+    // AppStream id is, and it is the only thing that can join winget's
+    // `7-Zip` to the registry's `7-Zip 26.03 (x64)`: the two names share no
+    // key. Across sources only, because one source never lists one entry
+    // twice.
+    let mut by_registry: HashMap<&str, usize> = HashMap::new();
+    for (i, f) in facts.iter().enumerate() {
+        if let Some(key) = f.registry_key.as_deref() {
+            match by_registry.get(key) {
+                Some(&first) if facts[first].source != f.source => {
+                    sets.union(first, i);
+                }
+                Some(_) => {}
+                None => {
+                    by_registry.insert(key, i);
+                }
+            }
+        }
+    }
+
     // Pass two: the name keys. Only pairs sharing a key are compared, so the
     // cost is the size of each bucket, not the square of the input. Buckets
     // are small in practice: a key is shared by at most one package per
@@ -150,6 +173,8 @@ pub fn group(packages: Vec<Package>, query: &str) -> Vec<App> {
                     (MatchedBy::Alone, 1.0)
                 } else if shares_appstream_id(i, &group, &facts) {
                     (MatchedBy::AppStream, 1.0)
+                } else if shares_registry_key(i, &group, &facts) {
+                    (MatchedBy::Registry, 1.0)
                 } else {
                     // A member of a group of two or more that has no
                     // AppStream twin got there through a name pair, so a
@@ -403,6 +428,9 @@ struct Facts {
     impostor: Option<&'static str>,
     /// Significant summary words, sorted and deduplicated.
     words: Vec<String>,
+    /// The Add/Remove Programs entry the package is, or was matched to: the
+    /// value of its `Registry key` fact. See pass one and a half in [`group`].
+    registry_key: Option<String>,
 }
 
 impl Facts {
@@ -438,6 +466,12 @@ impl Facts {
                 .as_deref()
                 .map(significant_words)
                 .unwrap_or_default(),
+            registry_key: package
+                .facts
+                .iter()
+                .find(|(k, _)| k == crate::sources::windows::arp::REGISTRY_KEY_FACT)
+                .map(|(_, v)| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
         }
     }
 }
@@ -520,6 +554,19 @@ fn shares_appstream_id(i: usize, group: &[usize], facts: &[Facts]) -> bool {
         Some(id) => group
             .iter()
             .any(|&j| j != i && facts[j].appstream_key.as_deref() == Some(id.as_str())),
+        None => false,
+    }
+}
+
+/// Whether member `i` of `group` names an uninstall key another member, from
+/// another source, names too.
+fn shares_registry_key(i: usize, group: &[usize], facts: &[Facts]) -> bool {
+    match &facts[i].registry_key {
+        Some(key) => group.iter().any(|&j| {
+            j != i
+                && facts[j].source != facts[i].source
+                && facts[j].registry_key.as_ref() == Some(key)
+        }),
         None => false,
     }
 }
