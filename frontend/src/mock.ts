@@ -13,6 +13,7 @@ import { FLATHUB, type FlathubEntry } from "./mock-flathub";
 import type {
   App,
   DriversReport,
+  FeaturesReport,
   Edition,
   Event,
   Op,
@@ -77,7 +78,9 @@ const SYSTEM: SystemInfo = {
   arch: "x86_64",
   desktop: "COSMIC",
   session: "wayland",
-  platform: "linux",
+  // ?platform=windows draws the Windows shell (the Features page in the
+  // Drivers slot, Administrator wording) over the same mock world.
+  platform: PARAMS.get("platform") === "windows" ? "windows" : "linux",
 };
 
 const SOURCES: SourceStatus[] = [
@@ -920,8 +923,25 @@ function aurBuild(id: string): Step[] {
   ];
 }
 
+/** What the Features source plans: DISM from the system directory, never restarting the machine. */
+function featureStep(id: string, on: boolean): Step {
+  const name = FEATURES.find((f) => f.id === id)?.name ?? id;
+  const capability = id.includes("~~~~");
+  const verb = capability ? (on ? "/Add-Capability" : "/Remove-Capability") : on ? "/Enable-Feature" : "/Disable-Feature";
+  const target = capability ? `/CapabilityName:${id}` : `/FeatureName:${id}`;
+  const args = ["/English", "/Online", verb, target, ...(on && !capability ? ["/All"] : []), "/NoRestart"];
+  return {
+    source: "features",
+    title: `${on ? "Turning on" : "Turning off"} ${name}`,
+    command: { program: "C:\\Windows\\System32\\dism.exe", args, env: [], cwd: null },
+    needs_root: true,
+    weight: 6,
+  };
+}
+
 function stepsFor(op: Op): Step[] {
   const cmd = (program: string, ...args: string[]) => ({ program, args, env: [] as [string, string][], cwd: null });
+  if ((op.op === "install" || op.op === "remove") && op.package.source === "features") return [featureStep(op.package.id, op.op === "install")];
   switch (op.op) {
     case "install": {
       const name = nameOf(op.package);
@@ -1087,6 +1107,11 @@ function emit(event: Event) {
 }
 
 function applyOp(op: Op) {
+  if ((op.op === "install" || op.op === "remove") && op.package.source === "features") {
+    const f = FEATURES.find((x) => x.id === op.package.id);
+    if (f) f.state = op.op === "install" ? "enabled" : "disabled";
+    return;
+  }
   switch (op.op) {
     case "install": {
       const p = findPackage(op.package);
@@ -1133,6 +1158,9 @@ function summary(ops: Op[], ok: boolean, failed?: Step): string {
   if (!ok) {
     const what = failed ? failed.title.charAt(0).toLowerCase() + failed.title.slice(1) : "the transaction";
     return `${what.charAt(0).toUpperCase() + what.slice(1)} did not finish. ${failed?.command.program ?? "pacman"} said what went wrong in the log. Nothing was changed.`;
+  }
+  if (count > 0 && rest.every((o) => "package" in o && o.package.source === "features") && kinds.size === 1) {
+    return `Turned ${kinds.has("install") ? "on" : "off"} ${count} Windows ${count === 1 ? "feature" : "features"}.`;
   }
   if (setups.length > 0) {
     const tools = setups.join(" and ");
@@ -1257,7 +1285,9 @@ async function run(status: PlanStatus) {
   running.delete(id);
   if (!alive()) return;
   for (const op of p.ops) applyOp(op);
-  emit({ event: "plan_finished", plan: id, ok: true, message: summary(p.ops, true) });
+  // DISM exits 3010 for most feature changes, and the runner says so at the end.
+  const restart = p.ops.some((o) => "package" in o && o.package.source === "features") ? ` ${RESTART_NOTE}` : "";
+  emit({ event: "plan_finished", plan: id, ok: true, message: summary(p.ops, true) + restart });
 }
 
 export async function run_plan(ops: Op[]): Promise<PlanStatus> {
@@ -1393,6 +1423,35 @@ export async function drivers(): Promise<DriversReport> {
       },
     ],
   };
+}
+
+// ── Windows features: the reference machine, as WMI reports it ──────────────
+
+const RESTART_NOTE = "Windows needs a restart to finish this change. Restart the computer when it suits you.";
+
+const FEATURES: FeaturesReport["features"] = [
+  { id: "Microsoft-Windows-Subsystem-Linux", name: "Windows Subsystem for Linux", summary: "Runs Linux distributions alongside Windows. WSL 2 also needs Virtual Machine Platform.", state: "enabled", well_known: true },
+  { id: "VirtualMachinePlatform", name: "Virtual Machine Platform", summary: "The virtualisation WSL 2 and other lightweight virtual machines run on.", state: "enabled", well_known: true },
+  { id: "Microsoft-Hyper-V-All", name: "Hyper-V", summary: "Runs full virtual machines on the hypervisor built into Windows, with its manager and PowerShell module.", state: "disabled", well_known: true },
+  { id: "Containers-DisposableClientVM", name: "Windows Sandbox", summary: "A throwaway desktop for running something you do not trust. Everything in it is deleted when it closes.", state: "enabled", well_known: true },
+  { id: "HypervisorPlatform", name: "Windows Hypervisor Platform", summary: "Lets other virtualisation software, such as VirtualBox, VMware and QEMU, run on the Windows hypervisor.", state: "disabled", well_known: true },
+  { id: "NetFx3", name: ".NET Framework 3.5", summary: "Includes .NET 2.0 and 3.0. Older applications ask for it when they start.", state: "absent", well_known: true },
+  { id: "OpenSSH.Client~~~~0.0.1.0", name: "OpenSSH client", summary: "The ssh, scp and sftp commands.", state: "enabled", well_known: true },
+  { id: "OpenSSH.Server~~~~0.0.1.0", name: "OpenSSH server", summary: "Lets other machines connect to this one over SSH.", state: "absent", well_known: true },
+  { id: "Containers", name: "Containers", summary: null, state: "disabled", well_known: false },
+  { id: "Containers-HNS", name: "Containers-HNS", summary: null, state: "disabled", well_known: false },
+  { id: "Printing-PrintToPDFServices-Features", name: "Microsoft Print to PDF", summary: null, state: "enabled", well_known: false },
+  { id: "Printing-XPSServices-Features", name: "Microsoft XPS Document Writer", summary: null, state: "disabled", well_known: false },
+  { id: "NetFx4-AdvSrvs", name: ".NET Framework 4.8 Advanced Services", summary: null, state: "enabled", well_known: false },
+  { id: "SMB1Protocol", name: "SMB 1.0/CIFS File Sharing Support", summary: null, state: "disabled", well_known: false },
+  { id: "TelnetClient", name: "Telnet Client", summary: null, state: "disabled", well_known: false },
+  { id: "TFTP", name: "TFTP Client", summary: null, state: "disabled", well_known: false },
+  { id: "Windows-Defender-Default-Definitions", name: "Windows-Defender-Default-Definitions", summary: null, state: "absent", well_known: false },
+];
+
+export async function features(): Promise<FeaturesReport> {
+  await delay(200);
+  return { available: true, note: null, features: FEATURES.map((f) => ({ ...f })) };
 }
 
 // ── Settings ────────────────────────────────────────────────────────────────
