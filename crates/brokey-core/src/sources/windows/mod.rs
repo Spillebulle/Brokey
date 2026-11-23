@@ -6,6 +6,7 @@
 pub mod arp;
 pub mod choco;
 pub mod icon;
+pub mod msix;
 pub mod pe;
 pub mod scoop;
 pub mod winget;

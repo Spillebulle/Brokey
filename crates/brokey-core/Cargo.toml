@@ -29,6 +29,14 @@ tempfile = "3"
 
 [target."cfg(windows)".dependencies]
 windows-registry = "0.6.1"
+# The Appx state, which only the Windows Runtime's PackageManager lists per
+# user. The same 0.61 the window already links through Tauri, so it adds
+# features rather than a second copy.
+windows = { version = "0.61", features = [
+  "ApplicationModel",
+  "Foundation_Collections",
+  "Management_Deployment",
+] }
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Security",

@@ -37,7 +37,8 @@ pub fn all(
             Box::new(windows::arp::Arp::new()),
             Box::new(windows::winget::Winget::new(client.clone())),
             Box::new(windows::choco::Choco::new(client.clone())),
-            Box::new(windows::scoop::Scoop::new(client)),
+            Box::new(windows::scoop::Scoop::new(client.clone())),
+            Box::new(windows::msix::Msix::new(client)),
         ]
     }
 }
@@ -79,7 +80,7 @@ mod tests {
     /// Windows from here on. The order is the order the page draws them in.
     #[cfg(windows)]
     #[test]
-    fn windows_has_add_remove_programs_winget_chocolatey_and_scoop() {
+    fn windows_has_add_remove_programs_winget_chocolatey_scoop_and_the_store() {
         let kinds = windows_kinds();
         assert_eq!(
             kinds,
@@ -88,6 +89,7 @@ mod tests {
                 crate::SourceKind::Winget,
                 crate::SourceKind::Choco,
                 crate::SourceKind::Scoop,
+                crate::SourceKind::Msix,
             ]
         );
     }

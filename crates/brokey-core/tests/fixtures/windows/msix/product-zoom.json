@@ -1,0 +1,118 @@
+{
+ "$type": "Microsoft.Marketplace.Storefront.Contracts.V1.ResponseItem, Microsoft.Marketplace.Storefront.Contracts",
+ "Path": "/products/XP99J3KP4XZ4VV?market=NO&locale=en-GB&deviceFamily=Windows.Desktop",
+ "ExpiryUtc": "2026-11-23T22:48:37.1541147Z",
+ "Payload": {
+  "$type": "Microsoft.Marketplace.Storefront.Contracts.V3.ProductDetails, Microsoft.Marketplace.Storefront.Contracts",
+  "ProductId": "XP99J3KP4XZ4VV",
+  "Title": "Zoom Workplace",
+  "PublisherName": "Zoom Communications, Inc.",
+  "DeveloperName": "Zoom Video Communications, Inc.",
+  "ShortDescription": "Zoom is for you. We're here to help you connect, communicate, and express your ideas so you can get more done together. We're proud to be trusted by millions of enterprises, small businesses, and individuals, just like you.",
+  "Description": "Meet Zoom Workplace: your all-in-one, AI-first collaboration platform. Bring meetings, phone*, chat, whiteboard, mail, calendar, and more together, all powered by Zoom AI. And with products like ZoomMate*, My Notes, and AI Productivity Suite*, you can move work forward fast by turning discussions into action items, documents, and finished deliverables, automatically.\n\nCONNECT EVERY CONVERSATION IN A SINGLE APP\nSchedule or join a video meeting with a single tap\nTranscribe and capture notes from any meeting, whether you're on a call or in the room*\nShare and annotate content during meetings\nChat with colleagues and external contacts\nPlace and receive phone calls or send SMS text messages*\n\nKEEP PROJECTS MOVING\nAdd ZoomMate and create completed deliverables built from your conversations*\nBrainstorm on virtual whiteboards\nReceive automated meeting summaries with Zoom AI*\nFollow up after meetings and share files with chat\nCreate and share editable notes\nUse your existing email and calendar to schedule meetings\n\nWORK SAFELY ON THE GO\nKeep your data secure with enterprise-grade security and SSO*\nMove a live meeting or call seamlessly between devices with a single tap\nTurn on virtual backgrounds to look more polished\nStart a Zoom Rooms meeting and share content*\n*A paid Zoom Workplace subscription or other license may be required to use certain product features. Use of advanced and metered AI features requires a Zoom AI Productivity Suite or ZoomMate subscription and available AI Credits. Upgrade your free account today to start gaining these benefits. Some features not currently available across all regions or plans and are subject to change.\n\nUPGRADE YOUR FREE ACCOUNT TO ZOOM WORKPLACE PRO\nHost unlimited meetings up to 30 hours each\nRecord meetings to the cloud (up to 10GB)\nAssign meeting co-hosts and scheduler\nGet AI notetaking and summaries with Zoom AI\nWe’d love to hear from you! Join the Zoom community: https://community.zoom.com/\nFollow us on social media @zoom\nTerms of Service: https://explore.zoom.us/terms/ \nPrivacy Statement: https://explore.zoom.us/privacy/ \nHave a question? Contact us at https://support.zoom.com/hc",
+  "AppWebsiteUrl": "https://zoom.us/",
+  "Categories": [
+   "Productivity"
+  ],
+  "Images": [
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "logo",
+    "Url": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBfLf9EetALaWlLDJdgfp14FAtJl7mHqbui.GtMR8.6yyQL7UbLxCNSp1wsDDsGUUFjMsqHN0Qxr8_ApNmb7EhpI-&format=source",
+    "Height": 2160,
+    "Width": 2160
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "screenshot",
+    "ImagePositionInfo": "0",
+    "Url": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBfLf9EetALaWlLDJdgfp14EApO84qC44qrHdwX9uZCfnyEhwTvL.Qjg8FoTqS5LJ2K8u0vFtg6EJ8E1Kj8lkOvU-&format=source",
+    "Height": 768,
+    "Width": 1366
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "screenshot",
+    "ImagePositionInfo": "1",
+    "Url": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBfLf9EetALaWlLDJdgfp14EiL3gnYHpN7hkTHxakDi0UDxxnlqYYsrm37kDi2f4BOYS70pbZSxOKBxu14zlmYGo-&format=source",
+    "Height": 768,
+    "Width": 1366
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "screenshot",
+    "ImagePositionInfo": "2",
+    "Url": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBfLf9EetALaWlLDJdgfp14EStMYaOnlnpCzX5HR4tYdONpzHTATLB5pGFHyMa2oQ7z9wDUVwA9pcSNG_XNYYhMU-&format=source",
+    "Height": 768,
+    "Width": 1366
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "screenshot",
+    "ImagePositionInfo": "3",
+    "Url": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBfLf9EetALaWlLDJdgfp14EqQRnOB4Ek4_bBuO07BKN8Z1mCqtOqBev8.sdRDUhzoibUs_T8_u0wQdckDk_H8eA-&format=source",
+    "Height": 768,
+    "Width": 1366
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "screenshot",
+    "ImagePositionInfo": "4",
+    "Url": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBfLf9EetALaWlLDJdgfp14FFo7EGxLLr_WLFGHMskd4CxPpXCeHUEM8nNzq_6b8IaocVRhG9YLG4nozPVI9iBw8-&format=source",
+    "Height": 768,
+    "Width": 1366
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "screenshot",
+    "ImagePositionInfo": "5",
+    "Url": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBfLf9EetALaWlLDJdgfp14HBJ4RpHA2RAEHrgTIFHrcqu2xqIb4V8OGG9833yBCPJKq.heIhdUYMoP8CyIS90yc-&format=source",
+    "Height": 768,
+    "Width": 1366
+   },
+   {
+    "$type": "Microsoft.Marketplace.Storefront.Contracts.V2.ImageItem, Microsoft.Marketplace.Storefront.Contracts",
+    "ImageType": "screenshot",
+    "ImagePositionInfo": "6",
+    "Url": "https://images-eds-ssl.xboxlive.com/image?url=4rt9.lXDC4H_93laV1_eHM0OYfiFeMI2p9MWie0CvL99U4GA1gf6_kayTt_kBblFwHwo8BW8JXlqfnYxKPmmBfLf9EetALaWlLDJdgfp14Ea3UDVB2CNCztwYTgR5wvT8SmllrY44XEob8Pwnl8Xm4uAwoTT5MxkZM1dMtipUvc-&format=source",
+    "Height": 768,
+    "Width": 1366
+   }
+  ],
+  "AverageRating": 0.0,
+  "RatingCount": 0,
+  "PackageFamilyNames": [
+   "zoom.us.Zoom Video Meetings"
+  ],
+  "LastUpdateDateUtc": "2024-04-12T18:54:43Z",
+  "Installer": {
+   "$type": "Microsoft.Marketplace.Storefront.Contracts.V9.Installer, Microsoft.Marketplace.Storefront.Contracts",
+   "Type": "WPM",
+   "Id": "XP99J3KP4XZ4VV",
+   "ProductCode": "zoomumx",
+   "Architectures": {
+    "x86": {
+     "$type": "Microsoft.Marketplace.Storefront.Contracts.V9.InstallerMetadata, Microsoft.Marketplace.Storefront.Contracts",
+     "Version": "6.6.11 (23272)",
+     "SourceUri": "https://cdn.zoom.us/prod/6.6.11.23272/ZoomSilentInstaller.EXE",
+     "CDNUri": "https://cdn.storeedgefd.dsx.mp.microsoft.com/eus2/cachedpackages/33785810/8e376d36-34a3-46aa-93a1-e82709b19566/5ac75c39926be7cb28cce522b5ef02f499cef424b429a0e11dc896904d22a345/file",
+     "Hash": "5ac75c39926be7cb28cce522b5ef02f499cef424b429a0e11dc896904d22a345"
+    },
+    "x64": {
+     "$type": "Microsoft.Marketplace.Storefront.Contracts.V9.InstallerMetadata, Microsoft.Marketplace.Storefront.Contracts",
+     "Version": "7.1.5 (43453)",
+     "SourceUri": "https://cdn.zoom.us/prod/7.1.5.43453/x64/ZoomSilentInstaller.EXE",
+     "CDNUri": "https://cdn.storeedgefd.dsx.mp.microsoft.com/eus2/cachedpackages/33785810/8e376d36-34a3-46aa-93a1-e82709b19566/5e6e3ed9e4f91f3b5860f007ab11a481f14c31702e06411ed7b609c935bade6e/file",
+     "Hash": "5e6e3ed9e4f91f3b5860f007ab11a481f14c31702e06411ed7b609c935bade6e"
+    },
+    "ARM64": {
+     "$type": "Microsoft.Marketplace.Storefront.Contracts.V9.InstallerMetadata, Microsoft.Marketplace.Storefront.Contracts",
+     "Version": "6.6.11 (23272)",
+     "SourceUri": "https://cdn.zoom.us/prod/7.1.5.43453/arm64/ZoomSilentInstaller.EXE",
+     "CDNUri": "https://cdn.storeedgefd.dsx.mp.microsoft.com/eus2/cachedpackages/33785810/8e376d36-34a3-46aa-93a1-e82709b19566/13c07b946ce198dd6a18033e63fb2e87f7bcf34cd423f9bfbedee1d3b870f2de/file",
+     "Hash": "13c07b946ce198dd6a18033e63fb2e87f7bcf34cd423f9bfbedee1d3b870f2de"
+    }
+   }
+  }
+ }
+}

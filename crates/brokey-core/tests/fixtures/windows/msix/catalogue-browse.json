@@ -1,0 +1,688 @@
+{
+ "Products": [
+  {
+   "LocalizedProperties": [
+    {
+     "Images": [
+      {
+       "FileId": "3004083314328609787",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 1937,
+       "ForegroundColor": "",
+       "Height": 50,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Logo",
+       "UnscaledImageSHA256Hash": "b3VSFEfYclaqTwAj9QoXW8XQqSbgmxi/IOkPcFcuBsY=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.30063.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.4c33a632-149f-4999-87c0-c927078f3b77",
+       "Width": 50
+      },
+      {
+       "FileId": "3047521229575213025",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 3619,
+       "ForegroundColor": "",
+       "Height": 75,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Logo",
+       "UnscaledImageSHA256Hash": "nqt3NTvoe8ojdM5KWwvy/aMEwBwJ0cqFlfRU/nf0BaY=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.43934.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.798816ab-2937-493c-9980-677aefa06fc9",
+       "Width": 75
+      },
+      {
+       "FileId": "3029367050768691160",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 4582,
+       "ForegroundColor": "",
+       "Height": 100,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Logo",
+       "UnscaledImageSHA256Hash": "SrcvxS7XBdJACsd83I9840OvExsMGznkbgGMiy680jo=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.46922.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.f77fb30d-e433-46f1-9886-d8b1225ec60b",
+       "Width": 100
+      },
+      {
+       "FileId": "3071708700361040863",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 4578,
+       "ForegroundColor": "",
+       "Height": 150,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Tile",
+       "UnscaledImageSHA256Hash": "2Nitw03EgqsqjbIB3NXhbEJvzePFtKgMAWu2DlGA/IA=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.55512.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.7c13f943-ab79-46ed-95f7-c62542d9ebeb",
+       "Width": 150
+      },
+      {
+       "FileId": "3026906007082203243",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 8933,
+       "ForegroundColor": "",
+       "Height": 225,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Tile",
+       "UnscaledImageSHA256Hash": "hEByuiCN7OPp66VB0hC4bPYIPS+hY8fvMAKFx/ChqVQ=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.16516.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.7cc88614-b337-41a3-8861-072375031629",
+       "Width": 225
+      },
+      {
+       "FileId": "3032466322792654755",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 11797,
+       "ForegroundColor": "",
+       "Height": 300,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Tile",
+       "UnscaledImageSHA256Hash": "O1/w0xzNfssrKFsdJgU8o6Rt+Uj1GITY5UZd4JrY+RU=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.24379.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.bee3afcb-7319-4c21-b5bf-066fd35a6f1e",
+       "Width": 300
+      },
+      {
+       "FileId": "3040252360672919117",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 1732,
+       "ForegroundColor": "",
+       "Height": 44,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Tile",
+       "UnscaledImageSHA256Hash": "gHEqCEwZWqriY4QPJb+OfTcOgu1MVNtCF3E5rZz+JNU=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.29056.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.c395b9cb-885e-4c1d-b772-2faf1ec25cf7",
+       "Width": 44
+      },
+      {
+       "FileId": "3051360100492600752",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 2751,
+       "ForegroundColor": "",
+       "Height": 66,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Tile",
+       "UnscaledImageSHA256Hash": "fs353r00HWWHg11ZAHLu/qzY0vc/ZB/uBq6+PkJqz54=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.52606.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.0b09fa8f-0707-4222-800f-ccb04739fc5f",
+       "Width": 66
+      },
+      {
+       "FileId": "3019724241811278011",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "",
+       "FileSizeInBytes": 3991,
+       "ForegroundColor": "",
+       "Height": 88,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Tile",
+       "UnscaledImageSHA256Hash": "pjkUi5ooYZ5CewpRKJZ7ekPHsdGy5E6Z5xfmPoaJNZY=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.14758.14170710832825752.0337f199-11f5-4ef1-848d-cfb7a32bb128.44b759ad-ef1c-49d2-bee4-af0e49ce73bc",
+       "Width": 88
+      },
+      {
+       "FileId": "3012957236420830884",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "Bring your ideas to life with CoCreator.",
+       "FileSizeInBytes": 1012181,
+       "ForegroundColor": "",
+       "Height": 776,
+       "ImagePositionInfo": "Desktop/1",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "hV7yjO7oyITaB/T26hFReJAOOyCxv+wgIQJi77BJAvI=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.24197.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.a94d749f-2030-4d7d-af6f-283392868c77",
+       "Width": 1374
+      },
+      {
+       "FileId": "3004666162285197389",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "Paint supports dark theme.",
+       "FileSizeInBytes": 458729,
+       "ForegroundColor": "",
+       "Height": 776,
+       "ImagePositionInfo": "Desktop/2",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "AIovX050WWFMy49AUDRSI9tdt3tcMy6f4xhIbNg0vBo=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.35328.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.96aad02f-5992-49fe-854a-cc98b460b64d",
+       "Width": 1374
+      },
+      {
+       "FileId": "3010218976867920416",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "Edit like a pro with background removal.",
+       "FileSizeInBytes": 1035661,
+       "ForegroundColor": "",
+       "Height": 776,
+       "ImagePositionInfo": "Desktop/3",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "7NoN7pEjvcZ1mTP5s48eAJ+uXrwhQiMD1qoOEV51eCw=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.56044.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.6693aed5-fa3e-434c-a294-eeacc9470989",
+       "Width": 1374
+      },
+      {
+       "FileId": "3063544192414224995",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "Use layers to create and experiment with new ideas.",
+       "FileSizeInBytes": 690668,
+       "ForegroundColor": "",
+       "Height": 776,
+       "ImagePositionInfo": "Desktop/4",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "p4ucgcj0zRSK98yqFTa2py0q3oudvnn0KZvdJQpUfJM=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.35751.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.55d9d7a9-4522-4716-a83f-6f562e35b8e6",
+       "Width": 1374
+      },
+      {
+       "FileId": "3037765626141896997",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "Support for transparent images.",
+       "FileSizeInBytes": 671240,
+       "ForegroundColor": "",
+       "Height": 768,
+       "ImagePositionInfo": "Desktop/5",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "6tKlhjo9isC4Oobe33yeU62WIgOVt1kABLfBkd3B2wc=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.53994.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.5b89f110-7fc4-4756-a5e9-33396d96beeb",
+       "Width": 1366
+      },
+      {
+       "FileId": "3031534221102890263",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "#0078D4",
+       "Caption": "Simple and powerful creative toolset.",
+       "FileSizeInBytes": 577290,
+       "ForegroundColor": "",
+       "Height": 776,
+       "ImagePositionInfo": "Desktop/0",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "GXWrRHQheDx+jq/TFnsU9SepxfWX7tPCpDP388VIzwU=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.29977.14170710832825752.5addfe15-ba9d-4fc8-8332-64849a1e4126.3bdf2f41-882d-43de-bfdf-ed0647098ed7",
+       "Width": 1374
+      }
+     ],
+     "ProductTitle": "Paint"
+    }
+   ],
+   "MarketProperties": [
+    {
+     "OriginalReleaseDate": "2020-11-18T18:05:52.2167692Z",
+     "UsageData": [
+      {
+       "AggregateTimeSpan": "7Days",
+       "AverageRating": 4.1,
+       "RatingCount": 36
+      },
+      {
+       "AggregateTimeSpan": "30Days",
+       "AverageRating": 4.0,
+       "RatingCount": 123
+      },
+      {
+       "AggregateTimeSpan": "AllTime",
+       "AverageRating": 4.1,
+       "RatingCount": 81556
+      }
+     ]
+    }
+   ],
+   "ProductBSchema": "ProductUnifiedApp;3",
+   "ProductId": "9PCFS5B6T72H",
+   "PartD": "",
+   "ProductFamily": "Apps",
+   "ProductKind": "Application",
+   "DisplaySkuAvailabilities": [
+    {
+     "Availabilities": [
+      {
+       "Actions": [
+        "Details",
+        "Fulfill",
+        "Purchase",
+        "Browse",
+        "Curate",
+        "Redeem"
+       ],
+       "OrderManagementData": {
+        "Price": {
+         "CurrencyCode": "NOK",
+         "IsPIRequired": false,
+         "ListPrice": 0.0,
+         "MSRP": 0.0,
+         "TaxType": "VatIncluded",
+         "WholesaleCurrencyCode": ""
+        }
+       }
+      },
+      {
+       "Actions": [
+        "License",
+        "Details"
+       ],
+       "OrderManagementData": {
+        "Price": {
+         "CurrencyCode": "USD",
+         "IsPIRequired": false,
+         "ListPrice": 0.0,
+         "MSRP": 0.0,
+         "TaxType": "",
+         "WholesaleCurrencyCode": ""
+        }
+       }
+      },
+      {
+       "Actions": [
+        "License",
+        "Browse",
+        "Details"
+       ],
+       "OrderManagementData": {
+        "Price": {
+         "CurrencyCode": "USD",
+         "IsPIRequired": false,
+         "ListPrice": 0.0,
+         "MSRP": 0.0,
+         "TaxType": "",
+         "WholesaleCurrencyCode": ""
+        }
+       }
+      }
+     ]
+    },
+    {
+     "Availabilities": [
+      {
+       "Actions": [
+        "Details",
+        "License",
+        "Fulfill"
+       ],
+       "OrderManagementData": {
+        "Price": {
+         "CurrencyCode": "USD",
+         "IsPIRequired": false,
+         "ListPrice": 0.0,
+         "MSRP": 0.0,
+         "TaxType": "",
+         "WholesaleCurrencyCode": ""
+        }
+       }
+      },
+      {
+       "Actions": [
+        "License",
+        "Details"
+       ],
+       "OrderManagementData": {
+        "Price": {
+         "CurrencyCode": "USD",
+         "IsPIRequired": false,
+         "ListPrice": 0.0,
+         "MSRP": 0.0,
+         "TaxType": "",
+         "WholesaleCurrencyCode": ""
+        }
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "LocalizedProperties": [
+    {
+     "Images": [
+      {
+       "FileId": "3026126807405064368",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "",
+       "Caption": "",
+       "FileSizeInBytes": 28874,
+       "ForegroundColor": "",
+       "Height": 300,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Logo",
+       "UnscaledImageSHA256Hash": "325knaEIisnVzXoOLooS9R042Eoe079IaRd7Q1W79Gk=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.28383.14202576542330599.e2a21905-d839-4a08-a9e2-42b2b28b331d.fe8f4307-30e2-4bf4-b5e6-c0be25fcea8b",
+       "Width": 300
+      },
+      {
+       "FileId": "3042935683480126125",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "",
+       "Caption": "",
+       "FileSizeInBytes": 9367,
+       "ForegroundColor": "",
+       "Height": 150,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Logo",
+       "UnscaledImageSHA256Hash": "lKUI+bmiHtzq1QwCXlH5wwq7hgZYUyRBSqP2AaX9TEo=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.42388.14202576542330599.e2a21905-d839-4a08-a9e2-42b2b28b331d.e6b5ed27-508b-4b59-8dfb-8737d234015e",
+       "Width": 150
+      },
+      {
+       "FileId": "3007645696978250484",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "",
+       "Caption": "",
+       "FileSizeInBytes": 3477,
+       "ForegroundColor": "",
+       "Height": 71,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Logo",
+       "UnscaledImageSHA256Hash": "NrAkrj9de8ihoav+jFgGvoOA962eYBrVowG2WR/18q8=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.45110.14202576542330599.e2a21905-d839-4a08-a9e2-42b2b28b331d.5276c19f-7f39-4834-bef7-7633dd29784b",
+       "Width": 71
+      },
+      {
+       "FileId": "3050977946306359411",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "",
+       "Caption": "",
+       "FileSizeInBytes": 1300662,
+       "ForegroundColor": "",
+       "Height": 2160,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "Poster",
+       "UnscaledImageSHA256Hash": "GXl/lSeRElekRLzoHvp+hrA7gOJFuCLppY+yl9P7mrk=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.31001.14202576542330599.27bd9e36-3d21-4488-aad1-278cf3b187e6.f75521b4-0f9a-4357-8ec0-49e05736d5f7",
+       "Width": 1440
+      },
+      {
+       "FileId": "3058767120686073742",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "",
+       "Caption": "",
+       "FileSizeInBytes": 3221534,
+       "ForegroundColor": "",
+       "Height": 1080,
+       "ImagePositionInfo": "",
+       "ImagePurpose": "SuperHeroArt",
+       "UnscaledImageSHA256Hash": "4i2pfhB4OkDnzN0duFLTU78yG0B4N0UwQEy8VeBamGE=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.11746.14202576542330599.27bd9e36-3d21-4488-aad1-278cf3b187e6.d68abe76-e9a4-4e40-9c3c-ad4a0c645705",
+       "Width": 1920
+      },
+      {
+       "FileId": "3062723609120313285",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "",
+       "Caption": "",
+       "FileSizeInBytes": 3990031,
+       "ForegroundColor": "",
+       "Height": 2160,
+       "ImagePositionInfo": "Desktop/0",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "hKAR37OLmPqk1mVlOG2MeCL0u8pnDGVSZj0kTCBoZ5w=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.41092.14202576542330599.b2b42d35-09bb-4a4c-86fb-3e9ca2034d9b.129d784e-ad0d-4e4a-a4f6-1553c41c1a1f",
+       "Width": 3840
+      },
+      {
+       "FileId": "3067385725710920807",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "",
+       "Caption": "",
+       "FileSizeInBytes": 4229379,
+       "ForegroundColor": "",
+       "Height": 2160,
+       "ImagePositionInfo": "Desktop/1",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "+f22cgIOze5CT+c/v9F5mGTz1g3em4yKLp9JxNawQZ0=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.65017.14202576542330599.b2b42d35-09bb-4a4c-86fb-3e9ca2034d9b.223b51f4-7b45-405b-8313-77e20d7536bb",
+       "Width": 3840
+      },
+      {
+       "FileId": "3007342665013513571",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "",
+       "Caption": "",
+       "FileSizeInBytes": 4986002,
+       "ForegroundColor": "",
+       "Height": 2160,
+       "ImagePositionInfo": "Desktop/2",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "7jBz5Zcto4L+uFkVLRTG7shAi+XhBKJHlFZw+GvwIu4=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.12526.14202576542330599.b2b42d35-09bb-4a4c-86fb-3e9ca2034d9b.5844f6bb-1746-4ab7-af4c-53bbacde0513",
+       "Width": 3840
+      },
+      {
+       "FileId": "3065885491431875299",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "",
+       "Caption": "",
+       "FileSizeInBytes": 4079421,
+       "ForegroundColor": "",
+       "Height": 2160,
+       "ImagePositionInfo": "Desktop/3",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "ni+UoSNGeKrT8Dfv3h2F1eobOMXXwFaVFrrMwIfUr7Y=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.12190.14202576542330599.b2b42d35-09bb-4a4c-86fb-3e9ca2034d9b.7ad39e97-b577-4516-9f4a-31bb8c078903",
+       "Width": 3840
+      },
+      {
+       "FileId": "3030173115516917919",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "",
+       "Caption": "",
+       "FileSizeInBytes": 1856638,
+       "ForegroundColor": "",
+       "Height": 2160,
+       "ImagePositionInfo": "Desktop/4",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "IoziTlsVED65jorJjzw47ls5RXJk0IwLTnDVm5ZOjIg=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.35874.14202576542330599.b2b42d35-09bb-4a4c-86fb-3e9ca2034d9b.9d70e759-b369-417f-b00f-06d7a2dfa1c1",
+       "Width": 3840
+      },
+      {
+       "FileId": "3029905667649941767",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "",
+       "Caption": "",
+       "FileSizeInBytes": 4671151,
+       "ForegroundColor": "",
+       "Height": 2160,
+       "ImagePositionInfo": "Desktop/5",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "/KDJ2zBbOQAZlmoLQD36KpAJmhWtDuGqI2IfEwPU7V8=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.41212.14202576542330599.b2b42d35-09bb-4a4c-86fb-3e9ca2034d9b.3088ab95-5c84-4ecb-83d6-9aedb1c2f73e",
+       "Width": 3840
+      },
+      {
+       "FileId": "3003489150343094611",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "",
+       "Caption": "",
+       "FileSizeInBytes": 3036727,
+       "ForegroundColor": "",
+       "Height": 2160,
+       "ImagePositionInfo": "Desktop/6",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "19lfUrGg0eK3yx2DC5d7uuNiRCbktBslhgSlkyEzULQ=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.55767.14202576542330599.b2b42d35-09bb-4a4c-86fb-3e9ca2034d9b.7bee3dd3-7a7d-4ee8-8fc0-2ffcabff3fbc",
+       "Width": 3840
+      },
+      {
+       "FileId": "3030002369997865553",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "",
+       "Caption": "",
+       "FileSizeInBytes": 4109047,
+       "ForegroundColor": "",
+       "Height": 2160,
+       "ImagePositionInfo": "Desktop/7",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "mgMI9BuUAg4LThKvcPQjqybY/X/TzUaDdLoeUaMdJ6s=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.922.14202576542330599.b2b42d35-09bb-4a4c-86fb-3e9ca2034d9b.24e9a877-267e-4012-9c0b-8524170474f9",
+       "Width": 3840
+      },
+      {
+       "FileId": "3010671221033465992",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "",
+       "Caption": "",
+       "FileSizeInBytes": 4042259,
+       "ForegroundColor": "",
+       "Height": 2160,
+       "ImagePositionInfo": "Desktop/8",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "bQSLVReHeC8sS7gIy0jG1Tm52xVjNUae5cFe3MuydM4=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.1133.14202576542330599.b2b42d35-09bb-4a4c-86fb-3e9ca2034d9b.486fd00d-fe83-4cf2-bc0e-9c7714118a1a",
+       "Width": 3840
+      },
+      {
+       "FileId": "3042553801278676322",
+       "EISListingIdentifier": null,
+       "BackgroundColor": "",
+       "Caption": "",
+       "FileSizeInBytes": 3620539,
+       "ForegroundColor": "",
+       "Height": 2160,
+       "ImagePositionInfo": "Desktop/9",
+       "ImagePurpose": "Screenshot",
+       "UnscaledImageSHA256Hash": "mhd/BZ8TcNatDwOSTT9/86yvyjd7dSZhTjmgOEVwGU0=",
+       "Uri": "//store-images.s-microsoft.com/image/apps.6042.14202576542330599.b2b42d35-09bb-4a4c-86fb-3e9ca2034d9b.73db643d-26ff-439d-9d31-1fd85382a841",
+       "Width": 3840
+      }
+     ],
+     "ProductTitle": "ibis Paint"
+    }
+   ],
+   "MarketProperties": [
+    {
+     "OriginalReleaseDate": "2022-02-03T03:30:24.5332429Z",
+     "UsageData": [
+      {
+       "AggregateTimeSpan": "7Days",
+       "AverageRating": 4.6,
+       "RatingCount": 149
+      },
+      {
+       "AggregateTimeSpan": "30Days",
+       "AverageRating": 4.5,
+       "RatingCount": 580
+      },
+      {
+       "AggregateTimeSpan": "AllTime",
+       "AverageRating": 4.3,
+       "RatingCount": 52756
+      }
+     ]
+    }
+   ],
+   "ProductBSchema": "ProductUnifiedApp;3",
+   "ProductId": "9PFDF2ZD4Z4N",
+   "PartD": "",
+   "ProductFamily": "Apps",
+   "ProductKind": "Application",
+   "DisplaySkuAvailabilities": [
+    {
+     "Availabilities": [
+      {
+       "Actions": [
+        "Details",
+        "Fulfill",
+        "Purchase",
+        "Browse",
+        "Curate",
+        "Redeem"
+       ],
+       "OrderManagementData": {
+        "Price": {
+         "CurrencyCode": "NOK",
+         "IsPIRequired": false,
+         "ListPrice": 0.0,
+         "MSRP": 0.0,
+         "TaxType": "VatIncluded",
+         "WholesaleCurrencyCode": ""
+        }
+       }
+      },
+      {
+       "Actions": [
+        "License",
+        "Details"
+       ],
+       "OrderManagementData": {
+        "Price": {
+         "CurrencyCode": "USD",
+         "IsPIRequired": false,
+         "ListPrice": 0.0,
+         "MSRP": 0.0,
+         "TaxType": "",
+         "WholesaleCurrencyCode": ""
+        }
+       }
+      },
+      {
+       "Actions": [
+        "License",
+        "Browse",
+        "Details"
+       ],
+       "OrderManagementData": {
+        "Price": {
+         "CurrencyCode": "USD",
+         "IsPIRequired": false,
+         "ListPrice": 0.0,
+         "MSRP": 0.0,
+         "TaxType": "",
+         "WholesaleCurrencyCode": ""
+        }
+       }
+      }
+     ]
+    },
+    {
+     "Availabilities": [
+      {
+       "Actions": [
+        "Details",
+        "License",
+        "Fulfill"
+       ],
+       "OrderManagementData": {
+        "Price": {
+         "CurrencyCode": "USD",
+         "IsPIRequired": false,
+         "ListPrice": 0.0,
+         "MSRP": 0.0,
+         "TaxType": "",
+         "WholesaleCurrencyCode": ""
+        }
+       }
+      },
+      {
+       "Actions": [
+        "License",
+        "Details"
+       ],
+       "OrderManagementData": {
+        "Price": {
+         "CurrencyCode": "USD",
+         "IsPIRequired": false,
+         "ListPrice": 0.0,
+         "MSRP": 0.0,
+         "TaxType": "",
+         "WholesaleCurrencyCode": ""
+        }
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,325 @@
+[
+  {
+    "full_name": "Microsoft.Paint_11.2609.441.0_x64__8wekyb3d8bbwe",
+    "family_name": "Microsoft.Paint_8wekyb3d8bbwe",
+    "name": "Microsoft.Paint",
+    "version": "11.2609.441.0",
+    "display_name": "Paint",
+    "publisher": "Microsoft Corporation",
+    "description": null,
+    "framework": false,
+    "resource": false,
+    "bundle": false,
+    "stub": false,
+    "signature": "store",
+    "installed_path": "C:\\Program Files\\WindowsApps\\Microsoft.Paint_11.2609.441.0_x64__8wekyb3d8bbwe",
+    "logo": "Assets\\PaintStoreLogo.png",
+    "applications": [
+      {
+        "id": "App",
+        "listed": true
+      }
+    ]
+  },
+  {
+    "full_name": "com.tinyspeck.slackdesktop_4.51.180.0_x64__8yrtsj140pw4g",
+    "family_name": "com.tinyspeck.slackdesktop_8yrtsj140pw4g",
+    "name": "com.tinyspeck.slackdesktop",
+    "version": "4.51.180.0",
+    "display_name": "Slack",
+    "publisher": "Slack Technologies Inc.",
+    "description": null,
+    "framework": false,
+    "resource": false,
+    "bundle": false,
+    "stub": false,
+    "signature": "developer",
+    "installed_path": "C:\\Program Files\\WindowsApps\\com.tinyspeck.slackdesktop_4.51.180.0_x64__8yrtsj140pw4g",
+    "logo": "Assets\\SlackStoreLogo.png",
+    "applications": [
+      {
+        "id": "Slack",
+        "listed": true
+      }
+    ]
+  },
+  {
+    "full_name": "Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64__8wekyb3d8bbwe",
+    "family_name": "Microsoft.VCLibs.140.00.UWPDesktop_8wekyb3d8bbwe",
+    "name": "Microsoft.VCLibs.140.00.UWPDesktop",
+    "version": "14.0.33728.0",
+    "display_name": null,
+    "publisher": null,
+    "description": null,
+    "framework": true,
+    "resource": false,
+    "bundle": false,
+    "stub": false,
+    "signature": "store",
+    "installed_path": "C:\\Program Files\\WindowsApps\\Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64__8wekyb3d8bbwe",
+    "logo": "logo.png",
+    "applications": []
+  },
+  {
+    "full_name": "windows.immersivecontrolpanel_10.0.8.1000_neutral_neutral_cw5n1h2txyewy",
+    "family_name": "windows.immersivecontrolpanel_cw5n1h2txyewy",
+    "name": "windows.immersivecontrolpanel",
+    "version": "10.0.8.1000",
+    "display_name": null,
+    "publisher": null,
+    "description": null,
+    "framework": false,
+    "resource": false,
+    "bundle": false,
+    "stub": false,
+    "signature": "system",
+    "installed_path": "C:\\Windows\\ImmersiveControlPanel",
+    "logo": "images\\logo.png",
+    "applications": [
+      {
+        "id": "microsoft.windows.immersivecontrolpanel",
+        "listed": true
+      }
+    ]
+  },
+  {
+    "full_name": "Microsoft.DesktopAppInstaller_1.30.310.0_x64__8wekyb3d8bbwe",
+    "family_name": "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe",
+    "name": "Microsoft.DesktopAppInstaller",
+    "version": "1.30.310.0",
+    "display_name": null,
+    "publisher": null,
+    "description": null,
+    "framework": false,
+    "resource": false,
+    "bundle": false,
+    "stub": false,
+    "signature": "store",
+    "installed_path": "C:\\Program Files\\WindowsApps\\Microsoft.DesktopAppInstaller_1.30.310.0_x64__8wekyb3d8bbwe",
+    "logo": "Assets\\AppPackageStoreLogo.png",
+    "applications": [
+      {
+        "id": "App",
+        "listed": false
+      },
+      {
+        "id": "ProtocolShim",
+        "listed": false
+      },
+      {
+        "id": "PythonRedirector",
+        "listed": false
+      },
+      {
+        "id": "winget",
+        "listed": false
+      },
+      {
+        "id": "WinGetComServer",
+        "listed": false
+      },
+      {
+        "id": "WinGetMCPServer",
+        "listed": false
+      }
+    ]
+  },
+  {
+    "full_name": "Microsoft.SecHealthUI_1000.29680.1000.0_x64__8wekyb3d8bbwe",
+    "family_name": "Microsoft.SecHealthUI_8wekyb3d8bbwe",
+    "name": "Microsoft.SecHealthUI",
+    "version": "1000.29680.1000.0",
+    "display_name": null,
+    "publisher": null,
+    "description": null,
+    "framework": false,
+    "resource": false,
+    "bundle": false,
+    "stub": false,
+    "signature": "store",
+    "installed_path": "C:\\Program Files\\WindowsApps\\Microsoft.SecHealthUI_1000.29680.1000.0_x64__8wekyb3d8bbwe",
+    "logo": "Assets\\WindowsSecuritySplashScreen.png",
+    "applications": [
+      {
+        "id": "SecHealthUI",
+        "listed": true
+      }
+    ]
+  },
+  {
+    "full_name": "Microsoft.PowerToys.FileLocksmithContextMenu_0.88.0.0_neutral__8wekyb3d8bbwe",
+    "family_name": "Microsoft.PowerToys.FileLocksmithContextMenu_8wekyb3d8bbwe",
+    "name": "Microsoft.PowerToys.FileLocksmithContextMenu",
+    "version": "0.88.0.0",
+    "display_name": null,
+    "publisher": null,
+    "description": null,
+    "framework": false,
+    "resource": false,
+    "bundle": false,
+    "stub": false,
+    "signature": "developer",
+    "installed_path": "C:\\Program Files\\WindowsApps\\Microsoft.PowerToys.FileLocksmithContextMenu_0.88.0.0_neutral__8wekyb3d8bbwe",
+    "logo": "Assets\\FileLocksmith\\storelogo.png",
+    "applications": [
+      {
+        "id": "Microsoft.PowerToys.FileLocksmithContextMenu",
+        "listed": false
+      }
+    ]
+  },
+  {
+    "full_name": "Microsoft.HEVCVideoExtension_2.5.48.0_x64__8wekyb3d8bbwe",
+    "family_name": "Microsoft.HEVCVideoExtension_8wekyb3d8bbwe",
+    "name": "Microsoft.HEVCVideoExtension",
+    "version": "2.5.48.0",
+    "display_name": null,
+    "publisher": null,
+    "description": null,
+    "framework": false,
+    "resource": false,
+    "bundle": false,
+    "stub": false,
+    "signature": "store",
+    "installed_path": "C:\\Program Files\\WindowsApps\\Microsoft.HEVCVideoExtension_2.5.48.0_x64__8wekyb3d8bbwe",
+    "logo": "Assets\\HEVCCodecStoreLogo.png",
+    "applications": [
+      {
+        "id": "App",
+        "listed": false
+      }
+    ]
+  },
+  {
+    "full_name": "Microsoft.VisualStudioCodeInsiders_1.0.144.0_neutral__8wekyb3d8bbwe",
+    "family_name": "Microsoft.VisualStudioCodeInsiders_8wekyb3d8bbwe",
+    "name": "Microsoft.VisualStudioCodeInsiders",
+    "version": "1.0.144.0",
+    "display_name": null,
+    "publisher": null,
+    "description": null,
+    "framework": false,
+    "resource": false,
+    "bundle": false,
+    "stub": false,
+    "signature": "developer",
+    "installed_path": "C:\\Program Files\\WindowsApps\\Microsoft.VisualStudioCodeInsiders_1.0.144.0_neutral__8wekyb3d8bbwe",
+    "logo": "resources\\app\\resources\\win32\\code_150x150.png",
+    "applications": [
+      {
+        "id": "VSCodeInsiders",
+        "listed": false
+      }
+    ]
+  },
+  {
+    "full_name": "Microsoft.LanguageExperiencePacken-GB_28000.2.7.0_neutral__8wekyb3d8bbwe",
+    "family_name": "Microsoft.LanguageExperiencePacken-GB_8wekyb3d8bbwe",
+    "name": "Microsoft.LanguageExperiencePacken-GB",
+    "version": "28000.2.7.0",
+    "display_name": null,
+    "publisher": null,
+    "description": null,
+    "framework": false,
+    "resource": false,
+    "bundle": false,
+    "stub": false,
+    "signature": "store",
+    "installed_path": "C:\\Program Files\\WindowsApps\\Microsoft.LanguageExperiencePacken-GB_28000.2.7.0_neutral__8wekyb3d8bbwe",
+    "logo": "Assets\\LockScreenLogo.scale-200.png",
+    "applications": [
+      {
+        "id": "App",
+        "listed": false
+      }
+    ]
+  },
+  {
+    "full_name": "Microsoft.WindowsCalculator_11.2607.0.0_x64__8wekyb3d8bbwe",
+    "family_name": "Microsoft.WindowsCalculator_8wekyb3d8bbwe",
+    "name": "Microsoft.WindowsCalculator",
+    "version": "11.2607.0.0",
+    "display_name": "Windows Calculator",
+    "publisher": "Microsoft Corporation",
+    "description": null,
+    "framework": false,
+    "resource": false,
+    "bundle": false,
+    "stub": false,
+    "signature": "store",
+    "installed_path": "C:\\Program Files\\WindowsApps\\Microsoft.WindowsCalculator_11.2607.0.0_x64__8wekyb3d8bbwe",
+    "logo": "Assets\\CalculatorStoreLogo.png",
+    "applications": [
+      {
+        "id": "App",
+        "listed": true
+      }
+    ]
+  },
+  {
+    "full_name": "CanonicalGroupLimited.Ubuntu_2604.1.75.0_x64__79rhkp1fndgsc",
+    "family_name": "CanonicalGroupLimited.Ubuntu_79rhkp1fndgsc",
+    "name": "CanonicalGroupLimited.Ubuntu",
+    "version": "2604.1.75.0",
+    "display_name": "Ubuntu",
+    "publisher": "Canonical Group Limited",
+    "description": null,
+    "framework": false,
+    "resource": false,
+    "bundle": false,
+    "stub": false,
+    "signature": "store",
+    "installed_path": "C:\\Program Files\\WindowsApps\\CanonicalGroupLimited.Ubuntu_2604.1.75.0_x64__79rhkp1fndgsc",
+    "logo": "Assets\\StoreLogo.png",
+    "applications": [
+      {
+        "id": "ubuntu",
+        "listed": true
+      }
+    ]
+  },
+  {
+    "full_name": "Microsoft.MicrosoftStickyNotes_4.0.6105.0_x64__8wekyb3d8bbwe",
+    "family_name": "Microsoft.MicrosoftStickyNotes_8wekyb3d8bbwe",
+    "name": "Microsoft.MicrosoftStickyNotes",
+    "version": "4.0.6105.0",
+    "display_name": "Microsoft Sticky Notes",
+    "publisher": "Microsoft Corporation",
+    "description": null,
+    "framework": false,
+    "resource": false,
+    "bundle": false,
+    "stub": true,
+    "signature": "store",
+    "installed_path": "C:\\Program Files\\WindowsApps\\Microsoft.MicrosoftStickyNotes_4.0.6105.0_x64__8wekyb3d8bbwe",
+    "logo": "Assets\\Icons\\StickyNotesStoreLogo.png",
+    "applications": [
+      {
+        "id": "App",
+        "listed": true
+      }
+    ]
+  },
+  {
+    "full_name": "Microsoft.WindowsTerminalPreview_1.26.2734.0_x64__8wekyb3d8bbwe",
+    "family_name": "Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe",
+    "name": "Microsoft.WindowsTerminalPreview",
+    "version": "1.26.2734.0",
+    "display_name": "Windows Terminal Preview",
+    "publisher": "Microsoft Corporation",
+    "description": null,
+    "framework": false,
+    "resource": false,
+    "bundle": false,
+    "stub": false,
+    "signature": "store",
+    "installed_path": "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminalPreview_1.26.2734.0_x64__8wekyb3d8bbwe",
+    "logo": "Images\\StoreLogo.png",
+    "applications": [
+      {
+        "id": "App",
+        "listed": true
+      }
+    ]
+  }
+]
