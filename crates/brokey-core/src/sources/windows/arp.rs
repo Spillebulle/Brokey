@@ -78,16 +78,19 @@ pub struct RawEntry {
     /// Windows itself sets, and the only trustworthy way to tell a real MSI
     /// from an entry that merely happens to be keyed by a GUID, which the
     /// driver packages on the reference machine are.
+    #[serde(default, deserialize_with = "registry_number")]
     pub windows_installer: Option<u32>,
     /// A path to an `.exe` or `.ico`, optionally followed by `,` and a
     /// resource index.
     pub display_icon: Option<String>,
+    #[serde(default, deserialize_with = "registry_number")]
     pub system_component: Option<u32>,
     pub parent_key_name: Option<String>,
     /// "Security Update", "Update", "Hotfix" for the things Windows
     /// installed itself.
     pub release_type: Option<String>,
     /// Kilobytes, as the registry stores it.
+    #[serde(default, deserialize_with = "registry_number")]
     pub estimated_size: Option<u64>,
     pub url_info_about: Option<String>,
 }
@@ -589,6 +592,61 @@ impl Source for Arp {
     }
 }
 
+/// A number an installer wrote as text: `"1"`, or `"0x1"` from one that
+/// formats like `reg.exe`. Surrounding whitespace is tolerated, nothing else
+/// is: a value that is not a number reads as absent, as it did before.
+pub fn number_from_text<T: TryFrom<u64>>(text: &str) -> Option<T> {
+    let text = text.trim();
+    let n = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16).ok()?,
+        None => text.parse::<u64>().ok()?,
+    };
+    T::try_from(n).ok()
+}
+
+/// How the fixture spells a registry number, which is how the registry
+/// stores one: a JSON number for a `REG_DWORD`, a JSON string for an
+/// installer that wrote `REG_SZ` instead. The string goes through
+/// [`number_from_text`], exactly as [`read`] treats it, so the fixture
+/// exercises the fallback rather than describing it.
+fn registry_number<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: TryFrom<u64>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Dword(u64),
+        Text(String),
+    }
+    Ok(
+        Option::<Stored>::deserialize(deserializer)?.and_then(|stored| match stored {
+            Stored::Dword(n) => T::try_from(n).ok(),
+            Stored::Text(text) => number_from_text(&text),
+        }),
+    )
+}
+
+/// A number from an uninstall key, whatever type the installer stored it
+/// as. `windows-registry`'s `get_u32` refuses a `REG_SZ`, and an installer
+/// that wrote `SystemComponent` as the string `"1"` would otherwise let a
+/// runtime through the filter, as would a string `WindowsInstaller` demote
+/// a real MSI to the interactive route. So: a `REG_DWORD`, then a
+/// `REG_QWORD`, then text through [`number_from_text`].
+#[cfg(windows)]
+fn read_dword<T: TryFrom<u64>>(key: &windows_registry::Key, name: &str) -> Option<T> {
+    if let Ok(n) = key.get_u32(name) {
+        return T::try_from(u64::from(n)).ok();
+    }
+    if let Ok(n) = key.get_u64(name) {
+        return T::try_from(n).ok();
+    }
+    key.get_string(name)
+        .ok()
+        .and_then(|text| number_from_text(&text))
+}
+
 /// Read the three uninstall keys. The only impure function in the module,
 /// and the only one gated: `windows-registry` is a Windows-only dependency,
 /// so everything else here stays compiled and tested on both platforms.
@@ -626,12 +684,12 @@ pub fn read() -> Vec<RawEntry> {
                 install_location: sub.get_string("InstallLocation").ok(),
                 uninstall_string: sub.get_string("UninstallString").ok(),
                 quiet_uninstall_string: sub.get_string("QuietUninstallString").ok(),
-                windows_installer: sub.get_u32("WindowsInstaller").ok(),
+                windows_installer: read_dword(&sub, "WindowsInstaller"),
                 display_icon: sub.get_string("DisplayIcon").ok(),
-                system_component: sub.get_u32("SystemComponent").ok(),
+                system_component: read_dword(&sub, "SystemComponent"),
                 parent_key_name: sub.get_string("ParentKeyName").ok(),
                 release_type: sub.get_string("ReleaseType").ok(),
-                estimated_size: sub.get_u32("EstimatedSize").ok().map(u64::from),
+                estimated_size: read_dword(&sub, "EstimatedSize"),
                 url_info_about: sub.get_string("URLInfoAbout").ok(),
             });
         }
@@ -688,6 +746,53 @@ mod tests {
         )));
     }
 
+    /// An installer that wrote `SystemComponent` as the string `"1"` rather
+    /// than a DWORD is still a system component. Read as absent, it would
+    /// let a runtime through the filter and onto the Installed page.
+    #[test]
+    fn a_system_component_written_as_text_is_dropped() {
+        let entries = fixture();
+        let runtime = named(&entries, "A runtime that wrote SystemComponent as text");
+        assert_eq!(runtime.system_component, Some(1));
+        assert!(!is_application(runtime));
+    }
+
+    /// The same for `WindowsInstaller`: read as absent, a real MSI would be
+    /// demoted to its publisher's interactive uninstaller. A string `"0"`
+    /// `SystemComponent` beside it keeps it listed, and a hexadecimal
+    /// `EstimatedSize` with spaces round it still counts.
+    #[test]
+    fn an_msi_flag_written_as_text_still_removes_silently() {
+        let entries = fixture();
+        let msi = named(&entries, "An MSI that wrote WindowsInstaller as text");
+        assert_eq!(msi.windows_installer, Some(1));
+        assert_eq!(msi.system_component, Some(0));
+        assert_eq!(msi.estimated_size, Some(0x800));
+        assert!(is_application(msi));
+        let Some(Removal::Msi { product_code }) = removal(msi) else {
+            panic!("a text WindowsInstaller flag is still the Windows Installer's");
+        };
+        assert_eq!(product_code, "{0b7e3f6a-2c41-4d8e-9a55-000000000003}");
+    }
+
+    /// What counts as a number written as text, and what does not.
+    #[test]
+    fn a_number_written_as_text_is_read_and_anything_else_is_absent() {
+        assert_eq!(number_from_text::<u32>("1"), Some(1));
+        assert_eq!(number_from_text::<u32>(" 1 "), Some(1));
+        assert_eq!(number_from_text::<u32>("0x1"), Some(1));
+        assert_eq!(number_from_text::<u32>("0X1F"), Some(31));
+        assert_eq!(number_from_text::<u64>("40960"), Some(40960));
+        assert_eq!(number_from_text::<u32>(""), None);
+        assert_eq!(number_from_text::<u32>("yes"), None);
+        assert_eq!(number_from_text::<u32>("-1"), None);
+        assert_eq!(
+            number_from_text::<u32>("4294967296"),
+            None,
+            "too big for a DWORD"
+        );
+    }
+
     /// Updates and hotfixes are not software a person installed.
     #[test]
     fn an_update_is_dropped() {
@@ -739,14 +844,14 @@ mod tests {
     /// The whole fixture at once, so a heuristic added later cannot quietly
     /// change the answer for everything.
     #[test]
-    fn the_fixture_yields_exactly_the_five_applications() {
+    fn the_fixture_yields_exactly_the_six_applications() {
         let entries = fixture();
         let kept: Vec<&str> = entries
             .iter()
             .filter(|e| is_application(e))
             .filter_map(|e| e.display_name.as_deref())
             .collect();
-        assert_eq!(kept.len(), 5, "{kept:?}");
+        assert_eq!(kept.len(), 6, "{kept:?}");
     }
 
     /// Windows quoting: a quoted first token can hold spaces, and what
@@ -1203,7 +1308,7 @@ mod tests {
     fn installed_is_the_filtered_entries_as_packages() {
         let (arp, _cache) = source_from_fixture();
         let installed = arp.installed().unwrap();
-        assert_eq!(installed.len(), 5);
+        assert_eq!(installed.len(), 6);
         assert!(installed.iter().all(|p| p.installed));
         assert!(
             installed
@@ -1319,7 +1424,7 @@ mod tests {
         let status = arp.status();
         assert!(status.available);
         assert_eq!(status.reason, None);
-        assert_eq!(status.detail.as_deref(), Some("5 applications"));
+        assert_eq!(status.detail.as_deref(), Some("6 applications"));
     }
 
     /// A machine with exactly one is not told it has "1 applications".

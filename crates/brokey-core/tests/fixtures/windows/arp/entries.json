@@ -151,5 +151,39 @@
     "release_type": null,
     "estimated_size": null,
     "url_info_about": null
+  },
+  {
+    "hive": "machine",
+    "key_name": "ExampleRuntime",
+    "display_name": "A runtime that wrote SystemComponent as text",
+    "display_version": "4.2",
+    "publisher": "Example Ltd",
+    "install_location": null,
+    "uninstall_string": "\"C:\\Program Files\\Example Runtime\\uninstall.exe\"",
+    "quiet_uninstall_string": null,
+    "windows_installer": null,
+    "display_icon": null,
+    "system_component": "1",
+    "parent_key_name": null,
+    "release_type": null,
+    "estimated_size": null,
+    "url_info_about": null
+  },
+  {
+    "hive": "machine",
+    "key_name": "{0b7e3f6a-2c41-4d8e-9a55-000000000003}",
+    "display_name": "An MSI that wrote WindowsInstaller as text",
+    "display_version": "1.0.0",
+    "publisher": "Example Ltd",
+    "install_location": null,
+    "uninstall_string": "MsiExec.exe /I{0B7E3F6A-2C41-4D8E-9A55-000000000003}",
+    "quiet_uninstall_string": null,
+    "windows_installer": "1",
+    "display_icon": null,
+    "system_component": "0",
+    "parent_key_name": null,
+    "release_type": null,
+    "estimated_size": " 0x800 ",
+    "url_info_about": null
   }
 ]
