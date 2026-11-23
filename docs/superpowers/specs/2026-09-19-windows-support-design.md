@@ -372,6 +372,54 @@ package, `shell:AppsFolder\<AUMID>`; for Scoop, the shim in `~/scoop/shims`.
 frequently points at an uninstaller or a resource-only file. Nothing found
 means no button, as on Linux.
 
+As built (`sources/windows/shortcut.rs`, `launch.rs`):
+
+- **The `.lnk` is read by Brokey**, from the documented Shell Link format,
+  not through `IShellLinkW`: no COM apartment, and the reader is a pure
+  function tested against shortcuts copied off the reference machine (their
+  tracker blocks zeroed) and against links built field by field. The target
+  comes from the link information, Unicode copy first, or from the
+  environment variable block expanded against the environment; a shortcut
+  to a shell folder, a URL or an MSI advertised shortcut names no file and
+  is skipped. The arguments are read too.
+- **The uninstaller's own shortcut is never the answer.** It lies inside the
+  install directory by construction. A shortcut is the uninstaller when it
+  starts the uninstall entry's program with the same arguments (Squirrel
+  applications start through `Update.exe --processStart`, beside the
+  uninstall's `Update.exe --uninstall`), or when its program is named like
+  one (`unins000.exe`, `uninst.exe`, `tesseract-uninstall.exe`; not
+  `IObitUninstaller.exe`). Only a shortcut to an `.exe` counts, so a ReadMe
+  or a help file is never opened.
+- **A directory too wide to name an application is refused**: a drive root,
+  anything under the Windows directory, and the folders applications go
+  *under* (`Program Files`, `ProgramData`, a profile, `AppData\Local`,
+  `AppData\Local\Programs`). An uninstaller in a folder of its own named
+  `uninstall` (Zoom's) looks one level up. An `msiexec` uninstaller still
+  supplies no directory, so an MSI entry is found through `InstallLocation`.
+- **Several fit**: the shortcut named like the application first, then the
+  one nearest the top of the Start Menu, then by path.
+- **winget** opens the shortcut of the uninstall entry it was joined to,
+  through the same `match_entry`, from the catalogue already on disk.
+  **Chocolatey** looks in the package's own `lib\<id>` and in the install
+  directory of each key in Chocolatey's `.registry` snapshot for that
+  version, which names exactly the uninstall keys the package's installer
+  added. **Scoop** takes a shortcut into `apps\<name>` first and otherwise
+  the shim of the first `bin` whose `.shim` names a windowed program; a
+  console tool's shim would flash a terminal, so a command-line tool has no
+  button, as on Linux. **MSIX** answers `Launch::AppsFolder` built through
+  `launch::apps_folder`, which refuses anything not shaped like
+  `PackageFamilyName!AppId`.
+- **Starting it** hands the `.lnk`, the shim or `shell:AppsFolder\<AUMID>`
+  to `explorer.exe` from the Windows directory the kernel reports.
+  Explorer passes it to the running shell, which starts it at the user's
+  own level even when Brokey was started elevated (the MSI's Start Brokey
+  tickbox from an administrator console); `ShellExecuteW` would carry the
+  elevation along. Explorer's exit code says nothing, so a shortcut that
+  has gone is caught before it is handed over.
+- The Start Menu, and winget's join, are read at most once every five
+  seconds, because the page asks about every installed application in one
+  burst.
+
 The install directory is not read from `InstallLocation`. **221 of the
 reference machine's 317 entries leave it empty**, including every NSIS-built
 application on the box, so it is derived from the directory of the

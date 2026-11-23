@@ -322,6 +322,32 @@ pub fn icon(bytes: &[u8], wanted: Wanted) -> Option<Vec<u8>> {
 pub const RT_ICON: u32 = 3;
 pub const RT_GROUP_ICON: u32 = 14;
 
+/// Whether a PE is a windowed program (`IMAGE_SUBSYSTEM_WINDOWS_GUI`)
+/// rather than a console one. A Scoop shim to a console program opens a
+/// terminal that closes again at once, so only a windowed program's shim
+/// is something to open. The subsystem sits at the same offset in the
+/// 32-bit and 64-bit optional headers, so the first few hundred bytes of a
+/// file are enough to tell.
+pub fn is_windowed(bytes: &[u8]) -> bool {
+    const WINDOWS_GUI: u16 = 2;
+    let subsystem = || {
+        if bytes.get(0..2) != Some(&b"MZ"[..]) {
+            return None;
+        }
+        let pe_offset = u32_at(bytes, 0x3C)? as usize;
+        let pe_end = pe_offset.checked_add(4)?;
+        if bytes.get(pe_offset..pe_end) != Some(&b"PE\0\0"[..]) {
+            return None;
+        }
+        let optional_start = pe_end.checked_add(20)?;
+        if !matches!(u16_at(bytes, optional_start)?, 0x10b | 0x20b) {
+            return None;
+        }
+        u16_at(bytes, optional_start.checked_add(68)?)
+    };
+    subsystem() == Some(WINDOWS_GUI)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -663,6 +689,37 @@ mod tests {
         let half = pe.len() / 2;
         pe.truncate(half);
         assert_eq!(icon(&pe, Wanted::Nth(0)), None);
+    }
+
+    #[test]
+    fn a_windowed_program_is_told_from_a_console_one() {
+        let header = |magic: u16, subsystem: u16| {
+            let mut b = vec![0u8; 0x200];
+            b[0..2].copy_from_slice(b"MZ");
+            b[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+            b[0x80..0x84].copy_from_slice(b"PE\0\0");
+            let optional = 0x84 + 20;
+            b[optional..optional + 2].copy_from_slice(&magic.to_le_bytes());
+            b[optional + 68..optional + 70].copy_from_slice(&subsystem.to_le_bytes());
+            b
+        };
+        assert!(is_windowed(&header(0x20b, 2)));
+        assert!(is_windowed(&header(0x10b, 2)));
+        assert!(!is_windowed(&header(0x20b, 3)), "a console program");
+        assert!(!is_windowed(&header(0x999, 2)), "not an optional header");
+        assert!(!is_windowed(&header(0x20b, 2)[..0x90]), "cut short");
+        assert!(!is_windowed(b"not a program"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_machine_s_own_programs_are_told_apart() {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        let read = |name: &str| std::fs::read(std::path::Path::new(&root).join(name)).ok();
+        if let (Some(explorer), Some(cmd)) = (read("explorer.exe"), read(r"System32\cmd.exe")) {
+            assert!(is_windowed(&explorer));
+            assert!(!is_windowed(&cmd));
+        }
     }
 
     /// The machine's own binaries are the only test of the real format.

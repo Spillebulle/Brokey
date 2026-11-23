@@ -1,0 +1,28 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<registrySnapshot xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <user>S-1-5-21-1000000000-1000000000-1000000000-1001</user>
+  <keys>
+    <key installerType="InnoSetup" displayName="HxD Hex Editor 2.5" displayVersion="2.5">
+      <RegistryView>Registry64</RegistryView>
+      <KeyPath>HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\HxD_is1</KeyPath>
+      <DefaultValue />
+      <InstallLocation><![CDATA[C:\Program Files\HxD\]]></InstallLocation>
+      <UninstallString><![CDATA["C:\Program Files\HxD\unins000.exe" /SILENT]]></UninstallString>
+      <HasQuietUninstall>true</HasQuietUninstall>
+      <Publisher><![CDATA[Maël Hörz]]></Publisher>
+      <InstallDate>20261017</InstallDate>
+      <InstallSource><![CDATA[]]></InstallSource>
+      <Language />
+      <Version />
+      <VersionMajor>2</VersionMajor>
+      <VersionMinor>5</VersionMinor>
+      <SystemComponent>false</SystemComponent>
+      <WindowsInstaller>false</WindowsInstaller>
+      <NoRemove>false</NoRemove>
+      <NoModify>true</NoModify>
+      <NoRepair>true</NoRepair>
+      <ReleaseType />
+      <ParentKeyName />
+    </key>
+  </keys>
+</registrySnapshot>

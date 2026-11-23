@@ -505,6 +505,60 @@ pub fn installed_from(
     Ok(out)
 }
 
+/// The uninstall entries the catalogue joins to the package `id`, through
+/// the same [`match_entry`] that put the package on the Installed page, so
+/// Open opens the application that row stands for and no other.
+pub fn entries_for<'a>(
+    db: &rusqlite::Connection,
+    entries: &'a [crate::sources::windows::arp::RawEntry],
+    id: &str,
+) -> Result<Vec<&'a crate::sources::windows::arp::RawEntry>> {
+    let mut out = Vec::new();
+    for e in entries
+        .iter()
+        .filter(|e| crate::sources::windows::arp::is_application(e))
+    {
+        if match_entry(db, e)?.is_some_and(|row| row.id.eq_ignore_ascii_case(id)) {
+            out.push(e);
+        }
+    }
+    Ok(out)
+}
+
+/// Every installed package's id with the uninstall entry it was joined to,
+/// worked out at most once every few seconds. The page asks what Open
+/// would open for every installed package in one burst, and the join is a
+/// catalogue query per uninstall entry, so doing it per package would be
+/// thousands of queries where one pass is enough.
+#[cfg(windows)]
+fn joined(
+    db: &rusqlite::Connection,
+) -> Result<Arc<Vec<(String, crate::sources::windows::arp::RawEntry)>>> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    type Joined = Arc<Vec<(String, crate::sources::windows::arp::RawEntry)>>;
+    static CACHE: Mutex<Option<(Instant, Joined)>> = Mutex::new(None);
+    const FRESH: Duration = Duration::from_secs(5);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((when, list)) = cache.as_ref()
+        && when.elapsed() < FRESH
+    {
+        return Ok(list.clone());
+    }
+    let mut list = Vec::new();
+    for e in crate::sources::windows::arp::read()
+        .into_iter()
+        .filter(crate::sources::windows::arp::is_application)
+    {
+        if let Some(row) = match_entry(db, &e)? {
+            list.push((row.id, e));
+        }
+    }
+    let list = Arc::new(list);
+    *cache = Some((Instant::now(), list.clone()));
+    Ok(list)
+}
+
 /// Those of them the catalogue has a newer version of.
 pub fn updates_from(
     db: &rusqlite::Connection,
@@ -655,6 +709,30 @@ impl Source for Winget {
         Ok(described_package(&row, &|url| {
             self.client.get_text_cached(url, MANIFEST_MAX_AGE)
         }))
+    }
+
+    /// The Start Menu shortcut of the uninstall entry this package was
+    /// joined to. Read from the catalogue already on disk: opening an
+    /// application never downloads one.
+    fn launcher(&self, id: &str) -> Option<crate::launch::Launch> {
+        #[cfg(windows)]
+        {
+            use crate::sources::windows::shortcut;
+            let path = index::cached_path(&self.client.download_dir());
+            let db = index::open(&path).ok()?;
+            let joined = joined(&db).ok()?;
+            let entries: Vec<_> = joined
+                .iter()
+                .filter(|(row, _)| row.eq_ignore_ascii_case(id))
+                .map(|(_, e)| e)
+                .collect();
+            shortcut::launch_for_entries(&entries, &shortcut::start_menu())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = id;
+            None
+        }
     }
 
     fn plan(&self, op: &crate::model::Op) -> Result<Vec<Step>> {
