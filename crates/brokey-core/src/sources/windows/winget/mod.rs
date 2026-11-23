@@ -373,8 +373,9 @@ pub fn bootstrap_steps(b: &Bootstrap, into: &Path) -> Vec<Step> {
                  $d = '{unpacked}'; \
                  if (Test-Path -LiteralPath $d) {{ Remove-Item -LiteralPath $d -Recurse -Force }}; \
                  Expand-Archive -LiteralPath '{zip}' -DestinationPath $d; \
-                 $deps = @(Get-ChildItem -LiteralPath (Join-Path $d '{arch}') -Filter *.appx | \
-                 ForEach-Object {{ $_.FullName }}); \
+                 $a = Join-Path $d '{arch}'; \
+                 $deps = @(if (Test-Path -LiteralPath $a) {{ Get-ChildItem -LiteralPath $a -Filter *.appx | \
+                 ForEach-Object {{ $_.FullName }} }}); \
                  if ($deps.Count -eq 0) {{ Write-Error 'The archive of packages App Installer \
                  depends on has none for {arch}, so nothing was installed.'; exit 1 }}; \
                  Add-AppxPackage -Path '{file}' -DependencyPath $deps",
@@ -1187,8 +1188,8 @@ mod tests {
         for i in [2, 3] {
             let joined = steps[i].command.args.join(" ");
             assert!(joined.contains("O''Brien"), "step {i}: {joined}");
-            // Every apostrophe in the command is either one of the four that
-            // open and close the two literals, or a doubled one from the data.
+            // Every apostrophe in the command is either one of a pair that
+            // opens and closes a literal, or a doubled one from the data.
             assert_eq!(joined.matches('\'').count() % 2, 0, "step {i}: {joined}");
         }
     }
