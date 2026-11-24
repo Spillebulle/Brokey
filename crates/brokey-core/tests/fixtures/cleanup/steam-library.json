@@ -93,8 +93,8 @@
     }
   },
   "firewall": [
-    { "name": "Deadlock", "program": "D:\\SteamLibrary\\steamapps\\common\\Deadlock\\game\\bin\\win64\\deadlock.exe" },
-    { "name": "Portal 2", "program": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Portal 2\\portal2.exe" },
-    { "name": "Steam", "program": "C:\\Program Files (x86)\\Steam\\steam.exe" }
+    { "id": "{Deadlock}", "name": "Deadlock", "program": "D:\\SteamLibrary\\steamapps\\common\\Deadlock\\game\\bin\\win64\\deadlock.exe" },
+    { "id": "{Portal 2}", "name": "Portal 2", "program": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Portal 2\\portal2.exe" },
+    { "id": "{Steam}", "name": "Steam", "program": "C:\\Program Files (x86)\\Steam\\steam.exe" }
   ]
 }

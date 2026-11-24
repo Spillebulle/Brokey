@@ -2,7 +2,7 @@ use super::*;
 use crate::cleanup::internal::{ScanRecord, is_internal};
 use crate::cleanup::view::{FixtureView, Hive};
 use crate::transaction::allow::CAN_BE_REPLACED;
-use crate::transaction::plan::{build_in, holding_notices, self_elevating_notices};
+use crate::transaction::plan::{build_in, clear_notices, holding_notices, self_elevating_notices};
 use crate::{Query, Source, Store};
 use std::path::PathBuf;
 
@@ -118,6 +118,7 @@ struct Machine {
     hints: Option<Hints>,
     listing: Listing,
     view: Option<FixtureView>,
+    installed: Vec<Package>,
 }
 
 impl Machine {
@@ -128,6 +129,7 @@ impl Machine {
             hints: Some(hints()),
             listing: Listing::default(),
             view: None,
+            installed: Vec::new(),
         }
     }
 
@@ -142,12 +144,14 @@ impl Machine {
         };
         let hints = |_: &PackageRef| self.hints.clone();
         let listing = || self.listing.clone();
+        let installed = || self.installed.clone();
         f(&Planning {
             scans: &self.scans,
             check: &check,
             hints: &hints,
             holding: &listing,
             view: self.view.as_ref().map(|v| v as &dyn SystemView),
+            installed: &installed,
         })
     }
 }
@@ -302,13 +306,11 @@ fn leftover(id: &str, kind: ItemKind, location: &str, scope: Scope) -> LeftoverI
 }
 
 fn scanned(machine: &Machine, forced: bool, product_code: Option<&str>) {
-    let mut h = hints();
-    h.product_code = product_code.map(str::to_string);
-    let findings = Findings {
-        scan: "scan-1".to_string(),
-        package: acme(),
-        name: "Acme Studio".to_string(),
-        items: vec![
+    scanned_items(
+        machine,
+        forced,
+        product_code,
+        vec![
             leftover(
                 "item-0",
                 ItemKind::Folder,
@@ -340,6 +342,22 @@ fn scanned(machine: &Machine, forced: bool, product_code: Option<&str>) {
                 Scope::Machine,
             ),
         ],
+    );
+}
+
+fn scanned_items(
+    machine: &Machine,
+    forced: bool,
+    product_code: Option<&str>,
+    items: Vec<LeftoverItem>,
+) {
+    let mut h = hints();
+    h.product_code = product_code.map(str::to_string);
+    let findings = Findings {
+        scan: "scan-1".to_string(),
+        package: acme(),
+        name: "Acme Studio".to_string(),
+        items,
         kept: Vec::new(),
         not_offered_cloud: 0,
         unreadable: 0,
@@ -436,6 +454,177 @@ fn what_has_gone_since_the_scan_is_left_out_of_the_clear() {
     assert_eq!(
         payload(&plan.steps[1]).items[0].location,
         r"HKLM\Software\Acme"
+    );
+}
+
+/// The machine at clear time, with everything the scan found still there
+/// and `extra` (more registry keys, as JSON members) beside it.
+fn after_the_scan(extra: &str) -> FixtureView {
+    let comma = if extra.trim().is_empty() { "" } else { "," };
+    FixtureView::from_json(&format!(
+        r#"{{
+            "folders": {{
+                "Windows": "C:\\Windows",
+                "ProgramFiles": "C:\\Program Files",
+                "ProgramFilesX86": "C:\\Program Files (x86)",
+                "ProgramData": "C:\\ProgramData",
+                "AppData": "C:\\Users\\you\\AppData\\Roaming",
+                "LocalAppData": "C:\\Users\\you\\AppData\\Local",
+                "LocalLow": "C:\\Users\\you\\AppData\\LocalLow",
+                "Profile": "C:\\Users\\you",
+                "StartMenuMachine": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+                "StartMenuUser": "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs"
+            }},
+            "dirs": {{
+                "C:\\Users\\you\\AppData\\Roaming\\Acme": [],
+                "C:\\Program Files (x86)\\Acme": [],
+                "C:\\ProgramData\\Acme": []
+            }},
+            "registry": {{
+                "Hkcu": {{ "Software\\Acme": {{}} }},
+                "Hklm": {{
+                    "Software\\Acme": {{}}{comma}
+                    {extra}
+                }}
+            }}
+        }}"#
+    ))
+}
+
+/// Between the scan and the clear another Acme application is installed
+/// into Acme's folder. The clear rebuilds who uses what, leaves that folder
+/// where it is and says why; everything else still moves.
+#[test]
+fn what_an_install_since_the_scan_uses_is_left_out_of_the_clear() {
+    let mut machine = Machine::new();
+    scanned(&machine, false, None);
+    machine.view = Some(after_the_scan(
+        r#""Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall": { "subkeys": ["Acme Draw"] },
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Acme Draw": {
+            "values": [
+                ["DisplayName", "Acme Draw"],
+                ["Publisher", "Acme"],
+                ["InstallLocation", "C:\\Program Files (x86)\\Acme\\Draw"],
+                ["UninstallString", "\"C:\\Program Files (x86)\\Acme\\Draw\\uninstall.exe\""]
+            ]
+        }"#,
+    ));
+    let all = ["item-0", "item-1", "item-2", "item-3", "item-4"];
+    let plan = machine
+        .plan(&store(uninstaller), &[clear_op(&all)])
+        .unwrap();
+    assert_eq!(programs(&plan), vec![HOLD, HOLD]);
+    let held: Vec<String> = plan
+        .steps
+        .iter()
+        .flat_map(|s| payload(s).items)
+        .map(|i| i.location)
+        .collect();
+    assert!(
+        !held.contains(&r"C:\Program Files (x86)\Acme".to_string()),
+        "{held:?}"
+    );
+    assert_eq!(held.len(), 4, "{held:?}");
+    let said = machine.with(|p| clear_notices(&[clear_op(&all)], p));
+    assert_eq!(
+        said,
+        vec![
+            r"C:\Program Files (x86)\Acme was left where it is, because Acme Draw uses it now."
+                .to_string()
+        ]
+    );
+
+    // With nothing installed since, nothing is left out and nothing is said.
+    machine.view = Some(after_the_scan(""));
+    let plan = machine
+        .plan(&store(uninstaller), &[clear_op(&all)])
+        .unwrap();
+    let held = plan
+        .steps
+        .iter()
+        .map(|s| payload(s).items.len())
+        .sum::<usize>();
+    assert_eq!(held, 5);
+    assert!(
+        machine
+            .with(|p| clear_notices(&[clear_op(&all)], p))
+            .is_empty()
+    );
+
+    // When everything ticked is used now, the clear says so and moves nothing.
+    machine.view = Some(after_the_scan(
+        r#""Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall": { "subkeys": ["Acme Draw"] },
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Acme Draw": {
+            "values": [
+                ["DisplayName", "Acme Draw"],
+                ["InstallLocation", "C:\\Program Files (x86)\\Acme\\Draw"]
+            ]
+        }"#,
+    ));
+    let err = machine
+        .plan(&store(uninstaller), &[clear_op(&["item-2"])])
+        .unwrap_err();
+    assert!(
+        err.message.contains("Acme Draw uses it now")
+            && err.message.ends_with("Nothing was cleared."),
+        "{}",
+        err.message
+    );
+}
+
+/// A firewall rule is held by its id, and only while the program it lets
+/// through is still in the application's folder.
+#[test]
+fn a_firewall_rule_whose_program_is_now_elsewhere_is_left_out_of_the_clear() {
+    let mut machine = Machine::new();
+    let rule = "firewall:Acme | {1}";
+    scanned_items(
+        &machine,
+        false,
+        None,
+        vec![leftover(
+            "item-0",
+            ItemKind::FirewallRule,
+            rule,
+            Scope::Machine,
+        )],
+    );
+    let with_program = |program: &str| {
+        FixtureView::from_json(&format!(
+            r#"{{ "folders": {{
+                "Windows": "C:\\Windows",
+                "ProgramFiles": "C:\\Program Files",
+                "ProgramFilesX86": "C:\\Program Files (x86)",
+                "ProgramData": "C:\\ProgramData",
+                "AppData": "C:\\Users\\you\\AppData\\Roaming",
+                "LocalAppData": "C:\\Users\\you\\AppData\\Local",
+                "LocalLow": "C:\\Users\\you\\AppData\\LocalLow",
+                "Profile": "C:\\Users\\you",
+                "StartMenuMachine": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+                "StartMenuUser": "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs"
+            }},
+            "dirs": {{ "C:\\Program Files (x86)\\Acme": [] }},
+            "firewall": [{{ "id": "{{1}}", "name": "Acme", "program": "{program}" }}] }}"#,
+            program = program.replace('\\', "\\\\")
+        ))
+    };
+    machine.view = Some(with_program(r"C:\Program Files (x86)\Acme\acme.exe"));
+    let plan = machine
+        .plan(&store(uninstaller), &[clear_op(&["item-0"])])
+        .unwrap();
+    assert_eq!(payload(&plan.steps[0]).items[0].location, rule);
+
+    machine.view = Some(with_program(r"C:\Program Files\Java\jre-17\bin\javaw.exe"));
+    let err = machine
+        .plan(&store(uninstaller), &[clear_op(&["item-0"])])
+        .unwrap_err();
+    assert!(
+        err.message.contains(&format!(
+            "{rule} was left where it is, because the program it lets through is no longer in \
+             Acme Studio's folder."
+        )),
+        "{}",
+        err.message
     );
 }
 

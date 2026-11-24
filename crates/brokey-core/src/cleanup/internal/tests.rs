@@ -203,7 +203,7 @@ fn a_session_hold_takes_only_hkcu_keys_and_never_a_service() {
         item(ItemKind::RegistryKey, r"HKLM32\Software\Acme"),
         item(ItemKind::Service, "service:AcmeUpdate"),
         item(ItemKind::Task, r"task:\Acme\Update"),
-        item(ItemKind::FirewallRule, "firewall:Acme"),
+        item(ItemKind::FirewallRule, "firewall:Acme | {a}"),
     ] {
         let location = refused.location.clone();
         let err = check_with(&hold("abc", vec![refused], false), &view, &roots, &PLAIN)
@@ -276,9 +276,9 @@ fn a_service_that_runs_windows_or_cannot_be_placed_is_refused() {
                 { "name": "Unset", "image_path": "%UNKNOWN%\\acme.exe" }
             ],
             "firewall": [
-                { "name": "Acme", "program": "C:\\Program Files\\Acme\\acme.exe" },
-                { "name": "Twice", "program": "C:\\Program Files\\Acme\\acme.exe" },
-                { "name": "Twice", "program": "%SystemRoot%\\System32\\svchost.exe" }
+                { "id": "{a}", "name": "Acme", "program": "C:\\Program Files\\Acme\\acme.exe" },
+                { "id": "{t1}", "name": "Twice", "program": "C:\\Program Files\\Acme\\acme.exe" },
+                { "id": "{t2}", "name": "Twice", "program": "%SystemRoot%\\System32\\svchost.exe" }
             ]
         }"#,
     );
@@ -297,8 +297,18 @@ fn a_service_that_runs_windows_or_cannot_be_placed_is_refused() {
         let err = ok(&format!("service:{name}"), ItemKind::Service).expect_err(name);
         assert!(err.contains("Windows's own"), "{err}");
     }
-    assert_eq!(ok("firewall:Acme", ItemKind::FirewallRule), Ok(()));
-    assert!(ok("firewall:Twice", ItemKind::FirewallRule).is_err());
+    assert_eq!(ok("firewall:Acme | {a}", ItemKind::FirewallRule), Ok(()));
+    // Two rules share a name; only the one by this id goes, so only its
+    // program is asked about.
+    assert_eq!(ok("firewall:Twice | {t1}", ItemKind::FirewallRule), Ok(()));
+    let err = ok("firewall:Twice | {t2}", ItemKind::FirewallRule).expect_err("svchost");
+    assert!(err.contains("Windows's own"), "{err}");
+    // A rule by its name alone, or by a name that is not the id's, is not
+    // one Brokey offered.
+    for location in ["firewall:Twice", "firewall:Acme | {t1}", "firewall:Acme | "] {
+        let err = ok(location, ItemKind::FirewallRule).expect_err(location);
+        assert!(err.contains("firewall rule"), "{err}");
+    }
 
     let unlisted = FixtureView::from_json(r#"{ "unreadable_services": 1 }"#);
     let err = check_with(
@@ -1570,7 +1580,7 @@ fn a_task_or_rule_brokey_cannot_place_is_refused() {
 
     let rule = hold(
         "abc",
-        vec![item(ItemKind::FirewallRule, "firewall:Acme")],
+        vec![item(ItemKind::FirewallRule, "firewall:Acme | {a}")],
         true,
     );
     let unreadable_rules = machine(r#""unreadable_firewall": 2"#);

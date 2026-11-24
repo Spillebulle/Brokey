@@ -27,5 +27,5 @@
   "shortcuts": { "C:\\Start\\Acme.lnk": "C:\\Program Files\\Acme\\acme.exe" },
   "services": [{ "name": "AcmeSvc", "image_path": "\"C:\\Program Files\\Acme\\svc.exe\"" }],
   "tasks": [{ "path": "\\Acme\\Update", "actions": ["C:\\Program Files\\Acme\\acme.exe"] }],
-  "firewall": [{ "name": "Acme", "program": "C:\\Program Files\\Acme\\acme.exe" }]
+  "firewall": [{ "id": "{Acme}", "name": "Acme", "program": "C:\\Program Files\\Acme\\acme.exe" }]
 }

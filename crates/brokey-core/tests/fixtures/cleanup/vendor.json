@@ -275,8 +275,12 @@
   ],
   "firewall": [
     {
-      "name": "Acme Studio",
+      "id": "{Acme Studio}", "name": "Acme Studio",
       "program": "%ProgramFiles%\\Acme\\Acme Studio\\acmestudio.exe"
+    },
+    {
+      "id": "{Acme Studio elsewhere}", "name": "Acme Studio",
+      "program": "C:\\Program Files\\Java\\jre-17\\bin\\javaw.exe"
     }
   ],
   "unreadable_services": 1,

@@ -4052,7 +4052,10 @@ mod internal_tests {
         ));
         refused(hold_of(
             "abc",
-            &[(ItemKind::FirewallRule, "firewall:@FirewallAPI.dll,-28502")],
+            &[(
+                ItemKind::FirewallRule,
+                "firewall:@FirewallAPI.dll,-28502 | {x}",
+            )],
         ));
     }
 

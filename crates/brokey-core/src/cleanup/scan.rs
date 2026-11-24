@@ -37,7 +37,7 @@ pub struct Candidate {
     pub kind: ItemKind,
     /// A full path for a file, folder or shortcut; `HKLM\…`, `HKLM32\…` or
     /// `HKCU\…` for a key, with ` | <value name>` after it for a value;
-    /// `service:<name>`, `task:<path>` or `firewall:<rule name>`.
+    /// `service:<name>`, `task:<path>` or `firewall:<rule name> | <rule id>`.
     pub location: String,
     pub size: Option<u64>,
     pub confidence: Confidence,
@@ -1268,9 +1268,16 @@ impl<'a> Scan<'a> {
         self.out.unreadable += rules.unreadable;
         for rule in rules.items {
             if let Some(target) = self.target(&rule.program) {
+                // Held by its id, which the location carries after the last
+                // ` | `; an id with one in it could not be told apart, so
+                // it is counted as a rule that could not be read.
+                if rule.id.trim().is_empty() || rule.id.contains(" | ") {
+                    self.out.unreadable += 1;
+                    continue;
+                }
                 self.offer_system(
                     ItemKind::FirewallRule,
-                    format!("firewall:{}", rule.name),
+                    super::holding::firewall_location(rule.shown_name(), &rule.id),
                     format!("It lets a program of {app}'s through Windows Firewall."),
                     target,
                 );
@@ -1461,14 +1468,18 @@ mod tests {
             Some(Confidence::Likely)
         );
         assert_eq!(
-            confidence(&s, "firewall:Fallout 4"),
+            confidence(&s, "firewall:Fallout 4 | {Fallout 4}"),
             Some(Confidence::Certain)
         );
 
         // Nothing of Steam itself is offered.
         assert!(at(&s, r"C:\Program Files (x86)\Steam").is_none());
         assert!(at(&s, &format!(r"HKCU\{RUN} | Steam")).is_none());
-        assert!(at(&s, "firewall:Steam").is_none());
+        assert!(
+            !locations(&s)
+                .iter()
+                .any(|l| l.starts_with("firewall:Steam"))
+        );
         assert!(at(&s, "service:Steam Client Service").is_none());
         assert!(at(&s, &format!(r"{common}\Portal 2")).is_none());
         assert!(at(&s, r"C:\Users\you\Documents\My Games\Skyrim").is_none());
@@ -1544,7 +1555,11 @@ mod tests {
         );
         assert!(at(&s, r"C:\Program Files").is_none());
         assert!(at(&s, &format!(r"HKCU\{RUN} | Other")).is_none());
-        assert!(at(&s, "firewall:Other").is_none());
+        assert!(
+            !locations(&s)
+                .iter()
+                .any(|l| l.starts_with("firewall:Other"))
+        );
     }
 
     const UNREADABLE_SIBLINGS: &str = r#"{
@@ -1635,7 +1650,10 @@ mod tests {
         );
         assert_eq!(target("service:AcmeStudioSvc"), studio("svc.exe"));
         assert_eq!(target(r"task:\Acme\Studio Update"), studio("update.exe"));
-        assert_eq!(target("firewall:Acme Studio"), studio("acmestudio.exe"));
+        assert_eq!(
+            target("firewall:Acme Studio | {Acme Studio}"),
+            studio("acmestudio.exe")
+        );
         assert_eq!(
             target(r"HKLM\Software\Microsoft\Windows\CurrentVersion\App Paths\acmestudio.exe"),
             studio("acmestudio.exe")
@@ -1850,8 +1868,15 @@ mod tests {
         let task = at(&s, r"task:\Acme\Studio Update").expect("the task");
         assert_eq!(task.kind, ItemKind::Task);
         assert!(at(&s, r"task:\Acme\Paint Update").is_none());
-        let rule = at(&s, "firewall:Acme Studio").expect("the firewall rule");
+        let rule = at(&s, "firewall:Acme Studio | {Acme Studio}").expect("the firewall rule");
         assert_eq!(rule.kind, ItemKind::FirewallRule);
+        // Another rule by the same name lets a program elsewhere through,
+        // and is never offered: a rule is held by its id.
+        assert!(
+            !locations(&s).iter().any(|l| l.contains("elsewhere")),
+            "{:?}",
+            locations(&s)
+        );
 
         // Without the uninstall key in the hints, no uninstall key is offered.
         assert!(at(&acme(STUDIO), uninstall).is_none());

@@ -55,7 +55,7 @@
     { "name": "Steam Client Service", "image_path": "\"C:\\Program Files (x86)\\Common Files\\Steam\\steamservice.exe\" /RunAsService" }
   ],
   "firewall": [
-    { "name": "Fallout 4", "program": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Fallout 4\\Fallout4.exe" },
-    { "name": "Steam", "program": "C:\\Program Files (x86)\\Steam\\steam.exe" }
+    { "id": "{Fallout 4}", "name": "Fallout 4", "program": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Fallout 4\\Fallout4.exe" },
+    { "id": "{Steam}", "name": "Steam", "program": "C:\\Program Files (x86)\\Steam\\steam.exe" }
   ]
 }

@@ -589,10 +589,11 @@ pub mod logic {
     /// A dry run for the confirm step.
     pub fn preview(state: &AppState, ops: Vec<Op>) -> Result<PlanPreview, String> {
         let store = state.store();
+        let scans = state.scans();
         let plan = store
-            .plan_with(&ops, &state.scans())
+            .plan_with(&ops, &scans)
             .map_err(|e| sentence(&e.message))?;
-        let notices = notices(&store, &ops);
+        let notices = brokey_core::transaction::notices_with(&store, &ops, &scans);
         Ok(PlanPreview { plan, notices })
     }
 

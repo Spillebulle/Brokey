@@ -47,7 +47,7 @@ pub const REG_QWORD: u32 = 11;
 /// One thing to move into the holding area, in the location format the scan
 /// and the guard use: a path; `HKLM\…`, `HKLM32\…` or `HKCU\…`;
 /// `<key> | <value name>`; `service:<name>`; `task:<path>`;
-/// `firewall:<rule name>`.
+/// `firewall:<rule name> | <rule id>`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HoldItem {
     pub kind: ItemKind,
@@ -187,13 +187,14 @@ pub trait Mutate {
     /// Stop it and delete it.
     fn delete_task(&mut self, path: &str) -> Done<()>;
     fn restore_task(&mut self, path: &str, xml: &str, merge: bool) -> Done<()>;
-    /// Every stored rule with this name: its id and its rule text.
-    fn export_firewall_rule(&mut self, name: &str) -> Done<Vec<(String, String)>>;
+    /// The stored rule with this id, as its id and its rule text: one rule,
+    /// kept as a list so that what is exported is what is put back.
+    fn export_firewall_rule(&mut self, id: &str) -> Done<Vec<(String, String)>>;
     /// Delete exactly the rules `export_firewall_rule` returned.
-    fn delete_firewall_rule(&mut self, name: &str, rules: &[(String, String)]) -> Done<()>;
+    fn delete_firewall_rule(&mut self, id: &str, rules: &[(String, String)]) -> Done<()>;
     fn restore_firewall_rule(
         &mut self,
-        name: &str,
+        id: &str,
         rules: &[(String, String)],
         merge: bool,
     ) -> Done<()>;
@@ -240,6 +241,7 @@ enum Place {
     Value(Hive, String, String),
     Service(String),
     Task(String),
+    /// By its id, never by its name.
     Firewall(String),
 }
 
@@ -275,7 +277,9 @@ impl Place {
             }
             ItemKind::Service => named("service:").map(Place::Service),
             ItemKind::Task => named("task:").map(Place::Task),
-            ItemKind::FirewallRule => named("firewall:").map(Place::Firewall),
+            ItemKind::FirewallRule => {
+                firewall_parts(loc).map(|(_, id)| Place::Firewall(id.to_string()))
+            }
         }
     }
 
@@ -335,13 +339,19 @@ fn inside(path: &str, dir: &str) -> bool {
         || (path.len() > dir.len() && path.starts_with(dir) && path.as_bytes()[dir.len()] == b'\\')
 }
 
-/// A firewall rule's name as the scan reports it: its `Name=` field, unless
-/// that is a resource reference, in which case its id.
-pub fn firewall_rule_name<'a>(id: &'a str, rule: &'a str) -> &'a str {
-    rule.split('|')
-        .find_map(|f| f.strip_prefix("Name="))
-        .filter(|n| !n.starts_with('@'))
-        .unwrap_or(id)
+/// A firewall rule's location: `firewall:<name> | <id>`. The name is what
+/// the page shows; the id, the value Windows stores the rule under, is what
+/// is held, since another application's rule can have the same name.
+pub fn firewall_location(name: &str, id: &str) -> String {
+    format!("firewall:{name} | {id}")
+}
+
+/// The name and the id in a firewall rule's location. The id is what follows
+/// the last ` | `, so a name may contain one and an id may not (the scan
+/// never offers a rule whose id does).
+pub fn firewall_parts(location: &str) -> Option<(&str, &str)> {
+    let (name, id) = location.strip_prefix("firewall:")?.rsplit_once(" | ")?;
+    (!name.trim().is_empty() && !id.trim().is_empty()).then_some((name, id))
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,7 +1075,7 @@ impl Export {
             Place::Value(hive, key, name) => m.export_value(*hive, key, name).map(Export::Value),
             Place::Service(name) => m.export_service(name).map(Export::Service),
             Place::Task(path) => m.export_task(path).map(Export::Task),
-            Place::Firewall(name) => m.export_firewall_rule(name).map(Export::Firewall),
+            Place::Firewall(id) => m.export_firewall_rule(id).map(Export::Firewall),
         }
     }
 
@@ -1107,7 +1117,7 @@ impl Export {
             (Place::Value(hive, key, name), _) => m.delete_value(*hive, key, name),
             (Place::Service(name), _) => m.delete_service(name),
             (Place::Task(path), _) => m.delete_task(path),
-            (Place::Firewall(name), Export::Firewall(rules)) => m.delete_firewall_rule(name, rules),
+            (Place::Firewall(id), Export::Firewall(rules)) => m.delete_firewall_rule(id, rules),
             _ => Err(Failure::Failed(
                 "Brokey mixed up what it was holding, so nothing was changed.".into(),
             )),
@@ -1122,7 +1132,7 @@ impl Export {
             }
             (Place::Service(name), Export::Service(k)) => m.restore_service(name, k, merge),
             (Place::Task(path), Export::Task(xml)) => m.restore_task(path, xml, merge),
-            (Place::Firewall(name), Export::Firewall(r)) => m.restore_firewall_rule(name, r, merge),
+            (Place::Firewall(id), Export::Firewall(r)) => m.restore_firewall_rule(id, r, merge),
             _ => Err(Failure::Failed(
                 "Brokey mixed up what it was holding, so nothing was put back.".into(),
             )),
@@ -1148,7 +1158,7 @@ impl Export {
 ///
 /// Every failure but [`Failure::Partial`] leaves the item wholly in its
 /// place: a delete that fails part-way (a key with a subkey it may not
-/// remove, two firewall rules of which the second will not go) is looked at
+/// remove) is looked at
 /// again, and what went is put back from the export, never replacing what
 /// is there. Only when that cannot be done is the answer `Partial`, and the
 /// export is then the one whole copy.
@@ -1560,7 +1570,7 @@ mod tests {
         /// `RegDeleteTreeW` does on a subkey it may not delete.
         delete_key_fails_part_way: bool,
         /// `delete_firewall_rule` removes the first rule and then fails.
-        delete_firewall_fails_part_way: bool,
+        delete_firewall_fails: bool,
         /// Every merging restore fails.
         merge_fails: bool,
         /// Paths whose move finds its place in the holding area taken after
@@ -1780,24 +1790,18 @@ mod tests {
             self.tasks.insert(path.to_string(), xml.to_string());
             Ok(())
         }
-        fn export_firewall_rule(&mut self, name: &str) -> Done<Vec<(String, String)>> {
-            let rules: Vec<_> = self
-                .firewall
-                .iter()
-                .filter(|(id, rule)| firewall_rule_name(id, rule) == name)
-                .map(|(id, rule)| (id.clone(), rule.clone()))
-                .collect();
-            if rules.is_empty() {
-                return Err(Failure::Missing);
+        fn export_firewall_rule(&mut self, id: &str) -> Done<Vec<(String, String)>> {
+            match self.firewall.get(id) {
+                Some(rule) => Ok(vec![(id.to_string(), rule.clone())]),
+                None => Err(Failure::Missing),
             }
-            Ok(rules)
         }
         fn delete_firewall_rule(&mut self, _: &str, rules: &[(String, String)]) -> Done<()> {
+            if self.delete_firewall_fails {
+                return Err(Failure::Failed("Access is denied.".into()));
+            }
             for (id, _) in rules {
                 self.firewall.remove(id);
-                if self.delete_firewall_fails_part_way {
-                    return Err(Failure::Failed("Access is denied.".into()));
-                }
             }
             Ok(())
         }
@@ -1938,6 +1942,11 @@ mod tests {
         );
         m.firewall
             .insert("{2}".into(), "v2.30|Action=Allow|Name=Other|".into());
+        // Another application's rule by the same name stays.
+        m.firewall.insert(
+            "{3}".into(),
+            r"v2.30|Action=Allow|App=C:\Other\acme.exe|Name=Acme|".into(),
+        );
         let before = m.state();
 
         let items = vec![
@@ -1947,7 +1956,7 @@ mod tests {
             item(ItemKind::RegistryValue, format!(r"HKCU\{run} | Acme")),
             item(ItemKind::Service, "service:AcmeSvc"),
             item(ItemKind::Task, r"task:\Acme\Update"),
-            item(ItemKind::FirewallRule, "firewall:Acme"),
+            item(ItemKind::FirewallRule, "firewall:Acme | {1}"),
         ];
         let report = hold(&mc.root, "acme-1", "Acme", &items, &mut m);
         assert_eq!(
@@ -1969,7 +1978,7 @@ mod tests {
         assert_eq!(run_values.len(), 1);
         assert_eq!(run_values[0].0, "Other");
         assert!(m.services.is_empty() && m.tasks.is_empty());
-        assert_eq!(m.firewall.keys().collect::<Vec<_>>(), vec!["{2}"]);
+        assert_eq!(m.firewall.keys().collect::<Vec<_>>(), vec!["{2}", "{3}"]);
 
         let dir = mc.root.join("acme-1");
         let manifest = read_manifest(&dir).unwrap().unwrap();
@@ -2479,10 +2488,10 @@ mod tests {
     }
 
     #[test]
-    fn a_firewall_rule_deleted_in_part_is_put_back() {
+    fn a_firewall_rule_that_will_not_go_is_left_with_its_namesake() {
         let mc = machine();
         let mut m = Fake {
-            delete_firewall_fails_part_way: true,
+            delete_firewall_fails: true,
             ..Fake::default()
         };
         m.firewall
@@ -2490,7 +2499,7 @@ mod tests {
         m.firewall
             .insert("{2}".into(), "v2.30|Action=Block|Name=Acme|".into());
         let before = m.state();
-        let items = vec![item(ItemKind::FirewallRule, "firewall:Acme")];
+        let items = vec![item(ItemKind::FirewallRule, "firewall:Acme | {1}")];
         let report = hold(&mc.root, "acme-1", "Acme", &items, &mut m);
         assert_eq!(report.held, 0);
         assert_eq!(report.failed.len(), 1);
@@ -2676,15 +2685,6 @@ mod tests {
     }
 
     #[test]
-    fn a_firewall_rule_is_named_as_the_scan_names_it() {
-        let rule = r"v2.30|Action=Allow|App=C:\a.exe|Name=Acme|";
-        assert_eq!(firewall_rule_name("{1}", rule), "Acme");
-        let localised = "v2.30|Action=Allow|Name=@acme.dll,-1|";
-        assert_eq!(firewall_rule_name("{2}", localised), "{2}");
-        assert_eq!(firewall_rule_name("{3}", "v2.30|Action=Allow|"), "{3}");
-    }
-
-    #[test]
     fn locations_are_read_in_the_scan_format() {
         let p = |kind, l: &str| Place::parse(&item(kind, l));
         assert_eq!(
@@ -2708,9 +2708,17 @@ mod tests {
             Some(Place::Task(r"\Acme\U".into()))
         );
         assert_eq!(
-            p(ItemKind::FirewallRule, "firewall:Acme"),
-            Some(Place::Firewall("Acme".into()))
+            p(ItemKind::FirewallRule, "firewall:Acme | {1}"),
+            Some(Place::Firewall("{1}".into()))
         );
+        // A name may hold the separator; the id is after the last one.
+        assert_eq!(
+            p(ItemKind::FirewallRule, "firewall:A | B | TCP Query User{2}"),
+            Some(Place::Firewall("TCP Query User{2}".into()))
+        );
+        // By its name alone a rule is never held.
+        assert_eq!(p(ItemKind::FirewallRule, "firewall:Acme"), None);
+        assert_eq!(p(ItemKind::FirewallRule, "firewall:Acme | "), None);
         assert_eq!(p(ItemKind::RegistryKey, "HKCU"), None);
         assert_eq!(p(ItemKind::RegistryKey, r"HKCR\.txt"), None);
         assert_eq!(p(ItemKind::Folder, r"relative\path"), None);

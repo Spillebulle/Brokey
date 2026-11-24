@@ -429,6 +429,7 @@ impl SystemView for LiveView {
             // A rule with no program is about a port or a service: not ours.
             if let Some(app) = app {
                 out.items.push(FirewallRule {
+                    id: id.clone(),
                     name: name
                         .filter(|n| !n.starts_with('@'))
                         .unwrap_or(&id)

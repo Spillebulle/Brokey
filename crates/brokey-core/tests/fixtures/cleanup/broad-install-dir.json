@@ -331,67 +331,67 @@
   ],
   "firewall": [
     {
-      "name": "Other",
+      "id": "{Other}", "name": "Other",
       "program": "C:\\Program Files\\Other\\other.exe"
     },
     {
-      "name": "Tool",
+      "id": "{Tool}", "name": "Tool",
       "program": "C:\\Users\\you\\Downloads\\tool\\tool.exe"
     },
     {
-      "name": "Thing in C:\\Program Files\\Common Files",
+      "id": "{thing-1}", "name": "Thing in C:\\Program Files\\Common Files",
       "program": "C:\\Program Files\\Common Files\\Thing\\thing.exe"
     },
     {
-      "name": "Thing in C:\\Program Files (x86)\\Common Files",
+      "id": "{thing-2}", "name": "Thing in C:\\Program Files (x86)\\Common Files",
       "program": "C:\\Program Files (x86)\\Common Files\\Thing\\thing.exe"
     },
     {
-      "name": "Thing in C:\\Program Files\\WindowsApps",
+      "id": "{thing-3}", "name": "Thing in C:\\Program Files\\WindowsApps",
       "program": "C:\\Program Files\\WindowsApps\\Thing\\thing.exe"
     },
     {
-      "name": "Thing in C:\\ProgramData\\Package Cache",
+      "id": "{thing-4}", "name": "Thing in C:\\ProgramData\\Package Cache",
       "program": "C:\\ProgramData\\Package Cache\\Thing\\thing.exe"
     },
     {
-      "name": "Thing in C:\\Users\\you\\AppData\\Local\\Packages",
+      "id": "{thing-5}", "name": "Thing in C:\\Users\\you\\AppData\\Local\\Packages",
       "program": "C:\\Users\\you\\AppData\\Local\\Packages\\Thing\\thing.exe"
     },
     {
-      "name": "Thing in C:\\Program Files (x86)\\Steam\\steamapps\\common",
+      "id": "{thing-6}", "name": "Thing in C:\\Program Files (x86)\\Steam\\steamapps\\common",
       "program": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Thing\\thing.exe"
     },
     {
-      "name": "Thing in D:\\SteamLibrary\\steamapps\\common",
+      "id": "{thing-7}", "name": "Thing in D:\\SteamLibrary\\steamapps\\common",
       "program": "D:\\SteamLibrary\\steamapps\\common\\Thing\\thing.exe"
     },
     {
-      "name": "Thing in C:\\Users\\you\\scoop\\apps",
+      "id": "{thing-8}", "name": "Thing in C:\\Users\\you\\scoop\\apps",
       "program": "C:\\Users\\you\\scoop\\apps\\Thing\\thing.exe"
     },
     {
-      "name": "Thing in C:\\ProgramData\\scoop\\apps",
+      "id": "{thing-9}", "name": "Thing in C:\\ProgramData\\scoop\\apps",
       "program": "C:\\ProgramData\\scoop\\apps\\Thing\\thing.exe"
     },
     {
-      "name": "Thing in C:\\ProgramData\\chocolatey\\lib",
+      "id": "{thing-10}", "name": "Thing in C:\\ProgramData\\chocolatey\\lib",
       "program": "C:\\ProgramData\\chocolatey\\lib\\Thing\\thing.exe"
     },
     {
-      "name": "Thing in D:\\Downloads",
+      "id": "{thing-11}", "name": "Thing in D:\\Downloads",
       "program": "D:\\Downloads\\Thing\\thing.exe"
     },
     {
-      "name": "Thing in C:\\Users\\you\\Pictures",
+      "id": "{thing-12}", "name": "Thing in C:\\Users\\you\\Pictures",
       "program": "C:\\Users\\you\\Pictures\\Thing\\thing.exe"
     },
     {
-      "name": "Thing in C:\\Users\\you\\Music",
+      "id": "{thing-13}", "name": "Thing in C:\\Users\\you\\Music",
       "program": "C:\\Users\\you\\Music\\Thing\\thing.exe"
     },
     {
-      "name": "Thing in C:\\Users\\you\\Videos",
+      "id": "{thing-14}", "name": "Thing in C:\\Users\\you\\Videos",
       "program": "C:\\Users\\you\\Videos\\Thing\\thing.exe"
     }
   ]

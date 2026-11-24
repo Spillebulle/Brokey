@@ -7,12 +7,14 @@
 //! planner is tested without the registry, the holding area or the closed
 //! list's view of real files.
 
+use crate::cleanup::guard::{self, Claims};
 use crate::cleanup::hints::Hints;
 use crate::cleanup::holding::{self, HoldItem, Listing};
 use crate::cleanup::internal::{
     AWAIT_GONE, EMPTY, HOLD, HoldPayload, MSI_UNREGISTER, RESTORE, SCAN, SHELL_OPEN, ScanPayload,
-    Scans, is_steam_app_key,
+    ScanRecord, Scans, is_steam_app_key,
 };
+use crate::cleanup::scan::{self, Candidate};
 use crate::cleanup::view::{SystemView, ViewError};
 use crate::model::*;
 use crate::{Error, Result};
@@ -31,6 +33,10 @@ pub struct Planning<'a> {
     /// The machine as it is now, to leave out of a clear what has gone since
     /// the scan. `None` keeps everything.
     pub view: Option<&'a dyn SystemView>,
+    /// Every available source's installed list, read now: a clear asks
+    /// again who uses what, since something may have been installed
+    /// while the list of leftovers was open.
+    pub installed: &'a dyn Fn() -> Vec<Package>,
 }
 
 /// The title of the step that waits for the uninstaller.
@@ -237,13 +243,11 @@ fn still_there(item: &LeftoverItem, view: &dyn SystemView) -> bool {
                     .any(|t| t.path.eq_ignore_ascii_case(path))
         }
         ItemKind::FirewallRule => {
+            let Some((_, id)) = holding::firewall_parts(at) else {
+                return true;
+            };
             let listed = view.firewall_rules();
-            let name = at.strip_prefix("firewall:").unwrap_or(at);
-            listed.unreadable > 0
-                || listed
-                    .items
-                    .iter()
-                    .any(|r| r.name.eq_ignore_ascii_case(name))
+            listed.unreadable > 0 || listed.items.iter().any(|r| r.id.eq_ignore_ascii_case(id))
         }
     }
 }
@@ -265,49 +269,14 @@ fn items_word(n: usize) -> String {
 /// checks every step before the first runs, and a removal's leftovers are
 /// not known until its scan has run.
 pub fn clear(scan: &str, ticked: &[String], planning: &Planning) -> Result<Vec<Step>> {
-    let record = planning
-        .scans
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .get(scan)
-        .cloned()
-        .ok_or_else(|| {
-            Error::new(
-                "Brokey no longer has that list of leftovers, because it has been closed since \
-                 the scan. Nothing was cleared.",
-            )
-        })?;
-    if ticked.is_empty() {
-        return Err(Error::new(NOTHING_TICKED));
-    }
+    let record = record_of(scan, planning)?;
+    let Chosen {
+        user,
+        machine,
+        left,
+    } = choose(&record, ticked, planning)?;
     let name = record.findings.name.clone();
     let source = record.findings.package.source;
-    let mut user = Vec::new();
-    let mut machine = Vec::new();
-    for id in ticked {
-        let item = record
-            .findings
-            .items
-            .iter()
-            .find(|i| i.id == *id)
-            .ok_or_else(|| {
-                Error::new(format!(
-                    "{id} is not in the list of leftovers from {name}. Open the list again and \
-                     choose what to clear."
-                ))
-            })?;
-        if planning.view.is_some_and(|view| !still_there(item, view)) {
-            continue;
-        }
-        let held = HoldItem {
-            kind: item.kind,
-            location: item.location.clone(),
-        };
-        match item.scope {
-            Scope::User => user.push(held),
-            Scope::Machine => machine.push(held),
-        }
-    }
     let holding = holding_id(&name);
     let mut steps = Vec::new();
     for (items, root) in [(user, false), (machine, true)] {
@@ -346,9 +315,152 @@ pub fn clear(scan: &str, ticked: &[String], planning: &Planning) -> Result<Vec<S
     // An empty plan would finish and say "Nothing to do." as if it had
     // worked; the user should hear why nothing moved.
     if steps.is_empty() {
-        return Err(Error::new(ALL_GONE));
+        if left.is_empty() {
+            return Err(Error::new(ALL_GONE));
+        }
+        return Err(Error::new(format!(
+            "{} Nothing was cleared.",
+            left.join(" ")
+        )));
     }
     Ok(steps)
+}
+
+/// What a clear leaves where it is although it was ticked, one sentence
+/// each: [`clear`] says it in the confirm step through the plan's notices.
+pub fn left_since_scan(scan: &str, ticked: &[String], planning: &Planning) -> Vec<String> {
+    record_of(scan, planning)
+        .and_then(|record| choose(&record, ticked, planning))
+        .map(|chosen| chosen.left)
+        .unwrap_or_default()
+}
+
+fn record_of(scan: &str, planning: &Planning) -> Result<ScanRecord> {
+    planning
+        .scans
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(scan)
+        .cloned()
+        .ok_or_else(|| {
+            Error::new(
+                "Brokey no longer has that list of leftovers, because it has been closed since \
+                 the scan. Nothing was cleared.",
+            )
+        })
+}
+
+/// The ticked items a clear moves, by side, and a sentence for each it
+/// leaves because something uses it now.
+struct Chosen {
+    user: Vec<HoldItem>,
+    machine: Vec<HoldItem>,
+    left: Vec<String>,
+}
+
+/// The machine as it is at clear time: who uses what, read again from a
+/// fresh installed list the way the scan reads it, and what a scan would
+/// find now, for what each item points at.
+struct Now<'a> {
+    claims: Claims,
+    found: Vec<Candidate>,
+    view: &'a dyn SystemView,
+}
+
+impl Now<'_> {
+    /// Why an item still there may no longer be moved, if it may not.
+    fn why_left(&self, item: &LeftoverItem, name: &str) -> Option<String> {
+        let found = self
+            .found
+            .iter()
+            .find(|c| c.location.eq_ignore_ascii_case(&item.location));
+        // A rule is offered only while its program is in the application's
+        // folder; a scan now that does not offer it says it no longer is.
+        if item.kind == ItemKind::FirewallRule && found.is_none() {
+            let listed = self.view.firewall_rules();
+            let id = holding::firewall_parts(&item.location).map(|(_, id)| id);
+            if listed.unreadable == 0
+                && listed
+                    .items
+                    .iter()
+                    .any(|r| id.is_some_and(|id| r.id.eq_ignore_ascii_case(id)))
+            {
+                return Some(format!(
+                    "{} was left where it is, because the program it lets through is no longer \
+                     in {name}'s folder.",
+                    item.location
+                ));
+            }
+        }
+        let candidate = Candidate {
+            kind: item.kind,
+            location: item.location.clone(),
+            size: None,
+            confidence: item.confidence,
+            scope: item.scope,
+            reason: item.reason.clone(),
+            points_to: found.and_then(|c| c.points_to.clone()),
+            holds_only: None,
+        };
+        self.claims.user_of(&candidate).map(|user| {
+            format!(
+                "{} was left where it is, because {user} uses it now.",
+                item.location
+            )
+        })
+    }
+}
+
+fn choose(record: &ScanRecord, ticked: &[String], planning: &Planning) -> Result<Chosen> {
+    if ticked.is_empty() {
+        return Err(Error::new(NOTHING_TICKED));
+    }
+    let name = record.findings.name.as_str();
+    let now = planning.view.map(|view| Now {
+        claims: guard::claims(
+            view,
+            &(planning.installed)(),
+            record.forced.then_some(&record.hints),
+        ),
+        found: scan::scan(&record.hints, view).candidates,
+        view,
+    });
+    let mut chosen = Chosen {
+        user: Vec::new(),
+        machine: Vec::new(),
+        left: Vec::new(),
+    };
+    for id in ticked {
+        let item = record
+            .findings
+            .items
+            .iter()
+            .find(|i| i.id == *id)
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "{id} is not in the list of leftovers from {name}. Open the list again and \
+                     choose what to clear."
+                ))
+            })?;
+        if let Some(now) = &now {
+            if !still_there(item, now.view) {
+                continue;
+            }
+            if let Some(why) = now.why_left(item, name) {
+                chosen.left.push(why);
+                continue;
+            }
+        }
+        let held = HoldItem {
+            kind: item.kind,
+            location: item.location.clone(),
+        };
+        match item.scope {
+            Scope::User => chosen.user.push(held),
+            Scope::Machine => chosen.machine.push(held),
+        }
+    }
+    Ok(chosen)
 }
 
 /// Put a holding entry back: as the user for what was the user's, as

@@ -54,12 +54,17 @@ fn live<R>(store: &Store, scans: &Scans, f: impl FnOnce(&Planning) -> R) -> R {
         let hints = |package: &PackageRef| store.leftover_hints(package);
         let listing = || holding::list(&holding::user_root(), &holding::machine_root());
         let view = crate::cleanup::view::LiveView::new();
+        let installed = || {
+            use crate::cleanup::internal::Session;
+            crate::cleanup::internal::LiveSession.installed().0
+        };
         f(&Planning {
             scans,
             check: &check,
             hints: &hints,
             holding: &listing,
             view: Some(&view),
+            installed: &installed,
         })
     }
     #[cfg(not(windows))]
@@ -71,6 +76,7 @@ fn live<R>(store: &Store, scans: &Scans, f: impl FnOnce(&Planning) -> R) -> R {
             hints: &|_| None,
             holding: &crate::cleanup::holding::Listing::default,
             view: None,
+            installed: &Vec::new,
         })
     }
 }
@@ -259,6 +265,20 @@ pub fn holding_notices(ops: &[Op], planning: &Planning) -> Vec<String> {
     notices
 }
 
+/// The sentences for what a clear leaves where it is although it was
+/// ticked, because another application has come to use it since the scan.
+pub fn clear_notices(ops: &[Op], planning: &Planning) -> Vec<String> {
+    ops.iter()
+        .filter_map(|op| match op {
+            Op::ClearLeftovers { scan, items } => {
+                Some(cleanup::left_since_scan(scan, items, planning))
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
 /// What the page should say beside a plan before it runs.
 ///
 /// A setup says what setting its source up does ("Flatpak is not
@@ -280,8 +300,14 @@ pub fn holding_notices(ops: &[Op], planning: &Planning) -> Vec<String> {
 /// running session already reads that format's export directory (see
 /// [`crate::launch`]).
 pub fn notices(store: &Store, ops: &[Op]) -> Vec<String> {
+    notices_with(store, ops, &Scans::default())
+}
+
+/// [`notices`], with the scans a clear takes its items from.
+pub fn notices_with(store: &Store, ops: &[Op], scans: &Scans) -> Vec<String> {
     #[cfg(unix)]
     {
+        let _ = scans;
         notices_in(store, ops, &crate::launch::this_session())
     }
     #[cfg(windows)]
@@ -290,9 +316,10 @@ pub fn notices(store: &Store, ops: &[Op]) -> Vec<String> {
         // there is no session to read. `log_out_notice` answers `None`
         // itself; the empty session is never inspected.
         let mut notices = notices_in(store, ops, &[]);
-        notices.extend(live(store, &Scans::default(), |planning| {
+        notices.extend(live(store, scans, |planning| {
             let mut notices = self_elevating_notices(store, ops, planning);
             notices.extend(holding_notices(ops, planning));
+            notices.extend(clear_notices(ops, planning));
             notices
         }));
         notices

@@ -9,7 +9,7 @@
 
 use super::{
     Done, Failure, KeyNode, Mutate, REG_DWORD, REG_EXPAND_SZ, REG_MULTI_SZ, REG_SZ, RegValue,
-    firewall_rule_name, merge_with, move_with, path_text,
+    merge_with, move_with, path_text,
 };
 use crate::cleanup::view::Hive;
 use crate::cleanup::view::windows::{long_path, wow6432};
@@ -1460,22 +1460,17 @@ fn restore_task(path: &str, xml: &str, merge: bool) -> Done<()> {
 // ---------------------------------------------------------------------------
 // Firewall rules
 
-fn export_firewall_rule(name: &str) -> Done<Vec<(String, String)>> {
-    let location = format!("firewall:{name}");
+fn export_firewall_rule(id: &str) -> Done<Vec<(String, String)>> {
+    let location = format!("firewall:{id}");
     let key = open(Hive::Hklm, FIREWALL_RULES, false)?;
-    let values = key.values().map_err(|e| registry_failure(&location, e))?;
-    let rules: Vec<(String, String)> = values
-        .filter_map(|(id, value)| Some((id, String::try_from(value).ok()?)))
-        .filter(|(id, rule)| firewall_rule_name(id, rule) == name)
-        .collect();
-    if rules.is_empty() {
-        return Err(Failure::Missing);
-    }
-    Ok(rules)
+    let rule = key
+        .get_string(id)
+        .map_err(|e| registry_failure(&location, e))?;
+    Ok(vec![(id.to_string(), rule)])
 }
 
-fn delete_firewall_rule(name: &str, rules: &[(String, String)]) -> Done<()> {
-    let location = format!("firewall:{name}");
+fn delete_firewall_rule(id: &str, rules: &[(String, String)]) -> Done<()> {
+    let location = format!("firewall:{id}");
     let key = open(Hive::Hklm, FIREWALL_RULES, true)?;
     for (id, _) in rules {
         key.remove_value(id)
@@ -1484,8 +1479,8 @@ fn delete_firewall_rule(name: &str, rules: &[(String, String)]) -> Done<()> {
     Ok(())
 }
 
-fn restore_firewall_rule(name: &str, rules: &[(String, String)], merge: bool) -> Done<()> {
-    let location = format!("firewall:{name}");
+fn restore_firewall_rule(id: &str, rules: &[(String, String)], merge: bool) -> Done<()> {
+    let location = format!("firewall:{id}");
     let key = open(Hive::Hklm, FIREWALL_RULES, true)?;
     let there = |id: &String| key.get_type(id).is_ok();
     if !merge && rules.iter().any(|(id, _)| there(id)) {
@@ -1690,21 +1685,21 @@ impl Mutate for LiveMutate {
         restore_task(path, xml, merge)
     }
 
-    fn export_firewall_rule(&mut self, name: &str) -> Done<Vec<(String, String)>> {
-        export_firewall_rule(name)
+    fn export_firewall_rule(&mut self, id: &str) -> Done<Vec<(String, String)>> {
+        export_firewall_rule(id)
     }
 
-    fn delete_firewall_rule(&mut self, name: &str, rules: &[(String, String)]) -> Done<()> {
-        delete_firewall_rule(name, rules)
+    fn delete_firewall_rule(&mut self, id: &str, rules: &[(String, String)]) -> Done<()> {
+        delete_firewall_rule(id, rules)
     }
 
     fn restore_firewall_rule(
         &mut self,
-        name: &str,
+        id: &str,
         rules: &[(String, String)],
         merge: bool,
     ) -> Done<()> {
-        restore_firewall_rule(name, rules, merge)
+        restore_firewall_rule(id, rules, merge)
     }
 }
 

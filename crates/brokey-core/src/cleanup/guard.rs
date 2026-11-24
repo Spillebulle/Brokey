@@ -697,7 +697,7 @@ pub fn claims(view: &dyn SystemView, installed: &[Package], excluding: Option<&H
 
 impl Claims {
     /// Who uses what a candidate is or points at, if anyone else does.
-    fn user_of(&self, candidate: &Candidate) -> Option<String> {
+    pub(crate) fn user_of(&self, candidate: &Candidate) -> Option<String> {
         let places = normal(&candidate.location).into_iter().chain(
             candidate
                 .points_to
@@ -1592,7 +1592,7 @@ mod tests {
         for location in [
             steam.clone(),
             format!(r"HKCU\{RUN} | Steam"),
-            "firewall:Steam".to_string(),
+            "firewall:Steam | {Steam}".to_string(),
         ] {
             assert_eq!(used_by(&kept, &location), Some("Steam"), "{location}");
         }
@@ -2075,7 +2075,7 @@ mod tests {
                     && !at.contains(r"classes\steam")
                     && !at.contains("discord-")
                     && !at.contains("portal 2")
-                    && at != "firewall:steam",
+                    && !at.starts_with("firewall:steam"),
                 "{at}"
             );
         }
@@ -2097,7 +2097,7 @@ mod tests {
                     Confidence::Certain
                 ),
                 (r"C:\Users\you\AppData\Local\Deadlock", Confidence::Likely),
-                ("firewall:Deadlock", Confidence::Certain),
+                ("firewall:Deadlock | {Deadlock}", Confidence::Certain),
             ]
         );
     }

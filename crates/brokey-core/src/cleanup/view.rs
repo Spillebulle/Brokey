@@ -79,9 +79,23 @@ pub struct ScheduledTask {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct FirewallRule {
+    /// The value Windows stores the rule under in `FirewallRules`. Names are
+    /// not unique (two Java runtimes both add "Java(TM) Platform SE
+    /// binary"), so this is what a rule is held by.
+    pub id: String,
     pub name: String,
     /// The `App=` field: the program the rule is about.
     pub program: String,
+}
+
+impl FirewallRule {
+    /// What the page calls it: its name, or its id when it has none.
+    pub fn shown_name(&self) -> &str {
+        match self.name.trim() {
+            "" => &self.id,
+            _ => &self.name,
+        }
+    }
 }
 
 /// The well-known places a leftover can be in.

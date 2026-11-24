@@ -1093,30 +1093,29 @@ fn check_system(item: &HoldItem, mode: Mode, view: &dyn SystemView) -> Result<()
             }
         }
         _ => {
-            let Some(name) = location
-                .strip_prefix("firewall:")
-                .filter(|n| sane_name(n, true) && !n.trim_start().starts_with('@'))
-            else {
-                return Err(refuse(
+            let not_one = || {
+                refuse(
                     location,
                     mode,
-                    "it is not the name of a firewall rule an application added",
-                ));
+                    "it is not a firewall rule an application added, by its name and its id",
+                )
+            };
+            let Some((name, id)) = holding::firewall_parts(location).filter(|(name, id)| {
+                sane_name(name, true) && sane_name(id, true) && !name.trim_start().starts_with('@')
+            }) else {
+                return Err(not_one());
             };
             let rules = view.firewall_rules();
             if rules.unreadable > 0 && mode == Mode::Hold {
                 return Err(unlisted("firewall rules"));
             }
-            // Every rule with the name goes, so every one is asked.
-            if rules
-                .items
-                .iter()
-                .filter(|r| r.name == name)
-                .any(|r| runs_windows(&r.program, view))
-            {
-                return Err(windows("firewall rule"));
+            // Only the rule with this id goes; another application's rule
+            // by the same name is not asked about and does not go.
+            match rules.items.iter().find(|r| r.id.eq_ignore_ascii_case(id)) {
+                Some(r) if r.shown_name() != name => Err(not_one()),
+                Some(r) if runs_windows(&r.program, view) => Err(windows("firewall rule")),
+                _ => Ok(()),
             }
-            Ok(())
         }
     }
 }

@@ -26,7 +26,7 @@ pub mod progress;
 pub mod runner;
 
 pub use allow::{Allowed, validate, validate_with};
-pub use plan::{PARTIAL_UPGRADE_NOTICE, build, log_out_notice, notices, notices_in};
+pub use plan::{PARTIAL_UPGRADE_NOTICE, build, log_out_notice, notices, notices_in, notices_with};
 pub use progress::{ProgressParser, Reading};
 pub use runner::{Outcome, Runner, Sink};
 
