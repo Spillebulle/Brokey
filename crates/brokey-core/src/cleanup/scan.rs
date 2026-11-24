@@ -48,6 +48,11 @@ pub struct Candidate {
     /// application's folder: the guard checks it against what other
     /// applications claim. `None` for a match by name or by place.
     pub points_to: Option<PathBuf>,
+    /// For a folder that holds nothing but one other candidate (a
+    /// publisher's folder around the install folder): that candidate's
+    /// location. When the guard offers both, they are one row, the outer
+    /// one at the surer of the two confidences.
+    pub holds_only: Option<String>,
 }
 
 /// What a scan found, and what it could not or would not offer.
@@ -200,6 +205,19 @@ fn same(a: &str, b: &str) -> bool {
 /// `path` is `dir` or lies inside it.
 fn within(path: &str, dir: &str) -> bool {
     same(path, dir) || inside(path, dir)
+}
+
+/// A path as a candidate holds it and as homes are compared: one kind of
+/// separator and none at the end, so that `C:\Program Files\CMake\` and
+/// `C:\Program Files\CMake` are one folder. A drive keeps its backslash.
+fn tidy(path: &str) -> String {
+    let path = path.trim().replace('/', "\\");
+    let trimmed = path.trim_end_matches('\\');
+    if trimmed.ends_with(':') || trimmed.is_empty() {
+        format!(r"{trimmed}\")
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn join(dir: &str, name: &str) -> String {
@@ -409,7 +427,7 @@ impl<'a> Scan<'a> {
             .extra_dirs
             .iter()
             .map(|d| d.to_string_lossy().into_owned());
-        for home in chosen.into_iter().chain(extra) {
+        for home in chosen.into_iter().chain(extra).map(|h| tidy(&h)) {
             if self.narrow(&home) && !homes.iter().any(|h| same(h, &home)) {
                 homes.push(home);
             }
@@ -571,11 +589,22 @@ impl<'a> Scan<'a> {
             .then(|| PathBuf::from(program))
     }
 
-    fn push(&mut self, candidate: Candidate) {
-        let key = candidate.location.replace('/', "\\").to_lowercase();
+    fn key(location: &str) -> String {
+        location
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    }
+
+    fn push(&mut self, mut candidate: Candidate) {
+        let key = Self::key(&candidate.location);
         match self.seen.get(&key) {
             Some(&at) => {
-                if rank(candidate.confidence) < rank(self.out.candidates[at].confidence) {
+                let was = &self.out.candidates[at];
+                if rank(candidate.confidence) < rank(was.confidence) {
+                    // What the place holds is a fact about the place,
+                    // whichever match found it.
+                    candidate.holds_only = candidate.holds_only.or(was.holds_only.clone());
                     self.out.candidates[at] = candidate;
                 }
             }
@@ -597,6 +626,7 @@ impl<'a> Scan<'a> {
         reason: String,
         must_be_narrow: bool,
     ) {
+        let path = &tidy(path);
         if self.holds_known(path) || (must_be_narrow && !self.narrow(path)) {
             return;
         }
@@ -637,6 +667,7 @@ impl<'a> Scan<'a> {
             scope,
             reason,
             points_to: None,
+            holds_only: None,
         });
     }
 
@@ -660,6 +691,7 @@ impl<'a> Scan<'a> {
             },
             reason,
             points_to,
+            holds_only: None,
         });
     }
 
@@ -684,6 +716,7 @@ impl<'a> Scan<'a> {
             },
             reason,
             points_to: Some(points_to),
+            holds_only: None,
         });
     }
 
@@ -702,11 +735,14 @@ impl<'a> Scan<'a> {
             scope: Scope::Machine,
             reason,
             points_to: Some(points_to),
+            holds_only: None,
         });
     }
 
     /// The install folder, and its parent when that is named for the
-    /// publisher and holds nothing else.
+    /// publisher and holds nothing else. The parent says it holds only the
+    /// install folder, so that once the guard has let it through the two
+    /// are one row.
     fn home(&mut self, home: &str) {
         let app = self.app();
         self.offer_path(
@@ -740,6 +776,9 @@ impl<'a> Scan<'a> {
                 ),
                 true,
             );
+            if let Some(&at) = self.seen.get(&Self::key(&tidy(&parent))) {
+                self.out.candidates[at].holds_only = Some(tidy(home));
+            }
         }
     }
 
@@ -1768,10 +1807,11 @@ mod tests {
     fn the_install_folders_parent_is_offered_only_when_it_holds_nothing_else() {
         let s = acme(STUDIO);
         assert_eq!(confidence(&s, STUDIO), Some(Confidence::Certain));
-        assert_eq!(
-            confidence(&s, r"C:\Program Files\Acme"),
-            Some(Confidence::Likely)
-        );
+        // Likely by name alone; it says what it holds, so the guard can
+        // make the two one row.
+        let parent = at(&s, r"C:\Program Files\Acme").expect("the publisher folder");
+        assert_eq!(parent.confidence, Confidence::Likely);
+        assert_eq!(parent.holds_only.as_deref(), Some(STUDIO));
 
         let s = acme(r"C:\Program Files (x86)\Acme\Acme Studio");
         assert_eq!(
@@ -1844,6 +1884,58 @@ mod tests {
                 .iter()
                 .all(|c| c.confidence != Confidence::Certain)
         );
+    }
+
+    /// CMake as the reference machine has it: an MSI whose uninstaller says
+    /// nothing, an `InstallLocation` with a trailing backslash, and a folder
+    /// in Program Files that its name matches as well.
+    const CMAKE: &str = r#"{
+      "folders": {
+        "ProgramFiles": "C:\\Program Files",
+        "Profile": "C:\\Users\\you"
+      },
+      "dirs": {
+        "C:\\Program Files": [
+          { "name": "CMake", "is_dir": true },
+          { "name": "CMake Tools", "is_dir": true }
+        ],
+        "C:\\Program Files\\CMake": [{ "name": "bin", "is_dir": true }],
+        "C:\\Program Files\\CMake\\bin": [{ "name": "cmake.exe", "size": 10 }],
+        "C:\\Program Files\\CMake Tools": [{ "name": "tool.exe", "size": 1 }]
+      }
+    }"#;
+
+    #[test]
+    fn one_folder_spelt_two_ways_is_one_candidate_at_the_surer_confidence() {
+        let view = FixtureView::from_json(CMAKE);
+        for location in [r"C:\Program Files\CMake\", r"C:\Program Files\CMake"] {
+            let s = scan(
+                &hints("CMake", Some("Kitware"), None, Some(location)),
+                &view,
+            );
+            assert_eq!(
+                locations(&s),
+                vec![r"C:\Program Files\CMake".to_string()],
+                "{location}"
+            );
+            assert_eq!(s.candidates[0].confidence, Confidence::Certain);
+        }
+        // A name match alone, with no install folder, is still Likely.
+        let s = scan(&hints("CMake", Some("Kitware"), None, None), &view);
+        assert_eq!(locations(&s), vec![r"C:\Program Files\CMake".to_string()]);
+        assert_eq!(s.candidates[0].confidence, Confidence::Likely);
+    }
+
+    #[test]
+    fn what_is_found_twice_under_two_spellings_is_kept_once() {
+        let view = FixtureView::from_json(CMAKE);
+        let mut h = hints("CMake", Some("Kitware"), None, None);
+        h.extra_dirs = vec![
+            PathBuf::from(r"C:\Program Files\CMake\"),
+            PathBuf::from(r"c:/program files/cmake"),
+        ];
+        let s = scan(&h, &view);
+        assert_eq!(locations(&s), vec![r"C:\Program Files\CMake".to_string()]);
     }
 
     #[test]

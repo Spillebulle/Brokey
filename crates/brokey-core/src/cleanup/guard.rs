@@ -1028,6 +1028,27 @@ pub fn guard(
     let clearing: HashSet<String> = still.iter().filter_map(|c| normal(&c.location)).collect();
     still.retain(|c| !extension_in_use(&c.location, view, &clearing));
 
+    // A folder that holds nothing but another offered candidate is as sure
+    // as that candidate, which then goes with it below: one row, not two.
+    // Only once both have passed the rules above, so a publisher's folder
+    // another application answers to is still kept.
+    let ranks: HashMap<String, Confidence> = still
+        .iter()
+        .filter_map(|c| normal(&c.location).map(|at| (at, c.confidence)))
+        .collect();
+    for candidate in &mut still {
+        let inner = candidate
+            .holds_only
+            .as_deref()
+            .and_then(normal)
+            .and_then(|at| ranks.get(&at).copied());
+        if let Some(inner) = inner
+            && scan::rank(inner) < scan::rank(candidate.confidence)
+        {
+            candidate.confidence = inner;
+        }
+    }
+
     // What lies inside an offered folder or key goes with it, unless the
     // match on it is surer than on what holds it: a Likely item is never
     // hidden inside a Possible folder that is not ticked.
@@ -1225,6 +1246,7 @@ mod tests {
             scope: Scope::Machine,
             reason: "It matched.".to_string(),
             points_to: points_to.map(PathBuf::from),
+            holds_only: None,
         }
     }
 
@@ -1884,6 +1906,91 @@ mod tests {
             ]
         );
         assert!(kept.is_empty());
+    }
+
+    /// HWMonitor as the reference machine has it: an Inno Setup install in
+    /// a folder named for its publisher, whose `InstallLocation` ends in a
+    /// backslash. `with_cpu_z` puts another of CPUID's applications beside it.
+    fn cpuid(with_cpu_z: bool) -> FixtureView {
+        let cpuid = if with_cpu_z {
+            r#"[{ "name": "HWMonitor", "is_dir": true }, { "name": "CPU-Z", "is_dir": true }]"#
+        } else {
+            r#"[{ "name": "HWMonitor", "is_dir": true }]"#
+        };
+        FixtureView::from_json(&format!(
+            r#"{{
+              "folders": {{
+                "ProgramFiles": "C:\\Program Files",
+                "ProgramFilesX86": "C:\\Program Files (x86)",
+                "ProgramData": "C:\\ProgramData",
+                "AppData": "C:\\Users\\you\\AppData\\Roaming",
+                "LocalAppData": "C:\\Users\\you\\AppData\\Local",
+                "LocalLow": "C:\\Users\\you\\AppData\\LocalLow",
+                "Documents": "C:\\Users\\you\\Documents",
+                "SavedGames": "C:\\Users\\you\\Saved Games",
+                "StartMenuMachine": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+                "StartMenuUser": "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+                "Desktop": "C:\\Users\\you\\Desktop",
+                "Windows": "C:\\Windows",
+                "Profile": "C:\\Users\\you"
+              }},
+              "dirs": {{
+                "C:\\Program Files": [{{ "name": "CPUID", "is_dir": true }}],
+                "C:\\Program Files\\CPUID": {cpuid},
+                "C:\\Program Files\\CPUID\\HWMonitor": [{{ "name": "HWMonitor.exe", "size": 7 }}],
+                "C:\\Program Files\\CPUID\\CPU-Z": [{{ "name": "cpuz.exe", "size": 3 }}]
+              }}
+            }}"#
+        ))
+    }
+
+    fn hwmonitor() -> Hints {
+        Hints {
+            install_dir: Some(PathBuf::from(r"C:\Program Files\CPUID\HWMonitor")),
+            install_location: Some(PathBuf::from(r"C:\Program Files\CPUID\HWMonitor\")),
+            ..blank_hints("CPUID HWMonitor 1.57", Some("CPUID, Inc."))
+        }
+    }
+
+    #[test]
+    fn a_publisher_folder_holding_only_the_install_folder_is_one_row() {
+        let view = cpuid(false);
+        let hints = hwmonitor();
+        let f = findings(
+            "scan-1".to_string(),
+            &hints,
+            scan(&hints, &view),
+            &claims(&view, &[], Some(&hints)),
+            &view,
+        );
+        let rows: Vec<(&str, Confidence)> = f
+            .items
+            .iter()
+            .map(|i| (i.location.as_str(), i.confidence))
+            .collect();
+        assert_eq!(rows, vec![(r"C:\Program Files\CPUID", Confidence::Certain)]);
+    }
+
+    #[test]
+    fn a_publisher_folder_holding_anything_else_leaves_the_install_folder_alone() {
+        let view = cpuid(true);
+        let hints = hwmonitor();
+        let f = findings(
+            "scan-1".to_string(),
+            &hints,
+            scan(&hints, &view),
+            &claims(&view, &[], Some(&hints)),
+            &view,
+        );
+        let rows: Vec<(&str, Confidence)> = f
+            .items
+            .iter()
+            .map(|i| (i.location.as_str(), i.confidence))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![(r"C:\Program Files\CPUID\HWMonitor", Confidence::Certain)]
+        );
     }
 
     #[test]
