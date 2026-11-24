@@ -84,7 +84,7 @@ const STOP_LIST: [&str; 11] = [
 const SHORTEST_NAME: usize = 4;
 
 const SOFTWARE: &str = "Software";
-pub(super) const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
+pub(crate) const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 const APP_PATHS: &str = r"Software\Microsoft\Windows\CurrentVersion\App Paths";
 const RUN_KEYS: [&str; 2] = [
     r"Software\Microsoft\Windows\CurrentVersion\Run",
@@ -239,7 +239,7 @@ fn parent_and_leaf(path: &str) -> Option<(String, String)> {
     Some((parent, leaf.to_string()))
 }
 
-pub(super) fn hive_word(hive: Hive) -> &'static str {
+pub(crate) fn hive_word(hive: Hive) -> &'static str {
     match hive {
         Hive::Hklm => "HKLM",
         Hive::Hklm32 => "HKLM32",

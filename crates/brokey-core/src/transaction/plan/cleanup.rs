@@ -17,6 +17,7 @@ use crate::cleanup::internal::{
 use crate::cleanup::scan::{self, Candidate};
 use crate::cleanup::view::{SystemView, ViewError};
 use crate::model::*;
+use crate::sources::windows::shortcut;
 use crate::{Error, Result};
 
 /// What planning a cleanup asks of the machine.
@@ -261,9 +262,11 @@ fn items_word(n: usize) -> String {
 }
 
 /// Move the ticked items of a scan to the holding area: the user's in one
-/// step as the user, the machine's in one step as Administrator, under one
-/// holding id; and, after a forced removal of a Windows Installer product,
-/// that product's registration into the same entry.
+/// step as the user, the machine's in one step as Administrator, each into
+/// an entry of its own (`<id>` and `<id>-m`), so that every restore and
+/// delete names exactly one; and, after a forced removal of a Windows
+/// Installer product whose uninstall key or install folder is ticked, that
+/// product's registration into the machine's entry.
 ///
 /// Always a plan of its own, never added to a removal's: the closed list
 /// checks every step before the first runs, and a removal's leftovers are
@@ -278,11 +281,13 @@ pub fn clear(scan: &str, ticked: &[String], planning: &Planning) -> Result<Vec<S
     let name = record.findings.name.clone();
     let source = record.findings.package.source;
     let holding = holding_id(&name);
+    let machine_holding = format!("{holding}-m");
     let mut steps = Vec::new();
     for (items, root) in [(user, false), (machine, true)] {
         if items.is_empty() {
             continue;
         }
+        let holding = if root { &machine_holding } else { &holding };
         let title = if root {
             format!(
                 "Moving {} from {name} that need Administrator to the holding area",
@@ -303,12 +308,13 @@ pub fn clear(scan: &str, ticked: &[String], planning: &Planning) -> Result<Vec<S
     }
     if record.forced
         && let Some(code) = &record.hints.product_code
+        && says_it_is_there(&record, ticked)
     {
         steps.push(internal(
             source,
             format!("Clearing what the Windows Installer still records for {name}"),
             MSI_UNREGISTER,
-            vec![code.clone(), holding],
+            vec![code.clone(), machine_holding],
             true,
         ));
     }
@@ -324,6 +330,31 @@ pub fn clear(scan: &str, ticked: &[String], planning: &Planning) -> Result<Vec<S
         )));
     }
     Ok(steps)
+}
+
+/// Whether what was ticked includes what says the application is there:
+/// its uninstall key, or its install folder however that is spelt. Without
+/// either, its Windows Installer registration is left as it is.
+fn says_it_is_there(record: &ScanRecord, ticked: &[String]) -> bool {
+    let hints = &record.hints;
+    let key = hints.uninstall_key.as_ref().map(|(hive, key)| {
+        format!(r"{}\{}\{key}", scan::hive_word(*hive), scan::UNINSTALL).to_lowercase()
+    });
+    let folders: Vec<String> = [&hints.install_dir, &hints.install_location]
+        .into_iter()
+        .flatten()
+        .map(|d| shortcut::normalise(&d.to_string_lossy()))
+        .collect();
+    record
+        .findings
+        .items
+        .iter()
+        .filter(|i| ticked.contains(&i.id))
+        .any(|i| match i.kind {
+            ItemKind::RegistryKey => key.as_deref() == Some(i.location.to_lowercase().as_str()),
+            ItemKind::Folder => folders.contains(&shortcut::normalise(&i.location)),
+            _ => false,
+        })
 }
 
 /// What a clear leaves where it is although it was ticked, one sentence

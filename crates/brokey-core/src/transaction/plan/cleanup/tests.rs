@@ -397,12 +397,44 @@ fn clear_splits_user_and_machine_items_into_two_holds() {
     let (user, root) = (&plan.steps[0], &plan.steps[1]);
     assert!(!user.needs_root && root.needs_root);
     let (user, root) = (payload(user), payload(root));
-    assert_eq!(user.holding, root.holding, "one entry for the whole clear");
-    assert!(
-        crate::cleanup::holding::valid_id(&user.holding),
-        "{}",
-        user.holding
-    );
+    // One entry in each root, each with an id of its own, so that every
+    // restore or delete names exactly one of them.
+    assert_ne!(user.holding, root.holding);
+    for id in [&user.holding, &root.holding] {
+        assert!(crate::cleanup::holding::valid_id(id), "{id}");
+    }
+    assert_eq!(root.holding, format!("{}-m", user.holding));
+    let entries = with_entries(vec![
+        HoldingEntry {
+            id: user.holding.clone(),
+            ..entry("u", false, false)
+        },
+        HoldingEntry {
+            id: root.holding.clone(),
+            ..entry("m", true, false)
+        },
+    ]);
+    let store = store(uninstaller);
+    for (id, root) in [(&user.holding, false), (&root.holding, true)] {
+        for op in [
+            Op::EmptyHolding {
+                holding: Some(id.clone()),
+            },
+            Op::Restore {
+                holding: id.clone(),
+            },
+        ] {
+            let plan = entries.plan(&store, std::slice::from_ref(&op)).unwrap();
+            assert_eq!(
+                plan.steps
+                    .iter()
+                    .map(|s| (s.command.args[0].as_str(), s.needs_root))
+                    .collect::<Vec<_>>(),
+                vec![(id.as_str(), root)],
+                "{op:?}"
+            );
+        }
+    }
     assert_eq!(user.name, "Acme Studio");
     let at = |p: &HoldPayload| {
         p.items
@@ -666,6 +698,56 @@ fn clearing_after_a_forced_msi_removal_unregisters_it_into_the_same_entry() {
         msi.command.args,
         vec![CODE.to_string(), payload(&plan.steps[1]).holding]
     );
+}
+
+/// The registration goes only with what says the application is there:
+/// its uninstall key or its install folder, however that is spelt.
+#[test]
+fn a_forced_msi_is_unregistered_only_when_its_key_or_folder_is_ticked() {
+    let machine = Machine::new();
+    scanned(&machine, true, Some(CODE));
+    let store = store(uninstaller);
+    let plan = machine
+        .plan(
+            &store,
+            &[clear_op(&["item-0", "item-1", "item-3", "item-4"])],
+        )
+        .unwrap();
+    assert_eq!(programs(&plan), vec![HOLD, HOLD]);
+
+    let uninstall = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\Acme Studio_is1";
+    scanned_items(
+        &machine,
+        true,
+        Some(CODE),
+        vec![
+            leftover("key", ItemKind::RegistryKey, uninstall, Scope::Machine),
+            leftover(
+                "home",
+                ItemKind::Folder,
+                r"c:\program files (x86)\acme\",
+                Scope::Machine,
+            ),
+            leftover(
+                "data",
+                ItemKind::Folder,
+                r"C:\ProgramData\Acme",
+                Scope::Machine,
+            ),
+        ],
+    );
+    for (ticked, unregistered) in [
+        (&["key"][..], true),
+        (&["home"][..], true),
+        (&["data"][..], false),
+    ] {
+        let plan = machine.plan(&store, &[clear_op(ticked)]).unwrap();
+        assert_eq!(
+            programs(&plan).contains(&MSI_UNREGISTER),
+            unregistered,
+            "{ticked:?}"
+        );
+    }
 }
 
 #[test]
