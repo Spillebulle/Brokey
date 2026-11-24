@@ -34,6 +34,7 @@
 //! helper's stdin and the helper stops after the step that is running; the
 //! events say so.
 
+use crate::cleanup::internal::{self, InternalContext, Scans};
 use crate::model::*;
 use crate::transaction::CancelToken;
 use crate::transaction::allow::{self, Allowed};
@@ -45,6 +46,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as Process, Stdio};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, TryLockError, mpsc};
 use std::time::{Duration, Instant};
 
@@ -132,6 +134,11 @@ pub struct Runner {
     allowed: Allowed,
     queue: Option<Arc<Mutex<()>>>,
     pacman_lock: Option<PathBuf>,
+    /// Set by the page's "It has finished", for a step waiting on an
+    /// uninstaller.
+    finished: Arc<AtomicBool>,
+    /// The scans this session has made, shared with every runner.
+    scans: Scans,
 }
 
 impl Default for Runner {
@@ -163,6 +170,8 @@ impl Runner {
             allowed,
             queue: None,
             pacman_lock: pacman_lock_file(),
+            finished: Arc::new(AtomicBool::new(false)),
+            scans: Scans::default(),
         }
     }
 
@@ -214,6 +223,19 @@ impl Runner {
     /// a machine that has pacman.
     pub fn with_pacman_lock(mut self, lock: Option<PathBuf>) -> Runner {
         self.pacman_lock = lock;
+        self
+    }
+
+    /// The flag the page's "It has finished" sets for this plan.
+    pub fn with_finished(mut self, finished: Arc<AtomicBool>) -> Runner {
+        self.finished = finished;
+        self
+    }
+
+    /// The scans a clear looks its items up in, shared with the runner
+    /// that made them.
+    pub fn with_scans(mut self, scans: Scans) -> Runner {
+        self.scans = scans;
         self
     }
 
@@ -428,6 +450,11 @@ impl Runner {
             title: step.title.clone(),
         });
         emit_progress(sink, &id, index, state, None);
+        // Brokey's own steps are carried out here and never started as a
+        // program, whatever their name would find on `PATH`.
+        if internal::is_internal(&step.command.program) {
+            return self.run_internal(plan, index, state, sink);
+        }
         let mut process = Process::new(&step.command.program);
         process
             .args(&step.command.args)
@@ -533,6 +560,55 @@ impl Runner {
             message: Some(message.clone()),
         });
         Err(message)
+    }
+
+    /// One of Brokey's own steps, as the user: run here, with the events it
+    /// sends forwarded, and finished like any other step.
+    fn run_internal(
+        &self,
+        plan: &Plan,
+        index: usize,
+        state: &mut ProgressState,
+        sink: &mut dyn Sink,
+    ) -> Result<(), String> {
+        let step = &plan.steps[index];
+        let id = plan.id.clone();
+        let cancel = self.cancel.clone();
+        let cancelled = move || cancel.is_cancelled();
+        let result = {
+            let mut forward = |event: Event| sink.event(event);
+            let mut ctx = InternalContext {
+                plan: &id,
+                step: index,
+                sink: &mut forward,
+                cancelled: &cancelled,
+                finished: self.finished.clone(),
+                scans: self.scans.clone(),
+            };
+            internal::run(step, &mut ctx)
+        };
+        match result {
+            Ok(note) => {
+                state.finish(index);
+                sink.event(Event::StepFinished {
+                    plan: id.clone(),
+                    step: index,
+                    ok: true,
+                    message: note,
+                });
+                emit_progress(sink, &id, index, state, None);
+                Ok(())
+            }
+            Err(message) => {
+                sink.event(Event::StepFinished {
+                    plan: id,
+                    step: index,
+                    ok: false,
+                    message: Some(message.clone()),
+                });
+                Err(message)
+            }
+        }
     }
 
     /// One stretch of root steps, written to the plan's helper as a
@@ -1260,6 +1336,45 @@ pub fn summary(ops: &[Op]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Brokey's own steps are carried out by the runner and never started
+    /// as a program: the failure is the step's own sentence, not "Could not
+    /// start brokey:…", and it ends the plan like any failed step.
+    #[test]
+    fn an_internal_session_step_is_run_here_and_never_spawned() {
+        for program in [internal::SHELL_OPEN, "brokey:nothing-like-this"] {
+            let plan = Plan {
+                id: "p".to_string(),
+                ops: Vec::new(),
+                steps: vec![Step {
+                    source: SourceKind::Arp,
+                    title: "Starting Acme's uninstaller".to_string(),
+                    command: Command {
+                        program: program.to_string(),
+                        args: vec!["x".to_string()],
+                        env: Vec::new(),
+                        cwd: None,
+                    },
+                    needs_root: false,
+                    weight: 1,
+                }],
+            };
+            let mut events = Vec::new();
+            let mut sink = |e: Event| events.push(e);
+            let outcome = Runner::new().with_helper(None).execute(&plan, &mut sink);
+            assert!(!outcome.ok);
+            assert!(outcome.message.contains(program), "{}", outcome.message);
+            assert!(
+                !outcome.message.contains("Could not start"),
+                "{}",
+                outcome.message
+            );
+            assert!(events.iter().any(|e| matches!(
+                e,
+                Event::StepFinished { ok: false, message: Some(m), .. } if m.contains(program)
+            )));
+        }
+    }
 
     #[test]
     fn the_cleanup_operations_have_their_own_closing_sentences() {

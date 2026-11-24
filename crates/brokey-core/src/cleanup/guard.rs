@@ -953,7 +953,15 @@ fn extension_in_use(location: &str, view: &dyn SystemView, clearing: &HashSet<St
 /// registry's shared keys, an extension another ProgID still answers for,
 /// anything reached through a junction or a symbolic link.
 pub fn is_protected(location: &str, view: &dyn SystemView) -> bool {
-    Places::new(view).fixed(location, view) || extension_in_use(location, view, &HashSet::new())
+    is_protected_among(location, view, &[])
+}
+
+/// [`is_protected`] for one location of a set that is cleared together: an
+/// extension key is not kept for a ProgID that is in `set` too, since that
+/// ProgID is going with it. Every other rule is the same, whatever the set.
+pub fn is_protected_among(location: &str, view: &dyn SystemView, set: &[String]) -> bool {
+    let clearing: HashSet<String> = set.iter().filter_map(|l| normal(l)).collect();
+    Places::new(view).fixed(location, view) || extension_in_use(location, view, &clearing)
 }
 
 /// Whether a candidate can hold others: a folder or a key, not a value.
