@@ -545,6 +545,75 @@ fn quote_argument(arg: &str) -> String {
     out
 }
 
+/// The program the shell is asked to open, opened as itself and checked
+/// on that handle: a regular file whose name ends in `.exe`, never a folder,
+/// a junction, a symbolic link or any other reparse point named like one.
+/// Opened without `FILE_FLAG_BACKUP_SEMANTICS`, so a folder does not open
+/// at all, and shared for reading only, so that while the handle is held
+/// nobody can write the file, rename it or delete it: what Windows starts
+/// is what was checked.
+fn open_program(path: &Path) -> Result<OwnedHandle, String> {
+    use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        FileAttributeTagInfo, GetFileInformationByHandleEx, OPEN_EXISTING,
+    };
+    let shown = path.display();
+    let not_a_program = || {
+        format!(
+            "Brokey did not start {shown}, because it is not a program file. Remove the \
+             application again from Brokey."
+        )
+    };
+    if !path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+    {
+        return Err(not_a_program());
+    }
+    let name = wide_null(&path.to_string_lossy());
+    // SAFETY: `name` is NUL-terminated and outlives the call; no security
+    // attributes and no template.
+    let raw = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    let Some(handle) = crate::system::windows::owned_handle(raw) else {
+        return Err(format!(
+            "Brokey did not start {shown}, because it could not open it as a program file ({}). \
+             Close anything using it and remove the application again from Brokey.",
+            io::Error::last_os_error()
+        ));
+    };
+    let mut info = FILE_ATTRIBUTE_TAG_INFO {
+        FileAttributes: 0,
+        ReparseTag: 0,
+    };
+    // SAFETY: an open handle and a plain-data out parameter of the size given.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle.as_raw_handle() as _,
+            FileAttributeTagInfo,
+            (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+            size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if ok == 0
+        || info.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
+    {
+        return Err(not_a_program());
+    }
+    Ok(handle)
+}
+
 /// Start an uninstaller **as the user** and wait for it, for the one case
 /// spec §10 sanctions: an Add/Remove uninstaller the closed list refused
 /// because this account could replace its file. Brokey will not elevate
@@ -568,6 +637,9 @@ fn quote_argument(arg: &str) -> String {
 /// question, which looks at the uninstall key.
 pub(crate) fn shell_open(refused: &Refused, cancelled: &dyn Fn() -> bool) -> Result<u32, String> {
     let program = refused.program();
+    // Held until the shell has started it, so that it cannot be swapped
+    // for something else after the check.
+    let checked = open_program(program)?;
     let file_wide = wide_null(&program.to_string_lossy());
     let verb_wide = wide_null("open");
     let parameters = refused
@@ -592,6 +664,7 @@ pub(crate) fn shell_open(refused: &Refused, cancelled: &dyn Fn() -> bool) -> Res
     // SAFETY: `info` is a fully initialised `SHELLEXECUTEINFOW` whose string
     // pointers are all alive in the bindings above for the whole call.
     let ok = unsafe { ShellExecuteExW(&mut info) };
+    drop(checked);
     if ok == 0 {
         let err = io::Error::last_os_error();
         if err.raw_os_error() == Some(ERROR_CANCELLED as i32) {
@@ -649,6 +722,51 @@ pub(crate) fn shell_open(refused: &Refused, cancelled: &dyn Fn() -> bool) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the shell is asked to open is a program file, checked on a
+    /// handle opened as itself: not a folder named like one, not a junction
+    /// or a link named like one, and not a document. While the handle is
+    /// held the file cannot be renamed or replaced.
+    #[test]
+    fn only_a_plain_exe_file_is_opened_for_the_shell() {
+        let temp = tempfile::tempdir().unwrap();
+        let program = temp.path().join("uninstall.exe");
+        std::fs::write(&program, "MZ").unwrap();
+        let document = temp.path().join("readme.txt");
+        std::fs::write(&document, "hello").unwrap();
+        let folder = temp.path().join("folder.exe");
+        std::fs::create_dir(&folder).unwrap();
+        let junction = temp.path().join("junction.exe");
+        let made = std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&junction)
+            .arg(&folder)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+
+        let held = open_program(&program).expect("a plain program file");
+        let moved = std::fs::rename(&program, temp.path().join("other.exe"));
+        assert!(moved.is_err(), "it cannot be swapped while it is held");
+        drop(held);
+
+        for refused in [
+            &document,
+            &folder,
+            &junction,
+            &temp.path().join("missing.exe"),
+        ] {
+            let said = open_program(refused).map(|_| ());
+            assert!(
+                matches!(&said, Err(s) if s.contains(&refused.display().to_string())),
+                "{}: {said:?}",
+                refused.display()
+            );
+        }
+        std::fs::remove_dir(&junction).unwrap();
+    }
 
     #[test]
     fn a_shell_argument_reads_back_as_itself() {
