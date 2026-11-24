@@ -464,9 +464,11 @@ Where the build departed from or settled what is written above.
   that is not there refuses the whole plan. Items that have gone since the
   scan (with a parent or with the uninstaller) are left out when the clear
   is planned; what cannot be read is kept in for the closed list to judge.
-  User and machine items share one holding id, and after a forced removal
-  of an MSI product `MSI_UNREGISTER` exports its registration into that same
-  entry.
+  User items go to an entry with the clear's id and machine items to one
+  with that id and `-m`, so Restore and Delete now each act on exactly one
+  entry. After a forced removal of an MSI product `MSI_UNREGISTER` exports
+  its registration into the machine entry, and only when the uninstall key
+  or the install folder is among the items kept for the clear.
 - **Waiting (§2).** `AWAIT_GONE` looks at the uninstall key every 2 seconds
   (`internal::AWAIT_POLL`). A package with no uninstall key (a package
   manager's own removal, an MSIX package) has nothing to wait for and goes
@@ -514,3 +516,32 @@ Where the build departed from or settled what is written above.
   to an `.exe` and nothing else. It waits on the uninstaller in 250 ms
   slices (`SHELL_OPEN_SLICE`); "Stop waiting" stops the wait and the plan
   and never kills the uninstaller, which is the user's window.
+- **Settled by the reference machine and the final reviews (2026-11-24).**
+  - Paths are compared without a trailing separator, so a spelling with
+    one and without one are one candidate. A publisher folder that holds
+    nothing but the install folder is one row, at the inner one's confidence.
+  - A Steam game's home is `<library>\steamapps\common\<installdir>`, read
+    from `libraryfolders.vdf` and `appmanifest_<id>.acf` when the hints are
+    taken, plus `shadercache\<id>` and `workshop\content\<id>`. Steam's own
+    folder is never a game's home. An uninstaller outside an entry's own
+    `InstallLocation` does not claim its folder for that entry, so a
+    launcher's folder is claimed by the launcher; with no `InstallLocation`
+    the uninstaller's folder is still claimed.
+  - A firewall rule is held by its id (`firewall:<name> | <id>`), never by
+    name, and the helper refuses an id that is not in its list of rules
+    with a program.
+  - The clear builds the claims again from a fresh installed list and
+    drops, with a sentence, anything a new install uses.
+  - The all-users Start menu's `Programs` folder is cleared inside, but
+    `Programs` itself, `Startup` and Windows's own tool folders stay refused.
+  - A service that runs under an account with a password, or a task set to
+    run whether the user is signed in or not, is never held: the holding
+    area could not put it back.
+  - A shortcut carries its target, so a forced removal keeps the shortcuts
+    of a separately installed application that lives inside the removed
+    one's folder.
+  - An entry whose manifest cannot be read, or that holds something moved in
+    part, is never emptied by age.
+  - Left for later: a leftover service in a normal removal claims itself and
+    is kept; a move across drives gives the held copy the holding folder's
+    permissions; each clear scans the machine again two or three times.
