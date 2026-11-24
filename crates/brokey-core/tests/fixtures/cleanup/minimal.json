@@ -1,0 +1,28 @@
+{
+  "folders": {
+    "ProgramFiles": "C:\\Program Files",
+    "ProgramData": "C:\\ProgramData",
+    "Profile": "C:\\Users\\me"
+  },
+  "dirs": {
+    "C:\\Program Files": [{ "name": "Acme", "is_dir": true }],
+    "C:\\Program Files\\Acme": [
+      { "name": "acme.exe", "size": 1000 },
+      { "name": "link", "is_dir": true, "reparse": "NameSurrogate" }
+    ],
+    "C:\\Program Files\\Acme\\link": [{ "name": "inner.txt", "size": 50 }]
+  },
+  "unreadable": ["C:\\ProgramData\\Locked"],
+  "reparse": { "C:\\Users\\me\\OneDrive": "Cloud" },
+  "registry": {
+    "Hkcu": {
+      "Software\\Acme": { "subkeys": ["Settings"] },
+      "Software\\Acme\\Settings": { "values": [["Theme", "dark"]] }
+    },
+    "Hklm": { "Software\\Locked": { "unreadable": true } }
+  },
+  "shortcuts": { "C:\\Start\\Acme.lnk": "C:\\Program Files\\Acme\\acme.exe" },
+  "services": [{ "name": "AcmeSvc", "image_path": "\"C:\\Program Files\\Acme\\svc.exe\"" }],
+  "tasks": [{ "path": "\\Acme\\Update", "actions": ["C:\\Program Files\\Acme\\acme.exe"] }],
+  "firewall": [{ "name": "Acme", "program": "C:\\Program Files\\Acme\\acme.exe" }]
+}
