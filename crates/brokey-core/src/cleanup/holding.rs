@@ -532,6 +532,16 @@ pub trait Disk {
     }
     /// Let go of what a copy holds, before anything is removed.
     fn release(&mut self) {}
+    /// Remove one file, or one folder that must be empty, that a copy has
+    /// copied. A folder with something in it fails as
+    /// [`io::ErrorKind::DirectoryNotEmpty`].
+    fn remove(&mut self, path: &Path, is_dir: bool) -> io::Result<()> {
+        if is_dir {
+            fs::remove_dir(path)
+        } else {
+            fs::remove_file(path)
+        }
+    }
 }
 
 /// `std::fs`, as it is.
@@ -697,11 +707,26 @@ fn copy_then_remove(from: &Path, to: &Path, disk: &mut dyn Disk) -> Done<()> {
         discard(to);
         return Err(f);
     }
-    let removed = if entries[0].1 {
-        fs::remove_dir_all(from)
-    } else {
-        fs::remove_file(from)
-    };
+    // Only what was looked at and copied, deepest first: the survey lists
+    // a folder before what is in it. A folder that still holds something
+    // was given it since, and that stays where it is, with the folder.
+    let mut kept_new = false;
+    let removed = entries.iter().rev().try_for_each(|(rel, is_dir)| {
+        match disk.remove(&under(from, rel), *is_dir) {
+            Err(e) if *is_dir && e.kind() == io::ErrorKind::DirectoryNotEmpty => {
+                kept_new = true;
+                Ok(())
+            }
+            other => other,
+        }
+    });
+    if removed.is_ok() && kept_new {
+        return Err(Failure::Partial(format!(
+            "{shown} was moved, apart from what was put in it after Brokey looked, which is \
+             still where it was. Restore it from Settings to put the rest back beside it, or \
+             delete it from the holding area."
+        )));
+    }
     if let Err(e) = removed {
         // Part of it may be gone: put back what is missing from the copy,
         // and only then let the copy go.
@@ -2788,6 +2813,37 @@ mod tests {
         assert_eq!(listed.unreadable, vec![loc(&mc.root)]);
         assert_eq!(emptied.held, 0);
         assert_eq!(emptied.failed.len(), 1, "{emptied:?}");
+    }
+
+    /// Plain `std::fs`, and a file put into the folder being moved once the
+    /// copy is made and before anything is removed.
+    struct Meanwhile(PathBuf);
+
+    impl Disk for Meanwhile {
+        fn release(&mut self) {
+            file(&self.0, "new");
+        }
+    }
+
+    /// A move across drives removes what it looked at and copied, deepest
+    /// first, and nothing else: what was put in the folder since stays,
+    /// with the folders it is in, and the item is held in part.
+    #[test]
+    fn a_copy_across_drives_leaves_what_appeared_after_it_looked() {
+        let mc = machine();
+        let app = mc.disk.join("App");
+        let to = mc.root.join("moved");
+        let new = app.join("sub").join("new.txt");
+        let got = move_with(&app, &to, true, &mut Meanwhile(new.clone()));
+        let Err(Failure::Partial(said)) = got else {
+            panic!("held in part, not {got:?}");
+        };
+        assert!(said.contains("after Brokey looked"), "{said}");
+        assert_eq!(text(&new), "new");
+        assert!(!app.join("a.dat").exists() && !app.join("sub").join("b.dat").exists());
+        assert_eq!(text(&to.join("a.dat")), "a");
+        assert_eq!(text(&to.join("sub").join("b.dat")), "bb");
+        assert!(!to.join("sub").join("new.txt").exists());
     }
 
     /// A service that runs as an account with a password, or a task saved

@@ -2897,6 +2897,50 @@ pub(crate) mod tests {
         }
     }
 
+    /// A copy across drives, as Administrator would make it, removes only
+    /// what it copied: a file put into the folder during the copy stays,
+    /// with its folder, and the item is held in part.
+    #[test]
+    fn a_bound_copy_leaves_what_was_put_in_the_folder_meanwhile() {
+        static NEW: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+        fn put_in(_: &Path, _: &Path) {
+            if let Some(path) = NEW.lock().unwrap().take() {
+                std::fs::write(path, "new").unwrap();
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("disk").join("App");
+        std::fs::create_dir_all(app.join("sub")).unwrap();
+        std::fs::write(app.join("a.dat"), "a").unwrap();
+        std::fs::write(app.join("sub").join("b.dat"), "b").unwrap();
+        let new = app.join("sub").join("new.txt");
+        *NEW.lock().unwrap() = Some(new.clone());
+        let mut m = LiveMutate {
+            force_copy: true,
+            between: Some(put_in),
+            ..LiveMutate::new(temp.path().join("machine"))
+        };
+        let items = vec![HoldItem {
+            kind: ItemKind::Folder,
+            location: app.display().to_string(),
+        }];
+        let report = hold(
+            &temp.path().join("holding"),
+            "copy-1",
+            "Acme",
+            &items,
+            &mut m,
+        );
+        assert_eq!(report.held, 0, "{report:?}");
+        assert!(
+            report.failed[0].1.contains("after Brokey looked"),
+            "{report:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "new");
+        assert!(!app.join("a.dat").exists());
+        assert!(!app.join("sub").join("b.dat").exists());
+    }
+
     /// The folders above an item are held still from the check until it has
     /// moved: the hook stands where a swap would have to happen, and the swap
     /// fails there.

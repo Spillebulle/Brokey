@@ -48,9 +48,11 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, DELETE, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
-    FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_WRITE_ATTRIBUTES, FileAttributeTagInfo, FileBasicInfo, FileDispositionInfo,
+    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+    FileAttributeTagInfo, FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx,
     GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
     OPEN_EXISTING, SYNCHRONIZE, SetFileInformationByHandle,
 };
@@ -301,6 +303,51 @@ fn delete_on_close(handle: &OwnedHandle) {
             size_of::<FILE_DISPOSITION_INFO>() as u32,
         )
     };
+}
+
+/// Delete through the handle, now, and say why not: a folder with anything
+/// in it is refused as not empty. With POSIX semantics where the volume has
+/// them, so that a file another program holds open is gone from its folder
+/// at once and does not keep that folder from going; read-only or not, as
+/// `remove_dir_all` did.
+fn delete_now(handle: &OwnedHandle) -> io::Result<()> {
+    let ex = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE
+            | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+            | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    };
+    // SAFETY: an open handle with DELETE access and a plain-data input of
+    // the size given.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            handle.as_raw_handle() as _,
+            FileDispositionInfoEx,
+            (&ex as *const FILE_DISPOSITION_INFO_EX).cast(),
+            size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        )
+    };
+    if ok != 0 {
+        return Ok(());
+    }
+    let e = io::Error::last_os_error();
+    // ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED: a volume without them.
+    if !matches!(e.raw_os_error(), Some(87 | 50)) {
+        return Err(e);
+    }
+    let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: as above.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            handle.as_raw_handle() as _,
+            FileDispositionInfo,
+            (&info as *const FILE_DISPOSITION_INFO).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Make one folder that must not be there yet, by its whole name. Only for
@@ -557,5 +604,13 @@ impl Disk for Bound {
 
     fn release(&mut self) {
         self.copying.clear();
+    }
+
+    /// Through the item's own handle, opened as itself and checked to be
+    /// where its name says, so that a folder above it swapped for a
+    /// junction since the copy is refused, not followed.
+    fn remove(&mut self, path: &Path, is_dir: bool) -> io::Result<()> {
+        let item = open_checked(path, DELETE | ATTRIBUTES, PINNED, Some(is_dir))?;
+        delete_now(&item)
     }
 }
