@@ -1532,6 +1532,8 @@ fn what_is_inside_the_machine_start_menu_may_be_cleared_and_the_menu_itself_not(
         (ItemKind::Shortcut, format!(r"{menu}\Acme Studio.lnk")),
         (ItemKind::Folder, format!(r"{menu}\Acme")),
         (ItemKind::Shortcut, format!(r"{menu}\Acme\Acme Studio.lnk")),
+        // An application's own shortcut in Startup is its; the folder is not.
+        (ItemKind::Shortcut, format!(r"{menu}\Startup\Acme Tray.lnk")),
     ] {
         allowed_for(&hold("abc", vec![item(kind, &path)], true), &view);
     }
@@ -1542,6 +1544,17 @@ fn what_is_inside_the_machine_start_menu_may_be_cleared_and_the_menu_itself_not(
         r"C:\ProgramData\Microsoft\Crypto".to_string(),
         r"C:\ProgramData\Microsoft\Crypto\RSA".to_string(),
         r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs.lnk".to_string(),
+        // Windows's own folders directly under Programs, however spelt.
+        format!(r"{menu}\Startup"),
+        format!(r"{menu}\startup\"),
+        format!(r"{menu}\Administrative Tools"),
+        format!(r"{menu}\Administrative Tools\Event Viewer.lnk"),
+        format!(r"{menu}\Accessibility"),
+        format!(r"{menu}\Accessories\Notepad.lnk"),
+        format!(r"{menu}\System Tools"),
+        format!(r"{menu}\Windows PowerShell"),
+        format!(r"{menu}\Maintenance"),
+        format!(r"{menu}\Windows Administrative Tools"),
     ] {
         refused_for(
             &hold("abc", vec![item(ItemKind::Folder, &path)], true),

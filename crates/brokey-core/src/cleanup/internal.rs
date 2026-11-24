@@ -595,6 +595,18 @@ fn spelling_problem(names: &[&str]) -> Option<&'static str> {
     None
 }
 
+/// The folders of Windows's own tools directly under the all-users Start
+/// menu's `Programs`, in lower case.
+const WINDOWS_MENU_FOLDERS: [&str; 7] = [
+    "administrative tools",
+    "accessibility",
+    "accessories",
+    "system tools",
+    "windows powershell",
+    "maintenance",
+    "windows administrative tools",
+];
+
 /// The places Windows keeps that the guard has no reason to name, since no
 /// scan would offer them: what is at the root of a drive for booting and
 /// recovery, `ProgramData\Microsoft`, and the `Windows …` folders and
@@ -615,9 +627,19 @@ fn windows_keeps(drive: char, names: &[&str], view: &dyn SystemView) -> bool {
     // The all-users Start menu is under `ProgramData\Microsoft`, but what is
     // inside its `Programs` folder is the applications'. The folder itself,
     // and the Start menu above it, stay Windows's.
+    // Windows's own folders directly under it are not: `Startup` itself
+    // (an application's shortcut in it is the application's), and the
+    // folders of Windows's tools with everything in them.
     let in_machine_menu = view.known_folder(Known::StartMenuMachine).is_some_and(|f| {
         let menu = shortcut::normalise(&f.to_string_lossy());
-        path.starts_with(&format!("{menu}\\"))
+        let Some(rest) = path.strip_prefix(&format!("{menu}\\")) else {
+            return false;
+        };
+        let (first, deeper) = match rest.split_once('\\') {
+            Some((first, _)) => (first, true),
+            None => (rest, false),
+        };
+        !((first == "startup" && !deeper) || WINDOWS_MENU_FOLDERS.contains(&first))
     });
     if (under(Known::ProgramData, "microsoft") && !in_machine_menu)
         || under(Known::ProgramFiles, "common files\\microsoft shared")
