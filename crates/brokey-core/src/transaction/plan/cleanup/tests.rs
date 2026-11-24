@@ -2,7 +2,7 @@ use super::*;
 use crate::cleanup::internal::{ScanRecord, is_internal};
 use crate::cleanup::view::{FixtureView, Hive};
 use crate::transaction::allow::CAN_BE_REPLACED;
-use crate::transaction::plan::{build_in, self_elevating_notices};
+use crate::transaction::plan::{build_in, holding_notices, self_elevating_notices};
 use crate::{Query, Source, Store};
 use std::path::PathBuf;
 
@@ -511,6 +511,7 @@ fn entry(id: &str, machine: bool, waiting: bool) -> HoldingEntry {
         items: 1,
         scope_machine: machine,
         waiting,
+        incomplete: false,
     }
 }
 
@@ -601,6 +602,42 @@ fn emptying_asks_for_administrator_only_when_the_machine_has_entries() {
         )
         .unwrap();
     assert_eq!(roots(&one), vec![(EMPTY, "m", true)]);
+}
+
+/// Deleting an incomplete entry is the user's call, and the confirm says
+/// what it is before they make it: by Delete now and by Empty alike.
+#[test]
+fn the_confirm_says_an_entry_is_incomplete_before_it_is_deleted() {
+    // Waiting as well, which `list` never says of an incomplete entry: the
+    // planner does not take its word for it.
+    let mut broken = entry("broken", true, true);
+    broken.incomplete = true;
+    let machine = with_entries(vec![broken, entry("whole", false, false)]);
+    let one = |id: &str| {
+        vec![Op::EmptyHolding {
+            holding: Some(id.into()),
+        }]
+    };
+    let said = machine.with(|p| holding_notices(&one("broken"), p));
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(
+        said[0].contains("broken app") && said[0].contains("incomplete"),
+        "{said:?}"
+    );
+    assert!(
+        machine
+            .with(|p| holding_notices(&one("whole"), p))
+            .is_empty()
+    );
+    let all = machine.with(|p| holding_notices(&[Op::EmptyHolding { holding: None }], p));
+    assert_eq!(all, said);
+    // A restore is not a delete, and the age-based empty never takes it.
+    let restore = [Op::Restore {
+        holding: "broken".into(),
+    }];
+    assert!(machine.with(|p| holding_notices(&restore, p)).is_empty());
+    let plan = machine.plan(&store(uninstaller), &[remove()]).unwrap();
+    assert!(!plan.steps.iter().any(|s| s.command.program == EMPTY));
 }
 
 #[test]

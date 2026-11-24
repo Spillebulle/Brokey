@@ -474,6 +474,12 @@ pub struct HoldingEntry {
     pub scope_machine: bool,
     /// Machine items past 30 days that have not been emptied yet.
     pub waiting: bool,
+    /// Its record cannot be read, or it holds the only whole copy of
+    /// something moved in part. Never emptied by age; Delete now, which
+    /// the user confirms, says so. Read by the planner for the confirm's
+    /// sentence and not sent to the page, whose types do not carry it.
+    #[serde(skip)]
+    pub incomplete: bool,
 }
 
 /// A process to run. The helper validates `program` and `args` against its

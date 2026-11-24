@@ -730,6 +730,7 @@ fn everything_the_page_receives_matches_types_ts() {
             items: 4,
             scope_machine: true,
             waiting: false,
+            incomplete: false,
         },
     );
     c.value(
@@ -743,6 +744,7 @@ fn everything_the_page_receives_matches_types_ts() {
                 items: 2,
                 scope_machine: false,
                 waiting: false,
+                incomplete: false,
             }],
             unreadable: vec![r"C:\ProgramData\Brokey\Holding".into()],
         },

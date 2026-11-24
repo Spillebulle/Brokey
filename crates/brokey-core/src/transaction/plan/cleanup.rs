@@ -137,6 +137,14 @@ pub fn shell_open_notice(name: &str) -> String {
     )
 }
 
+/// The sentence the confirm step shows before an incomplete holding entry
+/// is deleted for good.
+pub fn incomplete_notice(name: &str) -> String {
+    format!(
+        "What was cleared from {name} is incomplete in the holding area: its record cannot be          read, or part of it is still where it was and this is the only whole copy. Deleting it          cannot be undone, and Brokey never empties it by itself."
+    )
+}
+
 /// An Add/Remove removal the closed list refuses only because this account
 /// could replace the uninstaller, rewritten to start it as the user so that
 /// it elevates itself. Every other step, and every other refusal, is left as
@@ -434,7 +442,9 @@ pub fn empty_waiting(steps: &[Step], planning: &Planning) -> Vec<Step> {
     (planning.holding)()
         .entries
         .iter()
-        .filter(|e| e.scope_machine && e.waiting && !named.contains(&e.id.as_str()))
+        .filter(|e| {
+            e.scope_machine && e.waiting && !e.incomplete && !named.contains(&e.id.as_str())
+        })
         .map(|e| {
             internal(
                 SourceKind::Arp,

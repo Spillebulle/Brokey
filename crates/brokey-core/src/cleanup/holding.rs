@@ -752,8 +752,24 @@ pub fn read_manifest(dir: &Path) -> io::Result<Option<Manifest>> {
     }
 }
 
+/// Write an export to a file that must not be there yet: one that is, is
+/// someone else's and [`Failure::Occupied`].
 fn write_export_bytes(path: &Path, bytes: &[u8], location: &str) -> Done<u64> {
-    write_synced(path, bytes).map_err(|e| {
+    use std::io::Write;
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        });
+    if let Err(e) = &written
+        && e.kind() == io::ErrorKind::AlreadyExists
+    {
+        return Err(Failure::Occupied);
+    }
+    written.map_err(|e| {
         Failure::Failed(format!(
             "Brokey could not write a copy of {location} into the holding area ({e}), so it was \
              left where it is. Check there is space on the drive and try again."
@@ -885,9 +901,28 @@ pub fn hold(
         }
     }
     if manifest.items.is_empty() {
-        let _ = fs::remove_dir_all(&dir);
+        let _ = remove_finished_entry(&dir);
     }
     report
+}
+
+/// Take away an entry whose record has nothing left in it: the record,
+/// then the items folder and the entry's folder, each only if empty. What
+/// is in either without a record (something that was there before the
+/// entry used the place) is left, and the entry with it, to be deleted
+/// only by a Delete now the user confirms.
+fn remove_finished_entry(dir: &Path) -> io::Result<()> {
+    for name in [MANIFEST, "manifest.json.new"] {
+        match fs::remove_file(dir.join(name)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    let _ = fs::remove_dir(dir.join(ITEMS));
+    if fs::read_dir(dir)?.next().is_some() {
+        return Ok(());
+    }
+    fs::remove_dir(dir)
 }
 
 /// A stored item's path. `stored` is written with `/` and taken apart here,
@@ -939,7 +974,13 @@ fn hold_one(
         });
     }
 
-    let n = manifest.next.max(1);
+    // A place something already occupies (left by a crash before its
+    // record was written, or put there since) is passed over, never
+    // deleted or written over.
+    let mut n = manifest.next.max(1);
+    while fs::symlink_metadata(stored_path(dir, &place.stored_name(n))).is_ok() {
+        n += 1;
+    }
     manifest.next = n + 1;
     let stored = place.stored_name(n);
     manifest.items.push(Held {
@@ -968,6 +1009,13 @@ fn hold_one(
             manifest.items[last].state = HeldState::Partial;
             manifest.items[last].size = size_of(&target);
             Err(sentence)
+        }
+        Err(Failure::Occupied) => {
+            // Something took the place between the look and the move: it is
+            // not this item's, so it is left there, and the item is still in
+            // its own place.
+            manifest.items.pop();
+            Err(sentence_for(location, Failure::Occupied))
         }
         Err(f) => {
             // Everything is still in its place (`take` has made sure of it),
@@ -1274,7 +1322,7 @@ pub fn restore(root: &Path, id: &str, m: &mut dyn Mutate) -> HoldReport {
     report.held += before - manifest.items.len();
 
     let finished = if manifest.items.is_empty() {
-        fs::remove_dir_all(&dir)
+        remove_finished_entry(&dir)
     } else {
         save(&dir, &manifest)
     };
@@ -1334,9 +1382,20 @@ fn holds_only_copy(dir: &Path, manifest: &Manifest) -> bool {
     })
 }
 
+/// An entry that age must never empty: its record cannot be read (missing,
+/// unreadable or not a manifest), so nobody can say what it holds, or it
+/// holds the only whole copy of something moved in part.
+fn incomplete(dir: &Path, manifest: &io::Result<Option<Manifest>>) -> bool {
+    match manifest {
+        Ok(Some(m)) => holds_only_copy(dir, m),
+        _ => true,
+    }
+}
+
 /// Delete entries for good: the one named, or every one; with
-/// `older_than_days`, only those older than that, and never one holding the
-/// only whole copy of something moved in part (see [`HeldState::Partial`]).
+/// `older_than_days`, only those older than that, and never one that is
+/// [`incomplete`]. Only a named or whole empty, which the user confirms,
+/// deletes that.
 pub fn empty(root: &Path, id: Option<&str>, older_than_days: Option<u32>) -> HoldReport {
     let mut report = HoldReport::default();
     let ids = match id {
@@ -1366,10 +1425,11 @@ pub fn empty(root: &Path, id: Option<&str>, older_than_days: Option<u32>) -> Hol
     for id in ids {
         let dir = root.join(&id);
         if let Some(days) = older_than_days {
-            let manifest = read_manifest(&dir).ok().flatten();
-            if manifest.as_ref().is_some_and(|m| holds_only_copy(&dir, m)) {
+            let read = read_manifest(&dir);
+            if incomplete(&dir, &read) {
                 continue;
             }
+            let manifest = read.ok().flatten();
             let old = entry_created(&dir, manifest.as_ref())
                 .is_some_and(|c| now - c > i64::from(days) * DAY);
             if !old {
@@ -1406,7 +1466,7 @@ pub struct Listing {
 
 /// Every entry in both roots. A machine entry past [`AUTO_EMPTY_DAYS`] is
 /// `waiting`: it is emptied by the next plan that asks for Administrator
-/// anyway; one holding the only copy of something moved in part never is.
+/// anyway; one that is [`incomplete`] never is.
 pub fn list(user_root: &Path, machine_root: &Path) -> Listing {
     let now = now();
     let mut out = Listing::default();
@@ -1420,14 +1480,15 @@ pub fn list(user_root: &Path, machine_root: &Path) -> Listing {
         };
         for id in ids {
             let dir = root.join(&id);
-            let manifest = read_manifest(&dir).ok().flatten();
+            let read = read_manifest(&dir);
+            let keep = incomplete(&dir, &read);
+            let manifest = read.ok().flatten();
             let seconds = entry_created(&dir, manifest.as_ref()).unwrap_or(now);
             let created = manifest
                 .as_ref()
                 .map(|m| m.created.clone())
                 .filter(|c| created_seconds(c).is_some())
                 .unwrap_or_else(|| rfc3339(seconds));
-            let keep = manifest.as_ref().is_some_and(|m| holds_only_copy(&dir, m));
             let (name, size, items) = match manifest {
                 Some(m) => (
                     m.name,
@@ -1446,6 +1507,7 @@ pub fn list(user_root: &Path, machine_root: &Path) -> Listing {
                 items,
                 scope_machine: machine,
                 waiting: machine && !keep && now - seconds > i64::from(AUTO_EMPTY_DAYS) * DAY,
+                incomplete: keep,
             });
         }
     }
@@ -1501,6 +1563,10 @@ mod tests {
         delete_firewall_fails_part_way: bool,
         /// Every merging restore fails.
         merge_fails: bool,
+        /// Paths whose move finds its place in the holding area taken after
+        /// it was looked at: something else is written there first, and the
+        /// move answers `Occupied`, as a rename that will not replace does.
+        taken_meanwhile: Vec<PathBuf>,
     }
 
     type Keys = BTreeMap<String, (String, Vec<(String, RegValue)>)>;
@@ -1591,6 +1657,10 @@ mod tests {
         fn move_path(&mut self, from: &Path, to: &Path) -> Done<()> {
             if self.locked.iter().any(|l| l == from) {
                 return Err(Failure::Failed(in_use(&from.display().to_string())));
+            }
+            if self.taken_meanwhile.iter().any(|l| l == from) {
+                file(to, "theirs");
+                return Err(Failure::Occupied);
             }
             if self.half_copied.iter().any(|l| l == from) {
                 fs::create_dir_all(to).unwrap();
@@ -2649,5 +2719,114 @@ mod tests {
         let held = Place::Key(Hive::Hklm, r"SOFTWARE\WOW6432Node\Acme".into());
         assert!(held.covers(&Place::Key(Hive::Hklm32, r"Software\Acme\Sub".into())));
         assert!(!held.covers(&Place::Key(Hive::Hklm32, r"Software\AcmeOther".into())));
+    }
+    /// Something already in the place an item would be stored (left by a
+    /// crash before the record was written, or put there since) is never
+    /// deleted or written over: the item goes to a fresh place.
+    #[test]
+    fn a_stored_place_already_taken_is_kept_and_the_item_goes_elsewhere() {
+        let mc = machine();
+        let mut m = Fake::default();
+        m.put_key(Hive::Hkcu, r"Software\Acme", every_type());
+        let dir = mc.root.join("acme-1");
+        file(&dir.join(ITEMS).join("1"), "precious");
+        file(&dir.join(ITEMS).join("2.json"), "also precious");
+        let items = vec![
+            item(ItemKind::File, loc(&mc.disk.join("notes.txt"))),
+            item(ItemKind::RegistryKey, r"HKCU\Software\Acme"),
+        ];
+        let report = hold(&mc.root, "acme-1", "Acme", &items, &mut m);
+        assert_eq!(report.held, 2, "{report:?}");
+        assert_eq!(text(&dir.join(ITEMS).join("1")), "precious");
+        assert_eq!(text(&dir.join(ITEMS).join("2.json")), "also precious");
+        let manifest = read_manifest(&dir).unwrap().unwrap();
+        let stored: Vec<&str> = manifest.items.iter().map(|h| h.stored.as_str()).collect();
+        assert!(
+            !stored.contains(&"items/1") && !stored.contains(&"items/2.json"),
+            "{stored:?}"
+        );
+        let report = restore(&mc.root, "acme-1", &mut m);
+        assert_eq!(report.held, 2, "{report:?}");
+        assert_eq!(text(&mc.disk.join("notes.txt")), "hello");
+        assert_eq!(text(&dir.join(ITEMS).join("1")), "precious");
+    }
+
+    /// A place taken between the look and the move: the item stays where it
+    /// is, unrecorded, and what took the place is left there.
+    #[test]
+    fn a_stored_place_taken_during_the_move_is_never_deleted() {
+        let mc = machine();
+        let mut m = Fake {
+            taken_meanwhile: vec![mc.disk.join("notes.txt")],
+            ..Fake::default()
+        };
+        let items = vec![
+            item(ItemKind::File, loc(&mc.disk.join("notes.txt"))),
+            item(ItemKind::Folder, loc(&mc.disk.join("App"))),
+        ];
+        let report = hold(&mc.root, "acme-1", "Acme", &items, &mut m);
+        assert_eq!(report.held, 1, "{report:?}");
+        assert_eq!(report.failed[0].0, loc(&mc.disk.join("notes.txt")));
+        assert!(
+            report.failed[0].1.contains("already has something"),
+            "{report:?}"
+        );
+        assert_eq!(text(&mc.disk.join("notes.txt")), "hello");
+        let dir = mc.root.join("acme-1");
+        assert_eq!(text(&dir.join(ITEMS).join("1")), "theirs");
+        let manifest = read_manifest(&dir).unwrap().unwrap();
+        assert_eq!(manifest.items.len(), 1);
+        assert_eq!(manifest.items[0].item.location, loc(&mc.disk.join("App")));
+    }
+
+    /// The age-based empty never deletes an entry it cannot read, nor one
+    /// holding something moved in part, however old; Delete now, which
+    /// the user confirms, still does, and the listing says it is incomplete.
+    #[test]
+    fn the_auto_empty_skips_an_unreadable_or_partial_entry() {
+        let mc = machine();
+        let machine_root = mc.disk.parent().unwrap().join("machine-holding");
+        let mut m = Fake::default();
+        file(&mc.disk.join("one"), "1");
+        file(&mc.disk.join("two"), "22");
+        let one = |name: &str| vec![item(ItemKind::File, loc(&mc.disk.join(name)))];
+        for root in [&mc.root, &machine_root] {
+            hold(root, "corrupt", "Corrupt", &one("notes.txt"), &mut m);
+            hold(root, "partial", "Partial", &one("one"), &mut m);
+            hold(root, "whole", "Whole", &one("two"), &mut m);
+            for id in ["corrupt", "partial", "whole"] {
+                set_created(root, id, now() - 40 * DAY);
+            }
+            let partial = root.join("partial");
+            let mut manifest = read_manifest(&partial).unwrap().unwrap();
+            manifest.items[0].state = HeldState::Partial;
+            save(&partial, &manifest).unwrap();
+            fs::write(root.join("corrupt").join(MANIFEST), "{ not json").unwrap();
+            // Restored for the next root.
+            for (name, text) in [("notes.txt", "hello"), ("one", "1"), ("two", "22")] {
+                file(&mc.disk.join(name), text);
+            }
+        }
+        let listed = list(&mc.root, &machine_root).entries;
+        let flags: BTreeMap<(bool, &str), (bool, bool)> = listed
+            .iter()
+            .map(|e| ((e.scope_machine, e.id.as_str()), (e.waiting, e.incomplete)))
+            .collect();
+        assert_eq!(flags[&(true, "corrupt")], (false, true));
+        assert_eq!(flags[&(true, "partial")], (false, true));
+        assert_eq!(flags[&(true, "whole")], (true, false));
+        assert_eq!(flags[&(false, "corrupt")], (false, true));
+        assert_eq!(flags[&(false, "whole")], (false, false));
+
+        let report = empty(&mc.root, None, Some(30));
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert!(mc.root.join("corrupt").exists());
+        assert!(mc.root.join("partial").exists());
+        assert!(!mc.root.join("whole").exists());
+
+        // Delete now names the entry and deletes it.
+        assert_eq!(empty(&mc.root, Some("corrupt"), None).held, 1);
+        assert_eq!(empty(&mc.root, Some("partial"), None).held, 1);
+        assert!(!mc.root.join("corrupt").exists());
     }
 }

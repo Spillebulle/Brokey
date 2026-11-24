@@ -237,6 +237,28 @@ pub fn self_elevating_notices(store: &Store, ops: &[Op], planning: &Planning) ->
     notices
 }
 
+/// The sentences for holding entries a plan deletes for good that are
+/// incomplete: one per entry, named, so that the confirm says so first.
+pub fn holding_notices(ops: &[Op], planning: &Planning) -> Vec<String> {
+    let mut notices = Vec::new();
+    for op in ops {
+        let Op::EmptyHolding { holding } = op else {
+            continue;
+        };
+        for entry in (planning.holding)()
+            .entries
+            .iter()
+            .filter(|e| e.incomplete && holding.as_deref().is_none_or(|id| id == e.id))
+        {
+            let notice = cleanup::incomplete_notice(&entry.name);
+            if !notices.contains(&notice) {
+                notices.push(notice);
+            }
+        }
+    }
+    notices
+}
+
 /// What the page should say beside a plan before it runs.
 ///
 /// A setup says what setting its source up does ("Flatpak is not
@@ -269,7 +291,9 @@ pub fn notices(store: &Store, ops: &[Op]) -> Vec<String> {
         // itself; the empty session is never inspected.
         let mut notices = notices_in(store, ops, &[]);
         notices.extend(live(store, &Scans::default(), |planning| {
-            self_elevating_notices(store, ops, planning)
+            let mut notices = self_elevating_notices(store, ops, planning);
+            notices.extend(holding_notices(ops, planning));
+            notices
         }));
         notices
     }
