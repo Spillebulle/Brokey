@@ -124,6 +124,16 @@ export const useActivity = create<ActivityState>((set, get) => ({
           if (now && now.state === next.state) get().dismiss(event.plan);
         }, LINGER_MS);
       }
+      // The list a clear came from stays until the clear has finished well, so a clear that fails or is
+      // cancelled can be tried again from it.
+      if (next.state === "done") {
+        for (const op of next.plan.ops) {
+          if (op.op !== "clearleftovers") continue;
+          for (const other of Object.values(get().plans)) {
+            if (other.plan.id !== next.plan.id && leftoversOf(other)?.scan === op.scan) get().dismiss(other.plan.id);
+          }
+        }
+      }
       if (next.state === "done") for (const listener of [...finished]) listener(next);
     }
   },

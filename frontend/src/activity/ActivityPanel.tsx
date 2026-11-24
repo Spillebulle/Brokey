@@ -2,7 +2,7 @@
 // has just ended: the step in hand as the title, a rail with a fraction only
 // when one is known (§7.18), "2 of 5", and the log a click away.
 
-import { Activity, Terminal, Trash2, X } from "lucide-react";
+import { Activity, ListChecks, Terminal, Trash2, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { await_finished, cancel_plan } from "../api";
 import { Button } from "../components/Button";
@@ -178,6 +178,7 @@ export function ActivityPanel() {
   const toggleLog = useActivity((s) => s.toggleLog);
   const markCancelling = useActivity((s) => s.markCancelling);
   const dismiss = useActivity((s) => s.dismiss);
+  const plans = useActivity((s) => s.plans);
   const windows = useShell(selectIsWindows);
   if (!plan) return null;
 
@@ -192,6 +193,9 @@ export function ActivityPanel() {
   const fraction = plan.state === "done" ? 1 : snap.waiting ? null : snap.fraction;
   const waiting = live && !cancelling && snap.waiting !== null;
   const offer = forcedRemovalOffer(plan);
+  // A clear that did not finish leaves the list it came from behind; this is the way back to it.
+  const retryScan = !live && plan.state !== "done" ? (plan.plan.ops.find((o) => o.op === "clearleftovers")?.scan ?? null) : null;
+  const listBehind = retryScan !== null && Object.values(plans).some((p) => p.plan.id !== plan.plan.id && p.state === "done" && leftoversOf(p)?.scan === retryScan);
 
   const finished = async () => {
     try {
@@ -261,8 +265,15 @@ export function ActivityPanel() {
         ) : null}
         {offer ? (
           <div className="lo-offer">
-            <Button kind="outline" icon={<Trash2 {...ICON} aria-hidden="true" />} onClick={force} title="Removes its folder and registry entry without running the uninstaller. Asks first.">
+            <Button kind="outline" icon={<Trash2 {...ICON} aria-hidden="true" />} onClick={force} title="Lists its folder, registry entry and other leftovers without running the uninstaller. You choose what moves to the holding area.">
               Forced removal…
+            </Button>
+          </div>
+        ) : null}
+        {listBehind ? (
+          <div className="lo-offer">
+            <Button kind="outline" icon={<ListChecks {...ICON} aria-hidden="true" />} onClick={() => dismiss(plan.plan.id)} title="Goes back to the list, with what has already moved left out. Nothing moves until you press Move again.">
+              Back to the list
             </Button>
           </div>
         ) : null}

@@ -31,5 +31,5 @@ export function forcedRemovalOffer(status: PlanStatus): { package: PackageRef; n
 
 /** The sentence the confirm step reads first. */
 export function forcedRemovalIntro(name: string): string {
-  return `Forced removal does not run ${name}'s uninstaller. Brokey removes its folder and its registry entry and shows what else it left, for you to choose.`;
+  return `Forced removal does not run ${name}'s uninstaller. Brokey lists its folder, its registry entry and whatever else it left, and you choose what moves to the holding area.`;
 }

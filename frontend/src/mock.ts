@@ -58,6 +58,8 @@ const MB = 1000 * 1000;
 //                       design's section 6) and the holding area has two
 //                       entries, one of them waiting. Combine it with
 //                       ?platform=windows
+//   ?clearfail=1        with ?leftovers=1, the first move to the holding area
+//                       fails (the list is still there to try again from)
 //   ?waiting=1          with ?leftovers=1, a removal waits for the uninstaller
 //                       until "It has finished" is pressed
 // A plan whose operations name a package called "fail-please" fails at that
@@ -69,6 +71,7 @@ const FAST = PARAMS.has("fast");
 const HOLD: string | null = PARAMS.get("hold");
 const LEFTOVERS = PARAMS.get("leftovers") === "1";
 const WAITING = PARAMS.get("waiting") === "1";
+let clearFailsLeft = PARAMS.get("clearfail") === "1" ? 1 : 0;
 const FAIL_ID = "fail-please";
 const UNPLANNABLE_ID = "no-such-package";
 
@@ -1316,6 +1319,10 @@ function logLines(step: Step): string[] {
 
 /** Whether this step is the one that fails: its command names the package called fail-please. */
 function fails(step: Step): boolean {
+  if (step.command.program === "brokey-clear" && clearFailsLeft > 0) {
+    clearFailsLeft -= 1;
+    return true;
+  }
   return step.command.args.includes(FAIL_ID);
 }
 
@@ -1377,10 +1384,11 @@ async function run(status: PlanStatus) {
     if (failing) {
       await delay(200);
       if (!alive()) return;
-      const reason = `error: target not found: ${FAIL_ID}`;
+      const clearing = step.command.program === "brokey-clear";
+      const reason = clearing ? "error: access denied" : `error: target not found: ${FAIL_ID}`;
       emit({ event: "log", plan: id, step: i, line: reason, stderr: true });
       emit({ event: "log", plan: id, step: i, line: "error: failed to prepare transaction (target not found)", stderr: true });
-      emit({ event: "step_finished", plan: id, step: i, ok: false, message: `${step.command.program} could not find a package called ${FAIL_ID}.` });
+      emit({ event: "step_finished", plan: id, step: i, ok: false, message: clearing ? "Brokey could not move one item because Windows refused access. Nothing else was changed." : `${step.command.program} could not find a package called ${FAIL_ID}.` });
       running.delete(id);
       emit({ event: "plan_finished", plan: id, ok: false, message: summary(p.ops, false, step) });
       return;
