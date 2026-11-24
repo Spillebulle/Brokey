@@ -18,7 +18,7 @@ use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr;
-use windows_sys::Wdk::System::Registry::NtDeleteKey;
+use windows_sys::Wdk::System::Registry::{KeyFlagsInformation, NtDeleteKey, NtQueryKey};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, GetLastError, HANDLE,
     HLOCAL, LocalFree,
@@ -589,9 +589,40 @@ fn open_child(
     Ok(unsafe { windows_registry::Key::from_raw(handle as _) })
 }
 
-/// Whether a key opened as itself is a link: it has a `SymbolicLinkValue`
-/// of type `REG_LINK`. A key that cannot be asked is answered as one.
+/// `KEY_FLAGS_INFORMATION`, which `NtQueryKey` answers for any key.
+#[repr(C)]
+#[derive(Default)]
+struct KeyFlags {
+    wow64_flags: u32,
+    key_flags: u32,
+    control_flags: u32,
+}
+
+/// `REG_FLAG_LINK` in [`KeyFlags::key_flags`].
+const REG_FLAG_LINK: u32 = 0x2;
+
+/// Whether a key opened as itself is a link. The kernel's own flag on the
+/// key says so (`NtQueryKey`, `KeyFlagsInformation`), whatever values it
+/// has: a link made without its `SymbolicLinkValue`, or whose value was
+/// deleted, is a link all the same. A `SymbolicLinkValue` of type
+/// `REG_LINK` is answered as one too. A key that cannot be asked is
+/// answered as one.
 fn is_link(key: &windows_registry::Key) -> bool {
+    let mut flags = KeyFlags::default();
+    let mut length = 0u32;
+    // SAFETY: an open key and a plain-data out parameter of the size given.
+    let status = unsafe {
+        NtQueryKey(
+            key.as_raw() as _,
+            KeyFlagsInformation,
+            (&mut flags as *mut KeyFlags).cast(),
+            size_of::<KeyFlags>() as u32,
+            &mut length,
+        )
+    };
+    if status < 0 || flags.key_flags & REG_FLAG_LINK != 0 {
+        return true;
+    }
     let name = wide_str("SymbolicLinkValue");
     let mut ty = 0u32;
     // SAFETY: an open key, a NUL-terminated name and one out parameter; no
@@ -796,11 +827,20 @@ fn read_node(key: &windows_registry::Key, location: &str) -> Done<KeyNode> {
 
 /// Write a key's values and subkeys. With `merge`, a value already there is
 /// left as it is: only what is missing is written.
+///
+/// With `fresh`, `key` was made by this restore, and so must every subkey
+/// written in it be: one that is there already, made by someone else since
+/// it was looked for, stops the write as [`Failure::Occupied`] and nothing
+/// is written into it. A subkey made here is fresh in turn. Every key made
+/// here goes onto `made`, each after those inside it, so that undoing
+/// takes back what was made, deepest first, and nothing else.
 fn write_node(
     key: &windows_registry::Key,
     node: &KeyNode,
     merge: bool,
+    fresh: bool,
     location: &str,
+    made: &mut Vec<windows_registry::Key>,
 ) -> Done<()> {
     for (name, value) in &node.values {
         if merge && key.get_type(name).is_ok() {
@@ -810,10 +850,29 @@ fn write_node(
             .map_err(|e| registry_failure(location, e))?;
     }
     for (name, sub) in &node.subkeys {
-        let (child, _) = child_unlinked(key, name, KEY_READ | KEY_WRITE, true, location)?;
-        write_node(&child, sub, merge, location)?;
+        let access = KEY_READ | KEY_WRITE | KEY_DELETE;
+        let (child, new) = child_unlinked(key, name, access, true, location)?;
+        if fresh && !new {
+            return Err(Failure::Occupied);
+        }
+        let written = write_node(&child, sub, merge, new, location, made);
+        if new {
+            made.push(child);
+        }
+        written?;
     }
     Ok(())
+}
+
+/// Take back keys a restore made, in the order [`write_node`] listed them,
+/// each through its own handle. One that holds a key it did not make (a
+/// subkey someone else put there) is not deleted, and neither is that.
+fn undo_made(made: Vec<windows_registry::Key>) {
+    for key in made {
+        // SAFETY: an open key with DELETE access, closed when `key` goes.
+        // The kernel refuses to delete a key that still has subkeys.
+        unsafe { NtDeleteKey(key.as_raw() as _) };
+    }
 }
 
 /// Delete a key and everything under it, each key through its own handle,
@@ -864,7 +923,7 @@ fn restore_key(hive: Hive, path: &str, node: &KeyNode, merge: bool) -> Done<()> 
         Ok(key) => {
             // Some of it is still there: put back what is missing beside it,
             // and take nothing away whatever happens.
-            return write_node(&key, node, true, &location);
+            return write_node(&key, node, true, false, &location, &mut Vec::new());
         }
         Err(Failure::Missing) => {}
         Err(f) => return Err(f),
@@ -875,11 +934,15 @@ fn restore_key(hive: Hive, path: &str, node: &KeyNode, merge: bool) -> Done<()> 
         // into, and never deleted should the write fail.
         return Err(Failure::Occupied);
     }
-    write_node(&key, node, false, &location).inspect_err(|_| {
+    let mut made = Vec::new();
+    let written = write_node(&key, node, false, true, &location, &mut made);
+    if written.is_err() {
         // Half a key that was not there before is worse than none: take
-        // back what was written.
-        let _ = delete_tree(&key, &location);
-    })
+        // back what was made, and only that.
+        made.push(key);
+        undo_made(made);
+    }
+    written
 }
 
 // ---------------------------------------------------------------------------
@@ -1142,7 +1205,7 @@ fn restore_service(name: &str, key: &KeyNode, merge: bool) -> Done<()> {
     // The rest of its settings (its description, its parameters) as they were.
     let location = format!(r"HKLM\{path}");
     let written = walk(Hive::Hklm, &path, KEY_READ | KEY_WRITE, true)
-        .and_then(|k| write_node(&k, key, false, &location));
+        .and_then(|k| write_node(&k, key, false, false, &location, &mut Vec::new()));
     written.map_err(|f| {
         let why = match f {
             Failure::Failed(s) | Failure::Partial(s) => s,
@@ -1687,6 +1750,31 @@ pub(crate) mod tests {
         }
     }
 
+    /// Make `HKCU\<at>` a registry link with no `SymbolicLinkValue`.
+    pub(crate) fn make_bare_link(at: &str) {
+        let (parent, name) = at.rsplit_once('\\').unwrap();
+        let parent = windows_registry::CURRENT_USER.create(parent).unwrap();
+        let name = wide_str(name);
+        let mut handle: HKEY = ptr::null_mut();
+        // SAFETY: test-only; an open key, a NUL-terminated name, out
+        // parameters.
+        unsafe {
+            let code = RegCreateKeyExW(
+                parent.as_raw() as HKEY,
+                name.as_ptr(),
+                0,
+                ptr::null(),
+                0x2, // REG_OPTION_CREATE_LINK
+                0xF003F | 0x20,
+                ptr::null(),
+                &mut handle,
+                ptr::null_mut(),
+            );
+            assert_eq!(code, ERROR_SUCCESS, "a link could be made in HKCU");
+            windows_sys::Win32::System::Registry::RegCloseKey(handle);
+        }
+    }
+
     /// Delete the link itself, never what it leads to.
     pub(crate) fn remove_link(at: &str) {
         let (parent, name) = at.rsplit_once('\\').unwrap();
@@ -1839,6 +1927,118 @@ pub(crate) mod tests {
                 open_child(&parent, name, KEY_READ, false).expect("the link is still there");
             assert!(is_link(&planted), "{leaf}");
         }
+    }
+
+    /// A link made without its `SymbolicLinkValue` (or whose value was
+    /// deleted since) is a link all the same, and refused as one.
+    #[test]
+    fn a_registry_link_without_its_value_is_still_a_link() {
+        let key = TestKey::new("bare-link");
+        windows_registry::CURRENT_USER
+            .create(format!(r"{}\Plain", key.0))
+            .unwrap();
+        let at = format!(r"{}\Bare", key.0);
+        struct Planted(String);
+        impl Drop for Planted {
+            fn drop(&mut self) {
+                remove_link(&self.0);
+            }
+        }
+        let _planted = Planted(at.clone());
+        make_bare_link(&at);
+        let parent = windows_registry::CURRENT_USER.open(&key.0).unwrap();
+        let bare = open_child(&parent, "Bare", KEY_READ, false).expect("the link opens as itself");
+        assert!(is_link(&bare));
+        let plain = open_child(&parent, "Plain", KEY_READ, false).unwrap();
+        assert!(!is_link(&plain));
+        assert_eq!(key_way(Hive::Hkcu, &at), KeyWay::Link);
+        let mut m = LiveMutate::new(PathBuf::from(r"C:\nowhere"));
+        assert!(matches!(
+            m.delete_key(Hive::Hkcu, &key.0),
+            Err(Failure::Failed(s)) if s.contains("registry link")
+        ));
+    }
+
+    /// A subkey that turns up inside a key a restore has just made, between
+    /// the look and the create, is someone else's: nothing is written into
+    /// it, and taking back the half-made key never deletes it.
+    #[test]
+    fn a_subkey_someone_else_makes_inside_a_new_key_is_left_alone() {
+        let key = TestKey::new("theirs");
+        windows_registry::CURRENT_USER.create(&key.0).unwrap();
+        let restored_key = format!(r"{}\Fresh", key.0);
+        let theirs = format!(r"{restored_key}\Sub");
+        let planted = theirs.clone();
+        BEFORE_CREATE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |name: &str| {
+                if name == "Sub" {
+                    windows_registry::CURRENT_USER
+                        .create(&planted)
+                        .unwrap()
+                        .set_u32("Theirs", 1)
+                        .unwrap();
+                }
+            }));
+        });
+        let node = KeyNode {
+            values: vec![("Own".into(), value(REG_DWORD, &7u32.to_le_bytes()))],
+            subkeys: vec![(
+                "Sub".into(),
+                KeyNode {
+                    values: vec![("Inner".into(), value(REG_DWORD, &8u32.to_le_bytes()))],
+                    subkeys: vec![("Deeper".into(), KeyNode::default())],
+                },
+            )],
+        };
+        let mut m = LiveMutate::new(PathBuf::from(r"C:\nowhere"));
+        let restored = m.restore_key(Hive::Hkcu, &restored_key, &node, false);
+        BEFORE_CREATE.with(|hook| *hook.borrow_mut() = None);
+
+        assert_eq!(restored, Err(Failure::Occupied));
+        let sub = windows_registry::CURRENT_USER
+            .open(&theirs)
+            .expect("their subkey is still there");
+        assert_eq!(sub.get_u32("Theirs").unwrap(), 1);
+        assert!(
+            sub.get_type("Inner").is_err(),
+            "nothing was written into it"
+        );
+        assert!(
+            windows_registry::CURRENT_USER
+                .open(format!(r"{theirs}\Deeper"))
+                .is_err()
+        );
+    }
+
+    /// When a write into a key a restore has just made fails, what it made
+    /// is taken back, and only that.
+    #[test]
+    fn a_failed_restore_takes_back_only_the_keys_it_made() {
+        let key = TestKey::new("undo");
+        windows_registry::CURRENT_USER.create(&key.0).unwrap();
+        let restored_key = format!(r"{}\Fresh", key.0);
+        let node = KeyNode {
+            values: vec![("Own".into(), value(REG_DWORD, &7u32.to_le_bytes()))],
+            subkeys: vec![
+                (
+                    "First".into(),
+                    KeyNode {
+                        values: vec![],
+                        subkeys: vec![("Inner".into(), KeyNode::default())],
+                    },
+                ),
+                // A name too long for a key: the create fails part-way.
+                ("x".repeat(300), KeyNode::default()),
+            ],
+        };
+        let mut m = LiveMutate::new(PathBuf::from(r"C:\nowhere"));
+        let restored = m.restore_key(Hive::Hkcu, &restored_key, &node, false);
+        assert!(restored.is_err(), "{restored:?}");
+        assert!(
+            windows_registry::CURRENT_USER.open(&restored_key).is_err(),
+            "the key it made is gone again"
+        );
+        assert!(windows_registry::CURRENT_USER.open(&key.0).is_ok());
     }
 
     /// The two links Windows keeps on these paths are followed.
