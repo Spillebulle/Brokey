@@ -81,6 +81,7 @@ fn run_here(step: &Step, roots: &Roots) -> (Result<Option<String>, String>, Vec<
             &super::super::view::LiveView::new(),
             &mut m,
             &Live,
+            &FakeSession::default(),
         )
     };
     #[cfg(not(windows))]
@@ -635,15 +636,398 @@ fn a_root_step_refuses_a_machine_root_under_a_junction() {
 }
 
 #[test]
-fn the_session_only_steps_are_not_taken_yet_and_start_nothing() {
+fn a_session_step_it_cannot_read_is_refused_and_starts_nothing() {
     let temp = tempfile::tempdir().unwrap();
     let roots = temp_roots(temp.path());
     for program in [AWAIT_GONE, SCAN, SHELL_OPEN] {
         let (result, events) = run_here(&step(program, vec!["{}".into()], false), &roots);
-        let err = result.expect_err("Task 8 takes these");
+        let err = result.expect_err("an empty payload is nothing Brokey wrote");
         assert!(err.contains(program) && err.ends_with('.'), "{err}");
         assert!(events.is_empty());
     }
+}
+
+// ---------------------------------------------------------------------------
+// The steps that run as the user
+
+/// The machine as the session steps see it, from a table. `shell_open`
+/// records what it was asked and starts nothing.
+#[derive(Default)]
+struct FakeSession {
+    /// Whether the uninstall key is still there, look after look; the last
+    /// answer repeats.
+    listed: Vec<bool>,
+    looks: std::cell::Cell<usize>,
+    installed: Vec<crate::model::Package>,
+    failed_sources: u32,
+    closed_list: Option<Result<(), String>>,
+    opened: std::cell::RefCell<Vec<(PathBuf, Vec<String>)>>,
+    exit_code: u32,
+}
+
+impl Session for FakeSession {
+    fn listed(&self, _: Hive, _: &str) -> bool {
+        let n = self.looks.get();
+        self.looks.set(n + 1);
+        *self.listed.get(n).or(self.listed.last()).unwrap_or(&false)
+    }
+    fn poll(&self) -> Duration {
+        Duration::from_millis(1)
+    }
+    fn installed(&self) -> (Vec<crate::model::Package>, u32) {
+        (self.installed.clone(), self.failed_sources)
+    }
+    fn closed_list(&self, _: &Step) -> Result<(), String> {
+        self.closed_list.clone().unwrap_or(Ok(()))
+    }
+    fn shell_open(&self, program: &Path, args: &[String]) -> Result<u32, String> {
+        self.opened
+            .borrow_mut()
+            .push((program.to_path_buf(), args.to_vec()));
+        Ok(self.exit_code)
+    }
+}
+
+fn acme_hints() -> Hints {
+    Hints {
+        package: crate::model::PackageRef {
+            source: SourceKind::Arp,
+            id: r"HKLM\Acme Studio_is1".to_string(),
+        },
+        name: "Acme Studio".to_string(),
+        publisher: Some("Acme".to_string()),
+        uninstall_key: Some((Hive::Hklm, "Acme Studio_is1".to_string())),
+        product_code: None,
+        install_dir: Some(PathBuf::from(r"C:\Program Files\Acme Studio")),
+        install_location: None,
+        icon_dir: None,
+        shortcuts: Vec::new(),
+        extra_dirs: Vec::new(),
+    }
+}
+
+/// Run one session step against `view` and `session`, with `finished` as
+/// the page's "It has finished" and `cancel` as "Stop waiting".
+fn run_session(
+    step: &Step,
+    view: &dyn SystemView,
+    session: &FakeSession,
+    finished: bool,
+    cancel: bool,
+) -> (Result<Option<String>, String>, Vec<Event>, Scans) {
+    let mut events = Vec::new();
+    let scans = Scans::default();
+    let flag = Arc::new(AtomicBool::new(false));
+    let result = {
+        let mut sink = |e: Event| {
+            // The page answers once it has been asked.
+            if finished && matches!(e, Event::Waiting { .. }) {
+                flag.store(true, Ordering::SeqCst);
+            }
+            events.push(e);
+        };
+        let cancelled = || cancel;
+        let mut ctx = InternalContext {
+            plan: "p",
+            step: 1,
+            sink: &mut sink,
+            cancelled: &cancelled,
+            finished: flag.clone(),
+            scans: scans.clone(),
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let roots = temp_roots(temp.path());
+        let mut m = OneKeyInUse {
+            in_use: "",
+            deleted: Vec::new(),
+        };
+        run_in(step, &mut ctx, &roots, view, &mut m, &PLAIN, session)
+    };
+    (result, events, scans)
+}
+
+fn await_step() -> Step {
+    step(
+        AWAIT_GONE,
+        vec![serde_json::to_string(&acme_hints()).unwrap()],
+        false,
+    )
+}
+
+#[test]
+fn await_gone_with_the_entry_already_gone_goes_straight_on() {
+    let session = FakeSession {
+        listed: vec![false],
+        ..Default::default()
+    };
+    let (result, events, _) = run_session(
+        &await_step(),
+        &FixtureView::from_json("{}"),
+        &session,
+        false,
+        false,
+    );
+    assert_eq!(result, Ok(None));
+    assert!(events.is_empty(), "no waiting was needed: {events:?}");
+}
+
+#[test]
+fn await_gone_waits_while_the_entry_is_there_and_goes_on_when_it_goes() {
+    let session = FakeSession {
+        listed: vec![true, true, true, false],
+        ..Default::default()
+    };
+    let (result, events, _) = run_session(
+        &await_step(),
+        &FixtureView::from_json("{}"),
+        &session,
+        false,
+        false,
+    );
+    assert_eq!(result, Ok(None));
+    assert_eq!(
+        events,
+        vec![Event::Waiting {
+            plan: "p".into(),
+            step: 1,
+            message: WAITING_FOR_UNINSTALLER.into(),
+        }]
+    );
+}
+
+/// Review Focus 3: the user cancels the publisher's uninstaller and says
+/// it has finished. The entry is still there, so it was not removed: the
+/// step fails with the sentence that offers forced removal, and no scan is
+/// made, so nothing of a still-installed application is offered.
+#[test]
+fn await_gone_with_the_entry_still_there_offers_forced_removal() {
+    let session = FakeSession {
+        listed: vec![true],
+        ..Default::default()
+    };
+    let (result, events, scans) = run_session(
+        &await_step(),
+        &FixtureView::from_json("{}"),
+        &session,
+        true,
+        false,
+    );
+    assert_eq!(
+        result,
+        Err(
+            "The uninstaller did not remove Acme Studio. It may have been cancelled. Forced \
+             removal clears it without the uninstaller."
+                .to_string()
+        )
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Leftovers { .. })),
+        "{events:?}"
+    );
+    assert!(scans.lock().unwrap().is_empty());
+}
+
+#[test]
+fn it_has_finished_with_the_entry_gone_goes_on() {
+    let session = FakeSession {
+        listed: vec![true, false],
+        ..Default::default()
+    };
+    // The first look finds it; the page then says finished; the last look
+    // finds it gone.
+    let (result, _, _) = run_session(
+        &await_step(),
+        &FixtureView::from_json("{}"),
+        &session,
+        true,
+        false,
+    );
+    assert_eq!(result, Ok(None));
+}
+
+#[test]
+fn stop_waiting_cancels_the_plan() {
+    let session = FakeSession {
+        listed: vec![true],
+        ..Default::default()
+    };
+    let (result, _, _) = run_session(
+        &await_step(),
+        &FixtureView::from_json("{}"),
+        &session,
+        false,
+        true,
+    );
+    assert_eq!(
+        result,
+        Err(crate::transaction::runner::CANCELLED.to_string())
+    );
+}
+
+#[test]
+fn a_package_with_no_uninstall_key_has_nothing_to_wait_for() {
+    let mut hints = acme_hints();
+    hints.uninstall_key = None;
+    let session = FakeSession {
+        listed: vec![true],
+        ..Default::default()
+    };
+    let wait = step(
+        AWAIT_GONE,
+        vec![serde_json::to_string(&hints).unwrap()],
+        false,
+    );
+    let (result, events, _) =
+        run_session(&wait, &FixtureView::from_json("{}"), &session, false, false);
+    assert_eq!(result, Ok(None));
+    assert!(events.is_empty());
+}
+
+fn scan_of(hints: Hints, force: bool) -> Step {
+    step(
+        SCAN,
+        vec![serde_json::to_string(&ScanPayload { hints, force }).unwrap()],
+        false,
+    )
+}
+
+/// Discord after its uninstaller, as the scanner's own tests know it.
+fn discord() -> (Hints, FixtureView) {
+    let mut hints = acme_hints();
+    hints.name = "Discord".to_string();
+    hints.publisher = Some("Discord Inc.".to_string());
+    hints.uninstall_key = None;
+    hints.install_dir = Some(PathBuf::from(r"C:\Users\you\AppData\Local\Discord"));
+    let view = FixtureView::load(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cleanup/discord.json"),
+    );
+    (hints, view)
+}
+
+#[test]
+fn a_scan_keeps_its_findings_and_tells_the_page() {
+    let session = FakeSession {
+        failed_sources: 1,
+        ..Default::default()
+    };
+    let (hints, view) = discord();
+    let (result, events, scans) = run_session(
+        &scan_of(hints.clone(), false),
+        &view,
+        &session,
+        false,
+        false,
+    );
+    assert_eq!(result, Ok(None));
+    let scans = scans.lock().unwrap();
+    let (id, record) = scans.iter().next().expect("one scan kept");
+    assert!(!record.forced);
+    assert_eq!(record.hints, hints);
+    assert!(!record.findings.items.is_empty(), "{:?}", record.findings);
+    assert_eq!(record.findings.unreadable, 1, "the source it could not ask");
+    assert_eq!(
+        events,
+        vec![Event::Leftovers {
+            plan: "p".into(),
+            scan: id.clone(),
+            count: record.findings.items.len(),
+        }]
+    );
+}
+
+#[test]
+fn a_scan_that_finds_nothing_says_so() {
+    let session = FakeSession::default();
+    let (result, events, _) = run_session(
+        &scan_of(acme_hints(), true),
+        &FixtureView::from_json("{}"),
+        &session,
+        false,
+        false,
+    );
+    assert_eq!(result, Ok(Some("Nothing was left behind.".to_string())));
+    assert!(matches!(
+        events.as_slice(),
+        [Event::Leftovers { count: 0, .. }]
+    ));
+}
+
+const REPLACEABLE: &str = r"C:\Program Files (x86)\Steam\uninstall.exe";
+
+fn shell_open_of(program: &str) -> Step {
+    step(SHELL_OPEN, vec![program.to_string()], false)
+}
+
+#[test]
+fn shell_open_starts_only_what_the_closed_list_refused_as_replaceable() {
+    let refused = FakeSession {
+        closed_list: Some(Err(format!(
+            "{}{REPLACEABLE}. Starting it as Administrator would hand Administrator to whoever \
+             replaced it, so Brokey will not.",
+            crate::transaction::allow::CAN_BE_REPLACED
+        ))),
+        ..Default::default()
+    };
+    let view = FixtureView::from_json("{}");
+    let (result, _, _) = run_session(&shell_open_of(REPLACEABLE), &view, &refused, false, false);
+    assert_eq!(result, Ok(None));
+    assert_eq!(
+        *refused.opened.borrow(),
+        vec![(PathBuf::from(REPLACEABLE), Vec::<String>::new())]
+    );
+
+    for answer in [
+        // The closed list admits it: it goes through the helper, not here.
+        Ok(()),
+        // Refused for any other reason: Brokey starts nothing.
+        Err(format!(
+            "The helper refused {REPLACEABLE}. It is not allowed."
+        )),
+    ] {
+        let session = FakeSession {
+            closed_list: Some(answer),
+            ..Default::default()
+        };
+        let (result, _, _) =
+            run_session(&shell_open_of(REPLACEABLE), &view, &session, false, false);
+        assert!(result.is_err());
+        assert!(session.opened.borrow().is_empty());
+    }
+}
+
+#[test]
+fn shell_open_of_a_bare_name_is_refused_before_anything_is_asked() {
+    let session = FakeSession::default();
+    let (result, _, _) = run_session(
+        &shell_open_of("uninstall.exe"),
+        &FixtureView::from_json("{}"),
+        &session,
+        false,
+        false,
+    );
+    assert!(result.unwrap_err().contains("full path"));
+    assert!(session.opened.borrow().is_empty());
+}
+
+#[test]
+fn an_uninstaller_that_ends_with_a_code_leaves_the_verdict_to_the_key() {
+    let session = FakeSession {
+        closed_list: Some(Err(format!(
+            "{}{REPLACEABLE}.",
+            crate::transaction::allow::CAN_BE_REPLACED
+        ))),
+        exit_code: 2,
+        ..Default::default()
+    };
+    let (result, _, _) = run_session(
+        &shell_open_of(REPLACEABLE),
+        &FixtureView::from_json("{}"),
+        &session,
+        false,
+        false,
+    );
+    let note = result.unwrap().unwrap();
+    assert!(note.contains("code 2"), "{note}");
 }
 
 #[test]
@@ -1209,8 +1593,16 @@ fn an_extension_stays_when_the_progid_it_names_could_not_go() {
         finished: Arc::new(AtomicBool::new(false)),
         scans: Scans::default(),
     };
-    let err = run_in(&clear, &mut ctx, &roots, &view, &mut m, &PLAIN)
-        .expect_err("the ProgID could not be moved");
+    let err = run_in(
+        &clear,
+        &mut ctx,
+        &roots,
+        &view,
+        &mut m,
+        &PLAIN,
+        &FakeSession::default(),
+    )
+    .expect_err("the ProgID could not be moved");
     assert!(err.starts_with("1 of 4 items were moved"), "{err}");
     assert!(
         err.contains(r"Software\Classes\Acme.Doc is in use."),

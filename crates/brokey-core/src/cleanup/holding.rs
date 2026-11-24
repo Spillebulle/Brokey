@@ -243,7 +243,7 @@ enum Place {
     Firewall(String),
 }
 
-fn parse_key(location: &str) -> Option<(Hive, String)> {
+pub(crate) fn parse_key(location: &str) -> Option<(Hive, String)> {
     let (hive, rest) = location.trim().split_once('\\')?;
     let hive = match hive.to_ascii_uppercase().as_str() {
         "HKLM" => Hive::Hklm,

@@ -30,6 +30,12 @@ use unix::Inner;
 mod windows;
 #[cfg(windows)]
 use windows::Inner;
+/// The second sanctioned exception to "no elevation call site outside this
+/// module": an Add/Remove uninstaller the closed list refused as replaceable,
+/// started as the user with the `open` verb so that it elevates itself.
+/// See `windows::shell_open`.
+#[cfg(windows)]
+pub use windows::shell_open;
 /// The two pipe names, derived from the one base name the helper is given
 /// on its command line. Re-exported because `brokey-helper` derives the
 /// same two names from the same base, and one definition is the only way

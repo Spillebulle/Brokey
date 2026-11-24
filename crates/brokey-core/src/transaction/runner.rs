@@ -438,7 +438,7 @@ impl Runner {
         }
         Outcome {
             ok: true,
-            message: summary(&plan.ops),
+            message: summary_with(&plan.ops, &self.scans),
         }
     }
 
@@ -1306,13 +1306,26 @@ fn pkexec_refusal(stderr: &str) -> String {
 /// The final sentence for a plan that ran through: what was asked for, in
 /// the past tense.
 pub fn summary(ops: &[Op]) -> String {
+    summary_with(ops, &Scans::default())
+}
+
+/// [`summary`], with the scans a clear names its application from.
+pub fn summary_with(ops: &[Op], scans: &Scans) -> String {
     if ops.is_empty() {
         return "Finished.".to_string();
     }
     if let [only] = ops {
         match only {
-            Op::ClearLeftovers { .. } => {
-                return "Cleared leftovers from the uninstalled application.".to_string();
+            Op::ClearLeftovers { scan, .. } => {
+                let name = scans
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(scan)
+                    .map(|r| r.findings.name.clone());
+                return match name {
+                    Some(name) => format!("Cleared leftovers from {name}."),
+                    None => "Cleared leftovers from the uninstalled application.".to_string(),
+                };
             }
             Op::Restore { .. } => return "Restored the cleared items.".to_string(),
             Op::EmptyHolding { .. } => return "Emptied the holding area.".to_string(),
@@ -1376,13 +1389,13 @@ mod tests {
     /// start brokey:…", and it ends the plan like any failed step.
     #[test]
     fn an_internal_session_step_is_run_here_and_never_spawned() {
-        let plan = session_plan(vec![(internal::SHELL_OPEN, vec!["x".to_string()])]);
+        let plan = session_plan(vec![(internal::SCAN, vec!["x".to_string()])]);
         let mut events = Vec::new();
         let mut sink = |e: Event| events.push(e);
         let outcome = Runner::new().with_helper(None).execute(&plan, &mut sink);
         assert!(!outcome.ok);
         assert!(
-            outcome.message.contains(internal::SHELL_OPEN),
+            outcome.message.contains(internal::SCAN),
             "{}",
             outcome.message
         );
@@ -1393,7 +1406,7 @@ mod tests {
         );
         assert!(events.iter().any(|e| matches!(
             e,
-            Event::StepFinished { ok: false, message: Some(m), .. } if m.contains(internal::SHELL_OPEN)
+            Event::StepFinished { ok: false, message: Some(m), .. } if m.contains(internal::SCAN)
         )));
     }
 
@@ -1409,7 +1422,7 @@ mod tests {
             (internal::HOLD, vec!["not json".to_string()]),
         ] {
             let plan = session_plan(vec![
-                (internal::SHELL_OPEN, vec!["x".to_string()]),
+                (internal::SCAN, vec!["x".to_string()]),
                 refused.clone(),
             ]);
             let mut events = Vec::new();

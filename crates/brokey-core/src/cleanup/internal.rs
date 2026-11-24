@@ -30,13 +30,14 @@ use super::hints::Hints;
 use super::holding::{self, Failure, HeldState, HoldItem, HoldReport, Mutate};
 use super::scan;
 use super::view::{Hive, Known, SystemView, ViewError};
-use crate::model::{Event, Findings, ItemKind, Step};
+use crate::model::{Command, Event, Findings, ItemKind, Package, SourceKind, Step};
 use crate::sources::windows::shortcut;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// What every one of Brokey's own steps starts with.
 pub const PREFIX: &str = "brokey:";
@@ -51,10 +52,29 @@ pub const EMPTY: &str = "brokey:empty";
 pub const MSI_UNREGISTER: &str = "brokey:msi-unregister";
 /// `args[0]` is the [`Hints`] as JSON. As the user only.
 pub const AWAIT_GONE: &str = "brokey:await-gone";
-/// `args[0]` is `{ hints, force }` as JSON. As the user only.
+/// `args[0]` is a [`ScanPayload`] as JSON. As the user only.
 pub const SCAN: &str = "brokey:scan";
 /// `args` are the program and its arguments. As the user only.
 pub const SHELL_OPEN: &str = "brokey:shell-open";
+
+/// How long [`AWAIT_GONE`] leaves between two looks at the uninstall key.
+pub const AWAIT_POLL: Duration = Duration::from_secs(2);
+
+/// What the activity panel says while [`AWAIT_GONE`] waits, beside its two
+/// buttons.
+pub const WAITING_FOR_UNINSTALLER: &str =
+    "Waiting for the uninstaller to finish. Close its window when it is done.";
+
+/// Why [`AWAIT_GONE`] failed: the user said the uninstaller had finished and
+/// the application is still listed. Nothing is scanned after it, because a
+/// still-installed application has no leftovers, and the page offers forced
+/// removal when a plan ends with this.
+pub fn not_removed(name: &str) -> String {
+    format!(
+        "The uninstaller did not remove {name}. It may have been cancelled. Forced removal \
+         clears it without the uninstaller."
+    )
+}
 
 /// The steps that may run as Administrator.
 const ROOT: [&str; 4] = [HOLD, RESTORE, EMPTY, MSI_UNREGISTER];
@@ -71,9 +91,31 @@ pub struct HoldPayload {
     pub items: Vec<HoldItem>,
 }
 
-/// Every scan this session has made, by scan id, with the hints it searched
-/// by. [`SCAN`] fills it; clearing reads it, so the page never sends a path.
-pub type Scans = Arc<Mutex<HashMap<String, (Hints, Findings)>>>;
+/// What [`SCAN`] carries.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScanPayload {
+    pub hints: Hints,
+    /// A forced removal: the application is still listed, its uninstaller
+    /// was not run, and its own folder, key and Windows Installer
+    /// registration are not claims that shield it.
+    pub force: bool,
+}
+
+/// One scan, kept for the clear that follows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScanRecord {
+    /// What it searched by.
+    pub hints: Hints,
+    pub findings: Findings,
+    /// Made for a forced removal, so clearing it also clears the product's
+    /// Windows Installer registration when it has one.
+    pub forced: bool,
+}
+
+/// Every scan this session has made, by scan id. [`SCAN`] fills it;
+/// clearing reads it, so the page never sends a path.
+pub type Scans = Arc<Mutex<HashMap<String, ScanRecord>>>;
 
 /// What one of Brokey's own steps may reach while it runs.
 pub struct InternalContext<'a> {
@@ -191,6 +233,20 @@ pub(crate) fn check_with(
             return Err(format!(
                 "The helper refused {program}, because it only ever runs as you and never as \
                  Administrator. Start the operation again from Brokey."
+            ));
+        }
+        // What the shell is asked to open is an uninstaller the registry
+        // names in full, never a word for it to look up.
+        if program == SHELL_OPEN
+            && step
+                .command
+                .args
+                .first()
+                .is_none_or(|p| path_parts(p).is_none())
+        {
+            return Err(format!(
+                "Brokey refused {program}, because it does not name a program by its full \
+                 path. Remove the application again from Brokey."
             ));
         }
         return Ok(());
@@ -1131,6 +1187,7 @@ pub fn run(step: &Step, ctx: &mut InternalContext) -> Result<Option<String>, Str
             &super::view::LiveView::new(),
             &mut m,
             &Live,
+            &LiveSession,
         )
     }
     #[cfg(not(windows))]
@@ -1146,15 +1203,15 @@ pub fn run(step: &Step, ctx: &mut InternalContext) -> Result<Option<String>, Str
 /// [`run`] with the roots, the view of the machine and what changes it
 /// handed in, which is what lets it be tested in a temporary folder.
 #[cfg_attr(not(windows), allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_in(
     step: &Step,
-    // What the session-only steps will reach for; the four that run here
-    // need nothing from it.
-    _ctx: &mut InternalContext,
+    ctx: &mut InternalContext,
     roots: &Roots,
     view: &dyn SystemView,
     m: &mut dyn Mutate,
     machine: &dyn Machine,
+    session: &dyn Session,
 ) -> Result<Option<String>, String> {
     let program = step.command.program.as_str();
     let root = step.needs_root;
@@ -1201,7 +1258,252 @@ pub(crate) fn run_in(
             let report = holding::hold(dir, id, &name, &items, m);
             outcome(report, items.len(), "moved to the holding area")
         }
-        _ => Err(not_yet(program)),
+        AWAIT_GONE => {
+            let hints: Hints = serde_json::from_str(one_argument(program, args)?)
+                .map_err(|_| unreadable_payload(program))?;
+            await_gone(&hints, ctx, session)
+        }
+        SCAN => {
+            let payload: ScanPayload = serde_json::from_str(one_argument(program, args)?)
+                .map_err(|_| unreadable_payload(program))?;
+            scan_step(payload, ctx, view, session)
+        }
+        SHELL_OPEN => shell_open_step(args, session),
+        // `check_with` refuses every other name before this.
+        _ => Err(unreadable_payload(program)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The steps that run as the user
+
+/// What the three session steps ask of the machine beyond the guard's view,
+/// so that a test answers from a table and never waits two seconds, reads
+/// the real registry or starts a program.
+pub(crate) trait Session {
+    /// Whether an uninstall key is still listed.
+    fn listed(&self, hive: Hive, key: &str) -> bool;
+    /// How long between two looks at it. [`AWAIT_POLL`] on a real machine.
+    fn poll(&self) -> Duration;
+    /// Every available source's installed list, and how many sources could
+    /// not give theirs.
+    fn installed(&self) -> (Vec<Package>, u32);
+    /// What the closed list says of a step that would run as Administrator.
+    fn closed_list(&self, step: &Step) -> Result<(), String>;
+    /// Start a program as the user through the shell and wait for it; its
+    /// exit code, or the sentence for why it did not start.
+    fn shell_open(&self, program: &Path, args: &[String]) -> Result<u32, String>;
+}
+
+/// This machine.
+pub(crate) struct LiveSession;
+
+impl Session for LiveSession {
+    fn listed(&self, hive: Hive, key: &str) -> bool {
+        #[cfg(windows)]
+        {
+            crate::sources::windows::arp::read()
+                .iter()
+                .any(|e| Hive::from(e.hive) == hive && e.key_name.eq_ignore_ascii_case(key))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (hive, key);
+            false
+        }
+    }
+
+    fn poll(&self) -> Duration {
+        AWAIT_POLL
+    }
+
+    fn installed(&self) -> (Vec<Package>, u32) {
+        // Read now rather than taken from the window's store: the store was
+        // read before the uninstaller ran and still lists the application,
+        // whose every file would then be a claim that shields it.
+        let store = crate::Store::detect();
+        let mut packages = Vec::new();
+        let mut failed = 0;
+        for source in store.sources.iter().filter(|s| s.status().available) {
+            match source.installed() {
+                Ok(found) => packages.extend(found),
+                Err(_) => failed += 1,
+            }
+        }
+        (packages, failed)
+    }
+
+    fn closed_list(&self, step: &Step) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            crate::transaction::allow::check_step(
+                step,
+                &crate::transaction::allow::Allowed::with_registered_removals(),
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = step;
+            Err("The closed list is only asked on Windows.".to_string())
+        }
+    }
+
+    fn shell_open(&self, program: &Path, args: &[String]) -> Result<u32, String> {
+        #[cfg(windows)]
+        {
+            crate::transaction::elevate::shell_open(program, args)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = args;
+            Err(format!(
+                "{} can only be started this way on Windows.",
+                program.display()
+            ))
+        }
+    }
+}
+
+fn unreadable_payload(program: &str) -> String {
+    format!(
+        "Brokey could not read what the step {program} carries, so it was not taken. Start the \
+         operation again from Brokey."
+    )
+}
+
+/// Wait until the application's uninstall key is gone. The uninstaller's
+/// process ending says nothing: an NSIS uninstaller copies itself to Temp
+/// and exits at once, and Steam returns before its dialog is answered. So
+/// the key is the signal. While it is there the page shows
+/// [`WAITING_FOR_UNINSTALLER`] with **It has finished** (the `finished`
+/// flag) and **Stop waiting** (cancel). "It has finished" with the key
+/// still there is [`not_removed`], and the plan ends without a scan.
+fn await_gone(
+    hints: &Hints,
+    ctx: &mut InternalContext,
+    session: &dyn Session,
+) -> Result<Option<String>, String> {
+    // A package manager's own removal has no uninstall key to watch: its
+    // command ends when the package is gone.
+    let Some((hive, key)) = &hints.uninstall_key else {
+        return Ok(None);
+    };
+    if !session.listed(*hive, key) {
+        return Ok(None);
+    }
+    // Only an answer given while this step waits counts.
+    ctx.finished.store(false, Ordering::SeqCst);
+    (ctx.sink)(Event::Waiting {
+        plan: ctx.plan.to_string(),
+        step: ctx.step,
+        message: WAITING_FOR_UNINSTALLER.to_string(),
+    });
+    let poll = session.poll();
+    let slice = poll.min(Duration::from_millis(100));
+    let mut looked = Instant::now();
+    loop {
+        std::thread::sleep(slice);
+        if (ctx.cancelled)() {
+            return Err(crate::transaction::runner::CANCELLED.to_string());
+        }
+        if ctx.finished.swap(false, Ordering::SeqCst) {
+            return if session.listed(*hive, key) {
+                Err(not_removed(&hints.name))
+            } else {
+                Ok(None)
+            };
+        }
+        if looked.elapsed() >= poll {
+            looked = Instant::now();
+            if !session.listed(*hive, key) {
+                return Ok(None);
+            }
+        }
+    }
+}
+
+/// A scan id no other scan this run has: the time and a counter.
+fn new_scan_id() -> String {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("scan-{millis}-{}", NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Look for what was left behind, guard out what other applications use,
+/// keep the list for the clear that follows, and tell the page.
+fn scan_step(
+    payload: ScanPayload,
+    ctx: &mut InternalContext,
+    view: &dyn SystemView,
+    session: &dyn Session,
+) -> Result<Option<String>, String> {
+    let ScanPayload { hints, force } = payload;
+    let scanned = scan::scan(&hints, view);
+    let (installed, failed) = session.installed();
+    let claims = guard::claims(view, &installed, force.then_some(&hints));
+    let id = new_scan_id();
+    let mut findings = guard::findings(id.clone(), &hints, scanned, &claims, view);
+    // A source whose installed list could not be read claims nothing, so
+    // the list says it could not look rather than pretend it did.
+    findings.unreadable += failed;
+    let count = findings.items.len();
+    ctx.scans.lock().unwrap_or_else(|p| p.into_inner()).insert(
+        id.clone(),
+        ScanRecord {
+            hints,
+            findings,
+            forced: force,
+        },
+    );
+    (ctx.sink)(Event::Leftovers {
+        plan: ctx.plan.to_string(),
+        scan: id,
+        count,
+    });
+    Ok((count == 0).then(|| "Nothing was left behind.".to_string()))
+}
+
+/// Start an uninstaller that elevates itself, as the user, through the
+/// shell's `open` verb, so that Windows' own prompt names it. Taken only
+/// for what the closed list still refuses as a program this account can
+/// replace and which the registry records as an Add/Remove removal; for
+/// anything else Brokey starts nothing.
+fn shell_open_step(args: &[String], session: &dyn Session) -> Result<Option<String>, String> {
+    let Some((program, rest)) = args.split_first() else {
+        return Err(unreadable_payload(SHELL_OPEN));
+    };
+    let as_removal = Step {
+        source: SourceKind::Arp,
+        title: String::new(),
+        command: Command {
+            program: program.clone(),
+            args: rest.to_vec(),
+            env: Vec::new(),
+            cwd: None,
+        },
+        needs_root: true,
+        weight: 0,
+    };
+    match session.closed_list(&as_removal) {
+        Err(why) if crate::transaction::allow::is_can_be_replaced(&why) => {}
+        _ => {
+            return Err(format!(
+                "Brokey did not start {program}, because it is not an uninstaller Windows has \
+                 to ask about. Remove the application again from Brokey."
+            ));
+        }
+    }
+    match session.shell_open(Path::new(program), rest)? {
+        0 => Ok(None),
+        // The key, not the code, says whether it worked: the next step
+        // looks at it.
+        code => Ok(Some(format!(
+            "The uninstaller ended with code {code}. Brokey checks whether it removed the \
+             application."
+        ))),
     }
 }
 
@@ -1324,14 +1626,6 @@ fn progids_named(location: &str, view: &dyn SystemView) -> Vec<Option<String>> {
         Err(ViewError::Unreadable(_)) => named.push(None),
     }
     named
-}
-
-/// Until the removal flow can wait and scan, these say so rather than
-/// pretend.
-fn not_yet(program: &str) -> String {
-    format!(
-        "This version of Brokey cannot take the step {program} yet. Update Brokey and try again."
-    )
 }
 
 /// A report as a step's result: nothing to say when everything was done;

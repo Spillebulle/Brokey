@@ -193,6 +193,25 @@ These were decided before the first line and are not re-litigated in a fix:
   installing that way should untick the box, and anyone testing this
   invariant should know that an install from an administrator console proves
   nothing about it.
+  **The second sanctioned exception is the uninstaller that elevates
+  itself** (approved 2026-11-24, spec
+  `docs/superpowers/specs/2026-11-24-leftover-cleanup-design.md` §10). An
+  Add/Remove uninstaller in a folder this account can write (Steam's own)
+  is one the closed list refuses with "a program this account can
+  replace", and Brokey will not elevate a file the user could have
+  replaced. So it is started **as the user** and elevates itself through
+  its own manifest, and the prompt Windows shows names that file, exactly
+  as when it is started from Settings. It is held narrow in code: the
+  planner (`transaction/plan/cleanup.rs`, `self_elevating`) rewrites a step
+  into `cleanup::internal`'s `SHELL_OPEN` only when it came from an
+  Add/Remove entry and `allow::check_step` refused it with that sentence
+  and no other; the step asks the closed list again just before it runs
+  and starts nothing for any other answer; and it is
+  `transaction::elevate::shell_open`, `ShellExecuteEx` with the `open` verb,
+  never `runas`, so Brokey asks for nothing and Windows alone decides
+  whether to prompt. The confirm step has said "Windows will ask you to
+  allow ..." before it runs. It lives in `transaction/elevate/` all the
+  same, so the one place to audit stays one place.
 - **A source never runs anything.** `Source::plan` returns steps; the Runner
   runs them. This is what makes every source testable with fixtures.
 - **Opening an installed application is the one process started outside the

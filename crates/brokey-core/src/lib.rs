@@ -390,6 +390,13 @@ impl Store {
     pub fn plan(&self, ops: &[Op]) -> Result<Plan> {
         transaction::plan::build(self, ops)
     }
+
+    /// [`Store::plan`], with the scans a clear of leftovers takes its items
+    /// from. The application keeps them and passes them here and to the
+    /// runner that fills them.
+    pub fn plan_with(&self, ops: &[Op], scans: &cleanup::internal::Scans) -> Result<Plan> {
+        transaction::plan::build_with(self, ops, scans)
+    }
 }
 
 #[cfg(test)]

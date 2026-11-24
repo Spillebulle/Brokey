@@ -443,3 +443,53 @@ or rpm file lists. The scanner trait above should not assume the registry.
   clears its Windows Installer registration, restorably.
 - Only name-surrogate reparse points (junctions, links, mount points) are
   refused by the helper; cloud-synced items are left out of the list.
+
+## As built
+
+Where the build departed from or settled what is written above.
+
+- **Planning (§2, §9, §10).** The cleanup's part of the planner is
+  `transaction/plan/cleanup.rs`. Everything it asks of the machine (the
+  closed list, the hints, the holding area, the live view) comes through a
+  `Planning` value, so it is tested without the registry. The scans a clear
+  reads are passed to `Store::plan_with` / `plan::build_with`;
+  `Store::plan` passes none, so a clear planned through it says the list is
+  no longer known.
+- **A scan is kept with whether it was forced.** `internal::Scans` maps a
+  scan id to a `ScanRecord { hints, findings, forced }` rather than to
+  `(Hints, Findings)`, because §9's registration clear follows only a forced
+  removal and nothing else in the record says so.
+- **A clear is its own plan**, never added to a removal's: the runner checks
+  every step of Brokey's own before the first runs, and a HOLD of something
+  that is not there refuses the whole plan. Items that have gone since the
+  scan (with a parent or with the uninstaller) are left out when the clear
+  is planned; what cannot be read is kept in for the closed list to judge.
+  User and machine items share one holding id, and after a forced removal
+  of an MSI product `MSI_UNREGISTER` exports its registration into that same
+  entry.
+- **Waiting (§2).** `AWAIT_GONE` looks at the uninstall key every 2 seconds
+  (`internal::AWAIT_POLL`). A package with no uninstall key (a package
+  manager's own removal, an MSIX package) has nothing to wait for and goes
+  straight on. "It has finished" with the key still there ends the plan
+  with "The uninstaller did not remove <name>. It may have been cancelled.
+  Forced removal clears it without the uninstaller.", and no scan is made.
+- **The scan reads every source's installed list afresh**, not the window's
+  store, which was read before the uninstaller ran and would still list the
+  application, making its every file a claim. A source whose list cannot be
+  read adds one to "could not look in N places".
+- **The self-elevating uninstaller (§10)** is asked of the closed list twice:
+  by the planner, which rewrites only an Add/Remove root step refused with
+  the "program this account can replace" sentence, and again by `SHELL_OPEN`
+  immediately before it starts, which starts nothing for any other answer.
+  An uninstaller that ends with a non-zero code is a note, not a failure:
+  the uninstall key, looked at by the next step, decides.
+- **Restoring, emptying and the 30-day machine empty** are steps labelled
+  with the Add/Remove source, which only chooses a badge. A plan that
+  elevates for any reason gets a root `EMPTY` for each waiting machine
+  entry it does not already restore or empty; a plan that does not elevate
+  never gets one.
+- **Steam.** A Steam game's step starts `steam.exe steam://uninstall/<id>`
+  as the user. When Steam is already running that process hands the
+  address on and exits; when it is not, the process *is* the Steam client
+  and the step lasts until Steam is closed. Left as it is, said here, for a
+  later look.

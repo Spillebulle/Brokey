@@ -46,9 +46,10 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcessToken, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Shell::{
-    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    ShellExecuteExW,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 
 use super::Elevated;
 
@@ -513,9 +514,120 @@ pub fn start(helper: &Path, wrapper: &[String]) -> io::Result<Elevated> {
     })
 }
 
+/// One argument as `CommandLineToArgvW` will read it back: quoted when it
+/// has a space, a tab or a quote or is empty, with each quote and the
+/// backslashes before a quote or before the closing quote doubled.
+fn quote_argument(arg: &str) -> String {
+    if !arg.is_empty() && !arg.contains([' ', '\t', '"']) {
+        return arg.to_string();
+    }
+    let mut out = String::from("\"");
+    let mut backslashes = 0usize;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.push_str(&"\\".repeat(backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.push_str(&"\\".repeat(backslashes));
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    out.push_str(&"\\".repeat(backslashes * 2));
+    out.push('"');
+    out
+}
+
+/// Start an uninstaller **as the user** and wait for it, for the one case
+/// spec §10 sanctions: an Add/Remove uninstaller the closed list refused
+/// because this account could replace its file. Brokey will not elevate
+/// such a file itself; started this way, with the `open` verb and never
+/// `runas`, it elevates itself through its own manifest if it wants to, so
+/// the prompt Windows shows names that file, exactly as when it is started
+/// from Settings. Brokey asks for nothing here.
+///
+/// It is reached only through `cleanup::internal`'s `SHELL_OPEN` step, which
+/// asks the closed list again first. It lives here so that every call to
+/// `ShellExecuteEx` in the workspace stays in one place to audit.
+///
+/// `Ok` is the exit code, or 0 when the shell handed the file on without a
+/// process to wait on; whether the uninstall happened is the next step's
+/// question, which looks at the uninstall key.
+pub fn shell_open(program: &Path, args: &[String]) -> Result<u32, String> {
+    let file_wide = wide_null(&program.to_string_lossy());
+    let verb_wide = wide_null("open");
+    let parameters = args
+        .iter()
+        .map(|a| quote_argument(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let parameters_wide = wide_null(&parameters);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: shell_execute_info_size(),
+        // `NOCLOSEPROCESS` to wait on it; `NOASYNC` because this runs on the
+        // runner's worker thread, which has no message pump; `FLAG_NO_UI` so
+        // a failure comes back as a sentence of ours.
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+        lpVerb: verb_wide.as_ptr(),
+        lpFile: file_wide.as_ptr(),
+        lpParameters: parameters_wide.as_ptr(),
+        nShow: SW_SHOWNORMAL,
+        ..Default::default()
+    };
+    // SAFETY: `info` is a fully initialised `SHELLEXECUTEINFOW` whose string
+    // pointers are all alive in the bindings above for the whole call.
+    let ok = unsafe { ShellExecuteExW(&mut info) };
+    if ok == 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(ERROR_CANCELLED as i32) {
+            return Err(format!(
+                "You did not allow {} to start, so nothing was removed. Remove it again and \
+                 choose Yes when Windows asks.",
+                program.display()
+            ));
+        }
+        return Err(format!(
+            "Windows could not start {} ({err}). Remove it again from Brokey, or from \
+             Settings, Apps.",
+            program.display()
+        ));
+    }
+    if info.hProcess.is_null() {
+        return Ok(0);
+    }
+    // SAFETY: `hProcess` is a process handle `ShellExecuteExW` opened for us
+    // because of `SEE_MASK_NOCLOSEPROCESS`, checked non-null above; this
+    // takes ownership of it so it is closed exactly once.
+    let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess as RawHandle) };
+    let mut inner = Inner { process };
+    match inner.wait() {
+        Ok(code) => Ok(code.unwrap_or(0) as u32),
+        Err(e) => Err(format!(
+            "Brokey could not wait for {} ({e}). Check whether it finished, then look in \
+             Installed.",
+            program.display()
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shell_argument_reads_back_as_itself() {
+        assert_eq!(quote_argument("plain"), "plain");
+        assert_eq!(quote_argument(""), "\"\"");
+        assert_eq!(quote_argument("two words"), "\"two words\"");
+        assert_eq!(quote_argument(r#"say "hi""#), r#""say \"hi\"""#);
+        assert_eq!(quote_argument(r"C:\a dir\"), r#""C:\a dir\\""#);
+        assert_eq!(quote_argument(r"C:\no\space\"), r"C:\no\space\");
+    }
 
     /// The client half of a run, without elevating anything: open both
     /// pipes in the order `accept` connects them, read one line of plan,

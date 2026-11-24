@@ -60,6 +60,17 @@ use crate::system::windows::owned_handle;
 #[cfg(windows)]
 use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
 
+/// How the refusal of a program this account could replace begins.
+pub const CAN_BE_REPLACED: &str = "The helper refused a program this account can replace: ";
+
+/// Whether a refusal is that one: the program's file, or a folder above it,
+/// is one this account can write. It is the only refusal of an Add/Remove
+/// uninstaller that the planner answers by starting it as the user, so that
+/// it elevates itself and Windows asks about that file.
+pub fn is_can_be_replaced(refusal: &str) -> bool {
+    refusal.starts_with(CAN_BE_REPLACED)
+}
+
 /// The facts the closed list cannot derive for itself, handed to it by the
 /// caller: the directories a package file (`pacman -U`, `dpkg -i`, `rpm -U`,
 /// a `.deb` given to `apt-get install`) may come from, and on Windows the
@@ -131,6 +142,8 @@ impl Allowed {
             .iter()
             .filter(|e| e.hive.needs_elevation())
             .filter_map(|e| crate::sources::windows::arp::removal_step(e, &msiexec))
+            // A Steam game is removed through Steam as the user, never here.
+            .filter(|step| step.needs_root)
             .map(|step| step.command)
             .collect();
         Allowed {
@@ -1313,10 +1326,15 @@ fn program_this_process_cannot_replace(program: &str) -> Result<(), String> {
 /// the program and what to do, and nothing of the permissions themselves:
 /// an access control list in an error message is nothing a reader can act
 /// on, and it tells anyone reading over their shoulder where to aim.
+///
+/// Its opening, [`CAN_BE_REPLACED`], is also how the planner knows an
+/// Add/Remove uninstaller was refused for this reason and nothing else, the
+/// one refusal it answers by letting the uninstaller elevate itself (see
+/// [`is_can_be_replaced`]).
 #[cfg(windows)]
 fn can_be_replaced(program: &str) -> String {
     format!(
-        "The helper refused a program this account can replace: {program}. Starting it as \
+        "{CAN_BE_REPLACED}{program}. Starting it as \
          Administrator would hand Administrator to whoever replaced it, so Brokey will not. \
          Install it somewhere only an administrator can write, under Program Files or \
          ProgramData, and try again."
