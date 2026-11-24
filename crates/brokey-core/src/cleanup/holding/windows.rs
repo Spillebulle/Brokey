@@ -484,60 +484,87 @@ fn is_link(key: &windows_registry::Key) -> bool {
     }
 }
 
-/// A subkey that must not be a link, opened or, with `create`, made.
-/// Made means made new: one that turns out to be there already, perhaps put
-/// there since it was looked for, is opened again as itself and asked.
+#[cfg(test)]
+type CreateHook = Option<Box<dyn Fn(&str)>>;
+
+#[cfg(test)]
+thread_local! {
+    /// A test's hook, called with a subkey's name once it was found missing
+    /// and before it is made: where a link would have to be planted.
+    static BEFORE_CREATE: std::cell::RefCell<CreateHook> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A subkey that must not be a link, opened or, with `create`, made, and
+/// whether it was made new. Both the open and the create take a link at
+/// that name as the link itself (`REG_OPTION_OPEN_LINK`), never what it
+/// leads to, so a link planted between the two is opened, asked, and
+/// refused; and what comes back is asked whatever the create says it did.
 fn child_unlinked(
     parent: &windows_registry::Key,
     name: &str,
     access: u32,
     create: bool,
     location: &str,
-) -> Done<windows_registry::Key> {
-    for _ in 0..3 {
-        match open_child(parent, name, access, false) {
-            Ok(key) if is_link(&key) => return Err(link_failure(location)),
-            Ok(key) => return Ok(key),
-            Err(code) if !create || code != ERROR_FILE_NOT_FOUND => {
-                return Err(win32_failure(location, code));
-            }
-            Err(_) => {}
-        }
-        let wide = wide_str(name);
-        let mut handle: HKEY = ptr::null_mut();
-        let mut disposition = 0u32;
-        // SAFETY: as `open_child`; `disposition` is an out parameter.
-        let code = unsafe {
-            RegCreateKeyExW(
-                parent.as_raw() as HKEY,
-                wide.as_ptr(),
-                0,
-                ptr::null(),
-                REG_OPTION_NON_VOLATILE,
-                access | KEY_QUERY_VALUE | KEY_WOW64_64KEY,
-                ptr::null(),
-                &mut handle,
-                &mut disposition,
-            )
-        };
-        if code != ERROR_SUCCESS {
+) -> Done<(windows_registry::Key, bool)> {
+    match open_child(parent, name, access, false) {
+        Ok(key) if is_link(&key) => return Err(link_failure(location)),
+        Ok(key) => return Ok((key, false)),
+        Err(code) if !create || code != ERROR_FILE_NOT_FOUND => {
             return Err(win32_failure(location, code));
         }
-        // SAFETY: a key handle just opened, owned by nothing else.
-        let key = unsafe { windows_registry::Key::from_raw(handle as _) };
-        if disposition == REG_CREATED_NEW_KEY {
-            return Ok(key);
-        }
-        // It was there after all, and was opened through whatever it is:
-        // let it go and open it as itself.
+        Err(_) => {}
     }
-    Err(link_failure(location))
+    #[cfg(test)]
+    BEFORE_CREATE.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook(name);
+        }
+    });
+    let wide = wide_str(name);
+    let mut handle: HKEY = ptr::null_mut();
+    let mut disposition = 0u32;
+    // SAFETY: as `open_child`; `disposition` is an out parameter.
+    let code = unsafe {
+        RegCreateKeyExW(
+            parent.as_raw() as HKEY,
+            wide.as_ptr(),
+            0,
+            ptr::null(),
+            REG_OPTION_NON_VOLATILE | REG_OPTION_OPEN_LINK,
+            access | KEY_QUERY_VALUE | KEY_WOW64_64KEY,
+            ptr::null(),
+            &mut handle,
+            &mut disposition,
+        )
+    };
+    if code != ERROR_SUCCESS {
+        return Err(win32_failure(location, code));
+    }
+    // SAFETY: a key handle just opened, owned by nothing else.
+    let key = unsafe { windows_registry::Key::from_raw(handle as _) };
+    if is_link(&key) {
+        return Err(link_failure(location));
+    }
+    Ok((key, disposition == REG_CREATED_NEW_KEY))
 }
 
 /// `hive\path`, each part opened relative to the one before and as itself,
 /// a link at any part refusing it; with `create`, the parts that are
 /// missing are made one at a time.
 fn walk(hive: Hive, path: &str, access: u32, create: bool) -> Done<windows_registry::Key> {
+    walk_made(hive, path, access, create).map(|(key, _)| key)
+}
+
+/// As [`walk`], and whether the key itself, the last part, was made new by
+/// this walk: only a key made here may be deleted again when what was to
+/// be written in it fails.
+fn walk_made(
+    hive: Hive,
+    path: &str,
+    access: u32,
+    create: bool,
+) -> Done<(windows_registry::Key, bool)> {
     let location = format!(r"{}\{path}", hive_word(hive));
     let (root, sub) = root_of(hive, path);
     let base = if hive == Hive::Hkcu {
@@ -552,6 +579,7 @@ fn walk(hive: Hive, path: &str, access: u32, create: bool) -> Done<windows_regis
         )));
     }
     let mut current: Option<windows_registry::Key> = None;
+    let mut made = false;
     let mut so_far = String::new();
     for (i, part) in parts.iter().enumerate() {
         if !so_far.is_empty() {
@@ -569,14 +597,17 @@ fn walk(hive: Hive, path: &str, access: u32, create: bool) -> Done<windows_regis
         let windows_link = LINKS_WINDOWS_KEEPS
             .iter()
             .any(|(h, p)| *h == base && p.eq_ignore_ascii_case(&so_far));
-        let key = if windows_link {
-            open_child(parent, part, want, true).map_err(|code| win32_failure(&location, code))?
+        let (key, new) = if windows_link {
+            let key = open_child(parent, part, want, true)
+                .map_err(|code| win32_failure(&location, code))?;
+            (key, false)
         } else {
             child_unlinked(parent, part, want, create, &location)?
         };
         current = Some(key);
+        made = new;
     }
-    Ok(current.expect("a path with parts"))
+    Ok((current.expect("a path with parts"), made))
 }
 
 fn open(hive: Hive, path: &str, write: bool) -> Done<windows_registry::Key> {
@@ -628,7 +659,7 @@ fn read_node(key: &windows_registry::Key, location: &str) -> Done<KeyNode> {
         .map_err(|e| registry_failure(location, e))?
         .collect();
     for name in names {
-        let sub = child_unlinked(key, &name, KEY_READ, false, location)?;
+        let (sub, _) = child_unlinked(key, &name, KEY_READ, false, location)?;
         node.subkeys.push((name, read_node(&sub, location)?));
     }
     Ok(node)
@@ -650,7 +681,7 @@ fn write_node(
             .map_err(|e| registry_failure(location, e))?;
     }
     for (name, sub) in &node.subkeys {
-        let child = child_unlinked(key, name, KEY_READ | KEY_WRITE, true, location)?;
+        let (child, _) = child_unlinked(key, name, KEY_READ | KEY_WRITE, true, location)?;
         write_node(&child, sub, merge, location)?;
     }
     Ok(())
@@ -665,7 +696,7 @@ fn delete_tree(key: &windows_registry::Key, location: &str) -> Done<()> {
         .map_err(|e| registry_failure(location, e))?
         .collect();
     for name in names {
-        let child = child_unlinked(key, &name, KEY_READ | KEY_DELETE, false, location)?;
+        let (child, _) = child_unlinked(key, &name, KEY_READ | KEY_DELETE, false, location)?;
         delete_tree(&child, location)?;
     }
     // SAFETY: an open key with DELETE access; it is closed when `key` goes.
@@ -709,7 +740,12 @@ fn restore_key(hive: Hive, path: &str, node: &KeyNode, merge: bool) -> Done<()> 
         Err(Failure::Missing) => {}
         Err(f) => return Err(f),
     }
-    let key = walk(hive, path, KEY_READ | KEY_WRITE | KEY_DELETE, true)?;
+    let (key, made) = walk_made(hive, path, KEY_READ | KEY_WRITE | KEY_DELETE, true)?;
+    if !made {
+        // Missing a moment ago and there now: someone else's, never written
+        // into, and never deleted should the write fail.
+        return Err(Failure::Occupied);
+    }
     write_node(&key, node, false, &location).inspect_err(|_| {
         // Half a key that was not there before is worse than none: take
         // back what was written.
@@ -1611,6 +1647,71 @@ pub(crate) mod tests {
         assert!(windows_registry::CURRENT_USER.open(&target).is_ok());
     }
 
+    /// A link planted at a key's name after it was found missing and
+    /// before it is made, leading to a key that is not there: the create
+    /// opens the link as itself and refuses it, nothing is made where it
+    /// leads, and the link, which is not Brokey's, is not deleted. For the
+    /// key a restore puts back and for a subkey inside it alike.
+    #[test]
+    fn a_registry_link_planted_between_the_look_and_the_create_is_refused() {
+        for (leaf, planted_at) in [("Gone", "Gone"), ("Fresh", "Sub")] {
+            let key = TestKey::new(&format!("planted-{leaf}"));
+            windows_registry::CURRENT_USER.create(&key.0).unwrap();
+            let base = key.0.clone();
+            let restored_key = format!(r"{base}\{leaf}");
+            let link = if planted_at == leaf {
+                restored_key.clone()
+            } else {
+                format!(r"{restored_key}\{planted_at}")
+            };
+            let target = format!(r"{base}\Target");
+            // The link goes before the test key, whatever happens: removing
+            // the key by name would go through it.
+            struct Planted(String);
+            impl Drop for Planted {
+                fn drop(&mut self) {
+                    remove_link(&self.0);
+                }
+            }
+            let _planted = Planted(link.clone());
+            let (hook_link, hook_target) = (link.clone(), target.clone());
+            BEFORE_CREATE.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move |name: &str| {
+                    if hook_link.ends_with(&format!(r"\{name}")) {
+                        make_link(&hook_link, &hook_target);
+                    }
+                }));
+            });
+            let node = KeyNode {
+                values: vec![("Own".into(), value(REG_DWORD, &7u32.to_le_bytes()))],
+                subkeys: vec![(
+                    "Sub".into(),
+                    KeyNode {
+                        values: vec![("Inner".into(), value(REG_DWORD, &8u32.to_le_bytes()))],
+                        subkeys: vec![],
+                    },
+                )],
+            };
+            let mut m = LiveMutate::new(PathBuf::from(r"C:\nowhere"));
+            let restored = m.restore_key(Hive::Hkcu, &restored_key, &node, false);
+            BEFORE_CREATE.with(|hook| *hook.borrow_mut() = None);
+
+            assert!(
+                matches!(&restored, Err(Failure::Failed(s)) if s.contains("registry link")),
+                "{leaf}: {restored:?}"
+            );
+            assert!(
+                windows_registry::CURRENT_USER.open(&target).is_err(),
+                "nothing was made where the link leads ({leaf})"
+            );
+            let (parent, name) = link.rsplit_once('\\').unwrap();
+            let parent = windows_registry::CURRENT_USER.open(parent).unwrap();
+            let planted =
+                open_child(&parent, name, KEY_READ, false).expect("the link is still there");
+            assert!(is_link(&planted), "{leaf}");
+        }
+    }
+
     /// The two links Windows keeps on these paths are followed.
     #[test]
     fn the_links_windows_keeps_are_followed() {
@@ -2147,7 +2248,7 @@ pub(crate) mod tests {
     #[test]
     fn a_folder_above_an_item_cannot_be_swapped_while_it_moves() {
         static TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        fn try_to_swap(item: &Path) {
+        fn try_to_swap(item: &Path, _: &Path) {
             TRIED.store(true, std::sync::atomic::Ordering::SeqCst);
             let parent = item.parent().unwrap();
             let away = parent.with_file_name("swapped-away");
@@ -2180,6 +2281,125 @@ pub(crate) mod tests {
         );
         assert!(app.parent().unwrap().is_dir());
         assert!(!temp.path().join("swapped-away").exists());
+    }
+
+    /// Turn an empty folder into a junction to `target` where it stands,
+    /// as anyone who may write its attributes can, whoever holds it open.
+    fn junction_in_place(dir: &Path, target: &Path) -> std::io::Result<()> {
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+            OPEN_EXISTING,
+        };
+        use windows_sys::Win32::System::IO::DeviceIoControl;
+        use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+        use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
+        let substitute: Vec<u16> = format!(r"\??\{}\", target.display())
+            .encode_utf16()
+            .collect();
+        let mut path_buffer = substitute.clone();
+        path_buffer.extend([0u16, 0u16]);
+        let mut data: Vec<u8> = Vec::new();
+        data.extend(IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+        data.extend(((8 + path_buffer.len() * 2) as u16).to_le_bytes());
+        data.extend(0u16.to_le_bytes());
+        data.extend(0u16.to_le_bytes());
+        data.extend(((substitute.len() * 2) as u16).to_le_bytes());
+        data.extend(((substitute.len() * 2 + 2) as u16).to_le_bytes());
+        data.extend(0u16.to_le_bytes());
+        for unit in path_buffer {
+            data.extend(unit.to_le_bytes());
+        }
+        let name = wide(long_path(dir));
+        // SAFETY: a NUL-terminated name; no security attributes or template.
+        let raw = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                FILE_WRITE_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                ptr::null_mut(),
+            )
+        };
+        let handle =
+            crate::system::windows::owned_handle(raw).ok_or_else(std::io::Error::last_os_error)?;
+        let mut returned = 0u32;
+        // SAFETY: an open handle, an input buffer of the length given and
+        // no output.
+        let ok = unsafe {
+            DeviceIoControl(
+                std::os::windows::io::AsRawHandle::as_raw_handle(&handle) as _,
+                FSCTL_SET_REPARSE_POINT,
+                data.as_ptr().cast(),
+                data.len() as u32,
+                ptr::null_mut(),
+                0,
+                &mut returned,
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// The folder a restore has just made to put an item back in, turned
+    /// into a junction in place after it was made and checked and before
+    /// the item moves into it: the step is refused, nothing reaches the
+    /// junction's target and the item is still held, by a rename and by a
+    /// copy across drives alike.
+    #[test]
+    fn a_folder_made_for_a_restore_and_turned_into_a_junction_is_refused() {
+        static ELSEWHERE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+        static TURNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        fn turn(_: &Path, to: &Path) {
+            let target = ELSEWHERE.lock().unwrap().clone().unwrap();
+            let dir = to.parent().unwrap();
+            if !TURNED.load(std::sync::atomic::Ordering::SeqCst) {
+                junction_in_place(dir, &target).expect("the folder could be turned while held");
+                TURNED.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        for force_copy in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut m = LiveMutate {
+                force_copy,
+                ..LiveMutate::new(temp.path().join("machine"))
+            };
+            let app = held_app(temp.path(), &mut m);
+            let elsewhere = temp.path().join("elsewhere");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            *ELSEWHERE.lock().unwrap() = Some(elsewhere.clone());
+            TURNED.store(false, std::sync::atomic::Ordering::SeqCst);
+            // The folder above it is gone, so the restore makes it.
+            std::fs::remove_dir(app.parent().unwrap()).unwrap();
+
+            m.between = Some(turn);
+            let report = restore(&temp.path().join("holding"), "bound-1", &mut m);
+            m.between = None;
+            assert!(
+                TURNED.load(std::sync::atomic::Ordering::SeqCst),
+                "{force_copy}"
+            );
+            assert_eq!(report.held, 0, "{force_copy}: {report:?}");
+            assert!(
+                report.failed[0].1.contains("leads somewhere other"),
+                "{force_copy}: {report:?}"
+            );
+            assert_eq!(
+                std::fs::read_dir(&elsewhere).unwrap().count(),
+                0,
+                "nothing reached the junction's target ({force_copy})"
+            );
+            // The junction goes, and the item, still held, comes back.
+            std::fs::remove_dir(app.parent().unwrap()).unwrap();
+            let report = restore(&temp.path().join("holding"), "bound-1", &mut m);
+            assert_eq!(report.failed, vec![], "{force_copy}");
+            assert_eq!(std::fs::read_to_string(app.join("a.dat")).unwrap(), "a");
+        }
     }
 
     /// A folder swapped for a junction after the closed list checked it, and
