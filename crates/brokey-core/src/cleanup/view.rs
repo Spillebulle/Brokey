@@ -152,4 +152,7 @@ pub trait SystemView {
     fn services(&self) -> Listed<Service>;
     fn tasks(&self) -> Listed<ScheduledTask>;
     fn firewall_rules(&self) -> Listed<FirewallRule>;
+    /// A small text file's contents, such as Steam's library list. `None`
+    /// when it is not there, cannot be read or is too large to be one.
+    fn read_text(&self, path: &Path) -> Option<String>;
 }

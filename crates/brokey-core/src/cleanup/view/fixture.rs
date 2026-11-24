@@ -34,6 +34,8 @@ struct Snapshot {
     registry: HashMap<Hive, HashMap<String, Key>>,
     /// Shortcut path to target.
     shortcuts: HashMap<String, String>,
+    /// Text file path to its contents.
+    files: HashMap<String, String>,
     services: Vec<Service>,
     tasks: Vec<ScheduledTask>,
     firewall: Vec<FirewallRule>,
@@ -49,6 +51,7 @@ pub struct FixtureView {
     sizes: HashMap<String, u64>,
     registry: HashMap<(Hive, String), Key>,
     shortcuts: HashMap<String, String>,
+    files: HashMap<String, String>,
     services: Vec<Service>,
     tasks: Vec<ScheduledTask>,
     firewall: Vec<FirewallRule>,
@@ -103,6 +106,11 @@ impl FixtureView {
                 .shortcuts
                 .iter()
                 .map(|(l, t)| (norm(l), t.clone()))
+                .collect(),
+            files: snap
+                .files
+                .iter()
+                .map(|(p, t)| (norm(p), t.clone()))
                 .collect(),
             services: snap.services,
             tasks: snap.tasks,
@@ -217,6 +225,10 @@ impl SystemView for FixtureView {
             items: self.firewall.clone(),
             unreadable: self.unreadable_counts[2],
         }
+    }
+
+    fn read_text(&self, path: &Path) -> Option<String> {
+        self.files.get(&norm_path(path)).cloned()
     }
 }
 

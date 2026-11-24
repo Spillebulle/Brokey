@@ -5,6 +5,7 @@
 //!
 //! Everything here reads the machine and changes nothing.
 
+use super::steam::{self, Read};
 use super::view::Hive;
 use crate::Store;
 use crate::model::{Package, PackageRef, SourceKind};
@@ -44,8 +45,41 @@ fn non_empty(text: &Option<String>) -> Option<String> {
 }
 
 /// The hints an Add/Remove Programs entry gives. `shortcuts` are the Start
-/// Menu shortcuts already found for it; see [`shortcuts_into`].
-pub fn from_arp(entry: &RawEntry, shortcuts: Vec<PathBuf>) -> Hints {
+/// Menu shortcuts already found for it; see [`shortcuts_into`]. `read` reads
+/// Steam's own files, for an entry that is a Steam game; see [`steam`].
+pub fn from_arp(entry: &RawEntry, shortcuts: Vec<PathBuf>, read: Read) -> Hints {
+    let mut hints = arp_hints(entry, shortcuts);
+    if let Some(id) = steam::app_id(&entry.key_name) {
+        // The uninstaller's folder is Steam's, and its icon is in Steam's
+        // folder too: neither is the game's. The manifest says where the
+        // game is; without it, only an `InstallLocation` can.
+        let steam_dir = hints.install_dir.take();
+        let game = steam_dir
+            .as_ref()
+            .and_then(|steam| steam::game(&steam.to_string_lossy(), id, read));
+        hints.icon_dir = None;
+        // An `InstallLocation` that is Steam's folder, or holds it, is no
+        // more the game's than the uninstaller's folder is.
+        if let (Some(steam), Some(location)) = (&steam_dir, &hints.install_location) {
+            let (steam, location) = (steam.to_string_lossy(), location.to_string_lossy());
+            if shortcut::normalise(&steam) == shortcut::normalise(&location)
+                || shortcut::inside(&steam, &location)
+            {
+                hints.install_location = None;
+            }
+        }
+        match game {
+            Some(game) => {
+                hints.install_dir = Some(game.folder);
+                hints.extra_dirs = game.by_id;
+            }
+            None => hints.install_dir = hints.install_location.clone(),
+        }
+    }
+    hints
+}
+
+fn arp_hints(entry: &RawEntry, shortcuts: Vec<PathBuf>) -> Hints {
     // A GUID names a product only when the Windows Installer says it owns it;
     // driver packages are keyed by a GUID and are not MSI products.
     let product_code = (entry.windows_installer == Some(1))
@@ -77,12 +111,18 @@ pub fn from_arp(entry: &RawEntry, shortcuts: Vec<PathBuf>) -> Hints {
 
 /// The folders whose shortcuts belong to this application: the directory the
 /// launcher searches, when it is narrow enough to say which application a
-/// shortcut belongs to.
-fn shortcut_dirs(entry: &RawEntry) -> Vec<String> {
-    shortcut::search_dir(entry)
-        .filter(|d| shortcut::specific(d))
-        .into_iter()
-        .collect()
+/// shortcut belongs to. For a Steam game that would be Steam's folder, and a
+/// shortcut to `steam.exe` is Steam's; its own folder is the game's.
+fn shortcut_dirs(entry: &RawEntry, hints: &Hints) -> Vec<String> {
+    let dir = if steam::app_id(&entry.key_name).is_some() {
+        hints
+            .install_dir
+            .as_ref()
+            .map(|d| d.to_string_lossy().into_owned())
+    } else {
+        shortcut::search_dir(entry)
+    };
+    dir.filter(|d| shortcut::specific(d)).into_iter().collect()
 }
 
 /// The shortcuts among `all` that start something inside one of `dirs`.
@@ -113,12 +153,13 @@ pub fn start_menu() -> Vec<shortcut::Shortcut> {
     Vec::new()
 }
 
-/// [`Store::leftover_hints`] with the Start Menu shortcuts handed in, so a
-/// test needs no Start Menu.
+/// [`Store::leftover_hints`] with the Start Menu shortcuts and the file
+/// reader handed in, so a test needs no Start Menu and no Steam.
 pub fn for_package(
     store: &Store,
     package: &PackageRef,
     start_menu: &[shortcut::Shortcut],
+    read: Read,
 ) -> Option<Hints> {
     let source = store.source(package.source)?;
     let entry_of = |key: &str| {
@@ -129,8 +170,9 @@ pub fn for_package(
     match package.source {
         SourceKind::Arp => {
             let entry = source.add_remove_entry(&package.id)?;
-            let dirs = shortcut_dirs(&entry);
-            Some(from_arp(&entry, shortcuts_into(start_menu, &dirs)))
+            let mut hints = from_arp(&entry, Vec::new(), read);
+            hints.shortcuts = shortcuts_into(start_menu, &shortcut_dirs(&entry, &hints));
+            Some(hints)
         }
         SourceKind::Winget | SourceKind::Choco | SourceKind::Scoop | SourceKind::Github => {
             let installed: Package = source
@@ -148,8 +190,9 @@ pub fn for_package(
                 extra_dirs.iter().map(|d| d.display().to_string()).collect();
             let mut hints = match &entry {
                 Some(entry) => {
-                    dirs.extend(shortcut_dirs(entry));
-                    from_arp(entry, Vec::new())
+                    let hints = from_arp(entry, Vec::new(), read);
+                    dirs.extend(shortcut_dirs(entry, &hints));
+                    hints
                 }
                 None => blank(package, String::new()),
             };
@@ -159,7 +202,7 @@ pub fn for_package(
             }
             hints.publisher = non_empty(&installed.developer).or(hints.publisher);
             hints.shortcuts = shortcuts_into(start_menu, &dirs);
-            hints.extra_dirs = extra_dirs;
+            hints.extra_dirs.extend(extra_dirs);
             Some(hints)
         }
         // An MSIX package has no uninstall key and no install folder of its
@@ -220,7 +263,7 @@ mod tests {
     #[test]
     fn from_arp_takes_the_derived_install_dir_and_product_code() {
         let entry = named(&fixture(), "{6f320b93-ee3c-4826-85e0-000000000002}");
-        let hints = from_arp(&entry, Vec::new());
+        let hints = from_arp(&entry, Vec::new(), &no_files);
         assert_eq!(
             hints.product_code.as_deref(),
             Some("{6f320b93-ee3c-4826-85e0-000000000002}")
@@ -245,13 +288,13 @@ mod tests {
     #[test]
     fn a_guid_the_windows_installer_does_not_own_is_not_a_product_code() {
         let entry = named(&fixture(), "{ca4f4d7f-6b8b-4f8d-9d2f-000000000001}");
-        assert_eq!(from_arp(&entry, Vec::new()).product_code, None);
+        assert_eq!(from_arp(&entry, Vec::new(), &no_files).product_code, None);
     }
 
     #[test]
     fn from_arp_on_an_unquoted_steam_path_finds_the_steam_folder() {
         let entry = named(&fixture(), "Steam");
-        let hints = from_arp(&entry, Vec::new());
+        let hints = from_arp(&entry, Vec::new(), &no_files);
         assert_eq!(
             hints.install_dir,
             Some(PathBuf::from(r"C:\Program Files (x86)\Steam"))
@@ -260,11 +303,94 @@ mod tests {
         assert_eq!(hints.uninstall_key.map(|(h, _)| h), Some(Hive::Hklm32));
     }
 
+    fn no_files(_: &std::path::Path) -> Option<String> {
+        None
+    }
+
+    fn steam_library() -> crate::cleanup::view::FixtureView {
+        crate::cleanup::view::FixtureView::load(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/cleanup/steam-library.json"
+        )))
+    }
+
+    /// A Steam game's entry as Steam writes it.
+    fn steam_app(id: &str, name: &str, install_location: &str) -> RawEntry {
+        serde_json::from_value(serde_json::json!({
+            "hive": "machine",
+            "key_name": format!("Steam App {id}"),
+            "display_name": name,
+            "publisher": "Valve",
+            "install_location": install_location,
+            "uninstall_string": format!(
+                r#""C:\Program Files (x86)\Steam\steam.exe" steam://uninstall/{id}"#
+            ),
+            "display_icon": r"C:\Program Files (x86)\Steam\steam\games\d841.ico",
+        }))
+        .expect("an entry")
+    }
+
+    #[test]
+    fn a_steam_game_takes_its_folder_from_its_manifest_and_never_steams() {
+        use crate::cleanup::view::SystemView;
+        let view = steam_library();
+        let read = |p: &std::path::Path| view.read_text(p);
+        let hints = from_arp(&steam_app("1422450", "Deadlock", ""), Vec::new(), &read);
+        assert_eq!(
+            hints.install_dir,
+            Some(PathBuf::from(r"D:\SteamLibrary\steamapps\common\Deadlock"))
+        );
+        assert_eq!(hints.install_location, None);
+        assert_eq!(
+            hints.extra_dirs,
+            vec![
+                PathBuf::from(r"D:\SteamLibrary\steamapps\shadercache\1422450"),
+                PathBuf::from(r"D:\SteamLibrary\steamapps\workshop\content\1422450"),
+            ]
+        );
+        // The icon Steam gave it is in Steam's folder, which is not the game's.
+        assert_eq!(hints.icon_dir, None);
+    }
+
+    #[test]
+    fn a_steam_game_without_a_manifest_has_no_folder_rather_than_steams() {
+        let hints = from_arp(&steam_app("1422450", "Deadlock", ""), Vec::new(), &no_files);
+        assert_eq!(hints.install_dir, None);
+        assert!(hints.extra_dirs.is_empty());
+        // An `InstallLocation`, when Steam wrote one, is the game's.
+        let common = r"D:\SteamLibrary\steamapps\common\Deadlock";
+        let hints = from_arp(
+            &steam_app("1422450", "Deadlock", common),
+            Vec::new(),
+            &no_files,
+        );
+        assert_eq!(hints.install_dir, Some(PathBuf::from(common)));
+        // One that is Steam's own folder, or holds it, is not.
+        for steams in [r"C:\Program Files (x86)\Steam\", r"C:\Program Files (x86)"] {
+            let entry = steam_app("1422450", "Deadlock", steams);
+            let hints = from_arp(&entry, Vec::new(), &no_files);
+            assert_eq!(hints.install_dir, None, "{steams}");
+            assert_eq!(hints.install_location, None, "{steams}");
+        }
+    }
+
+    #[test]
+    fn steam_itself_keeps_its_own_folder() {
+        use crate::cleanup::view::SystemView;
+        let view = steam_library();
+        let read = |p: &std::path::Path| view.read_text(p);
+        let entry = named(&fixture(), "Steam");
+        assert_eq!(
+            from_arp(&entry, Vec::new(), &read).install_dir,
+            Some(PathBuf::from(r"C:\Program Files (x86)\Steam"))
+        );
+    }
+
     #[test]
     fn the_icon_folder_is_where_display_icon_points() {
         let entry = named(&fixture(), "Obsidian");
         assert_eq!(
-            from_arp(&entry, Vec::new()).icon_dir,
+            from_arp(&entry, Vec::new(), &no_files).icon_dir,
             Some(PathBuf::from(r"C:\Program Files\Obsidian"))
         );
     }
@@ -375,7 +501,7 @@ mod tests {
             r"C:\Menu\Notepad++.lnk",
             r"C:\Program Files (x86)\Notepad++\notepad++.exe",
         )];
-        let hints = for_package(&store, &reference, &menu).expect("hints");
+        let hints = for_package(&store, &reference, &menu, &no_files).expect("hints");
         assert_eq!(hints.package, reference);
         assert_eq!(
             hints.uninstall_key,
@@ -407,7 +533,7 @@ mod tests {
             source: SourceKind::Scoop,
             id: "ripgrep".to_string(),
         };
-        let hints = for_package(&store, &reference, &[]).expect("hints");
+        let hints = for_package(&store, &reference, &[], &no_files).expect("hints");
         assert_eq!(hints.uninstall_key, None);
         assert_eq!(hints.extra_dirs, vec![folder]);
     }
@@ -419,7 +545,7 @@ mod tests {
             source: SourceKind::Arp,
             id: r"HKLM\Nothing".to_string(),
         };
-        assert_eq!(for_package(&store, &reference, &[]), None);
+        assert_eq!(for_package(&store, &reference, &[], &no_files), None);
     }
 
     #[test]
@@ -429,6 +555,6 @@ mod tests {
             source: SourceKind::Pacman,
             id: "steam".to_string(),
         };
-        assert_eq!(for_package(&store, &reference, &[]), None);
+        assert_eq!(for_package(&store, &reference, &[], &no_files), None);
     }
 }

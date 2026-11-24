@@ -439,6 +439,10 @@ impl SystemView for LiveView {
         }
         out
     }
+
+    fn read_text(&self, path: &Path) -> Option<String> {
+        crate::cleanup::steam::read_file(path)
+    }
 }
 
 #[cfg(test)]

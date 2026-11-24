@@ -8,4 +8,5 @@ pub mod hints;
 pub mod holding;
 pub mod internal;
 pub mod scan;
+pub mod steam;
 pub mod view;

@@ -20,6 +20,7 @@
 
 use super::hints::Hints;
 use super::scan::{self, CLASSES, Candidate, SHELL_CLASSES, Scanned, UNINSTALL};
+use super::steam;
 use super::view::{Hive, Known, Reparse, SystemView, ViewError};
 use crate::model::{Confidence, Findings, ItemKind, KeptItem, LeftoverItem, Package, SourceKind};
 use crate::sources::windows::arp::{self, RawEntry};
@@ -323,6 +324,49 @@ impl<'a> Gather<'a> {
         }
     }
 
+    /// The folders an Add/Remove entry claims as its own. Its uninstaller's
+    /// folder is one only when it is the entry's: a Steam game's uninstaller
+    /// is `steam.exe`, and a launcher's game names the launcher as its
+    /// uninstaller while its `InstallLocation` is elsewhere. Claiming the
+    /// launcher's folder for every such game would keep the launcher's
+    /// things for whichever game came first, and name it as their user.
+    fn homes_of(&self, entry: &RawEntry) -> Vec<String> {
+        let location = entry
+            .install_location
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string);
+        if let Some(id) = steam::app_id(&entry.key_name) {
+            let read = |p: &Path| self.view.read_text(p);
+            let steam_dir = arp::install_dir(entry).map(|d| d.to_string_lossy().into_owned());
+            let game = steam_dir
+                .as_deref()
+                .and_then(|steam| steam::game(steam, id, &read));
+            // Steam's folder, or one holding it, is not the game's either.
+            let location = location.filter(|l| {
+                steam_dir.as_deref().is_none_or(|steam| {
+                    shortcut::normalise(steam) != shortcut::normalise(l)
+                        && !shortcut::inside(steam, l)
+                })
+            });
+            return game
+                .into_iter()
+                .flat_map(|g| std::iter::once(g.folder).chain(g.by_id))
+                .map(|p| p.to_string_lossy().into_owned())
+                .chain(location)
+                .collect();
+        }
+        let uninstaller = arp::install_dir(entry)
+            .map(|d| d.to_string_lossy().into_owned())
+            .filter(|dir| {
+                location.as_deref().is_none_or(|l| {
+                    shortcut::normalise(dir) == shortcut::normalise(l) || shortcut::inside(dir, l)
+                })
+            });
+        uninstaller.into_iter().chain(location).collect()
+    }
+
     /// Every other Add/Remove entry: its folder, its `InstallLocation` and
     /// its own key. Returns the names entries give MSI products, by packed
     /// code, for the components below.
@@ -357,11 +401,8 @@ impl<'a> Gather<'a> {
                 };
                 let entry = entry_from(hive, &key, &values);
                 let name = entry.display_name.clone().unwrap_or_else(|| key.clone());
-                if let Some(dir) = arp::install_dir(&entry) {
-                    self.path(&dir.to_string_lossy(), &name);
-                }
-                if let Some(location) = &entry.install_location {
-                    self.path(location, &name);
+                for home in self.homes_of(&entry) {
+                    self.path(&home, &name);
                 }
                 self.key(&format!(r"{}\{path}", scan::hive_word(hive)), &name);
                 if let Some(packed) = packed_product_code(&key) {
@@ -663,8 +704,16 @@ impl Claims {
                 .as_ref()
                 .map(|p| shortcut::normalise(&p.to_string_lossy())),
         );
+        // Who claims the place itself, or a folder around it, is its user;
+        // only then whoever claims something inside it. Steam's
+        // folder holds every game in its library, and is still Steam's.
         for at in places {
-            if let Some(claim) = self.claims.iter().find(|c| related(&at, &c.at)) {
+            let exact_or_around = self
+                .claims
+                .iter()
+                .find(|c| at == c.at || strictly_inside(&at, &c.at));
+            let within = || self.claims.iter().find(|c| strictly_inside(&c.at, &at));
+            if let Some(claim) = exact_or_around.or_else(within) {
                 return Some(claim.used_by.clone());
             }
         }
@@ -1991,6 +2040,164 @@ mod tests {
             rows,
             vec![(r"C:\Program Files\CPUID\HWMonitor", Confidence::Certain)]
         );
+    }
+
+    /// Deadlock's entry as Steam wrote it, read before the uninstall: no
+    /// `InstallLocation`, and an uninstaller that is Steam's.
+    fn deadlock(view: &FixtureView) -> Hints {
+        let entry = entry_from(
+            Hive::Hklm,
+            "Steam App 1422450",
+            &[
+                ("DisplayName".to_string(), "Deadlock".to_string()),
+                ("Publisher".to_string(), "Valve".to_string()),
+                ("InstallLocation".to_string(), String::new()),
+                (
+                    "UninstallString".to_string(),
+                    format!(r#""{X86}\Steam\steam.exe" steam://uninstall/1422450"#),
+                ),
+            ],
+        );
+        crate::cleanup::hints::from_arp(&entry, Vec::new(), &|p| view.read_text(p))
+    }
+
+    #[test]
+    fn a_steam_game_finds_its_own_folders_and_nothing_of_steam() {
+        let view = machine("steam-library");
+        let hints = deadlock(&view);
+        let scanned = scan(&hints, &view);
+        // Nothing of Steam's, nor of another game's, is found at all: not
+        // offered and not kept either.
+        for c in &scanned.candidates {
+            let at = c.location.to_lowercase();
+            assert!(
+                !at.contains(r"program files (x86)\steam")
+                    && !at.contains(r"classes\steam")
+                    && !at.contains("discord-")
+                    && !at.contains("portal 2")
+                    && at != "firewall:steam",
+                "{at}"
+            );
+        }
+        let (offered, kept) = guard(scanned.candidates, &claims(&view, &[], Some(&hints)), &view);
+        assert!(kept.is_empty(), "{kept:?}");
+        let rows: Vec<(&str, Confidence)> = offered
+            .iter()
+            .map(|c| (c.location.as_str(), c.confidence))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    r"D:\SteamLibrary\steamapps\common\Deadlock",
+                    Confidence::Certain
+                ),
+                (
+                    r"D:\SteamLibrary\steamapps\shadercache\1422450",
+                    Confidence::Certain
+                ),
+                (r"C:\Users\you\AppData\Local\Deadlock", Confidence::Likely),
+                ("firewall:Deadlock", Confidence::Certain),
+            ]
+        );
+    }
+
+    #[test]
+    fn steams_folder_is_claimed_by_steam_and_a_games_by_that_game() {
+        let view = machine("steam-library");
+        let hints = deadlock(&view);
+        let claims = claims(&view, &[], Some(&hints));
+        let (offered, kept) = guard(
+            vec![
+                folder(&format!(r"{X86}\Steam"), Confidence::Certain),
+                folder(
+                    &format!(r"{X86}\Steam\steamapps\common\Portal 2"),
+                    Confidence::Certain,
+                ),
+                folder(
+                    &format!(r"{X86}\Steam\steamapps\shadercache\620"),
+                    Confidence::Certain,
+                ),
+            ],
+            &claims,
+            &view,
+        );
+        assert!(offered.is_empty(), "{:?}", locations(&offered));
+        // Not Portal 2, whose uninstaller merely lives in Steam's folder.
+        assert_eq!(used_by(&kept, &format!(r"{X86}\Steam")), Some("Steam"));
+        assert_eq!(
+            used_by(&kept, &format!(r"{X86}\Steam\steamapps\common\Portal 2")),
+            Some("Portal 2")
+        );
+        assert_eq!(
+            used_by(&kept, &format!(r"{X86}\Steam\steamapps\shadercache\620")),
+            Some("Portal 2")
+        );
+    }
+
+    /// Three entries: a game whose uninstaller is its launcher's, an
+    /// application whose uninstaller is inside its `InstallLocation`, and one
+    /// with no `InstallLocation` at all.
+    const LAUNCHER: &str = r#"{
+      "folders": {
+        "ProgramFiles": "C:\\Program Files",
+        "ProgramFilesX86": "C:\\Program Files (x86)",
+        "ProgramData": "C:\\ProgramData",
+        "AppData": "C:\\Users\\you\\AppData\\Roaming",
+        "LocalAppData": "C:\\Users\\you\\AppData\\Local",
+        "LocalLow": "C:\\Users\\you\\AppData\\LocalLow",
+        "Documents": "C:\\Users\\you\\Documents",
+        "SavedGames": "C:\\Users\\you\\Saved Games",
+        "StartMenuMachine": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+        "StartMenuUser": "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+        "Desktop": "C:\\Users\\you\\Desktop",
+        "Windows": "C:\\Windows",
+        "Profile": "C:\\Users\\you"
+      },
+      "registry": { "Hklm32": {
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall": {
+          "subkeys": ["Uplay Install 5", "Chrome", "Widget"]
+        },
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Uplay Install 5": { "values": [
+          ["DisplayName", "Far Cry 3"],
+          ["InstallLocation", "D:\\Games\\Far Cry 3\\"],
+          ["UninstallString", "\"C:\\Program Files (x86)\\Ubisoft\\Ubisoft Game Launcher\\upc.exe\" uplay://uninstall/46"]
+        ] },
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Chrome": { "values": [
+          ["DisplayName", "Google Chrome"],
+          ["InstallLocation", "C:\\Program Files\\Google\\Chrome\\Application"],
+          ["UninstallString", "\"C:\\Program Files\\Google\\Chrome\\Application\\120.0\\Installer\\setup.exe\" --uninstall"]
+        ] },
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Widget": { "values": [
+          ["DisplayName", "Widget"],
+          ["UninstallString", "C:\\Program Files\\Widget\\unins000.exe"]
+        ] }
+      } }
+    }"#;
+
+    #[test]
+    fn an_uninstaller_in_a_launchers_folder_claims_the_game_and_not_the_launcher() {
+        let view = FixtureView::from_json(LAUNCHER);
+        let removing = blank_hints("Something Else", None);
+        let launcher = format!(r"{X86}\Ubisoft\Ubisoft Game Launcher");
+        let chrome_installer = format!(r"{PF}\Google\Chrome\Application\120.0\Installer");
+        let (offered, kept) = guard(
+            vec![
+                folder(&launcher, Confidence::Certain),
+                folder(r"D:\Games\Far Cry 3", Confidence::Certain),
+                folder(&chrome_installer, Confidence::Certain),
+                folder(&format!(r"{PF}\Widget"), Confidence::Certain),
+            ],
+            &claims(&view, &[], Some(&removing)),
+            &view,
+        );
+        // The launcher's folder is not the game's to claim.
+        assert_eq!(locations(&offered), vec![launcher]);
+        assert_eq!(used_by(&kept, r"D:\Games\Far Cry 3"), Some("Far Cry 3"));
+        // An uninstaller inside its own application's folder still claims.
+        assert_eq!(used_by(&kept, &chrome_installer), Some("Google Chrome"));
+        // So does one with no `InstallLocation` to say otherwise.
+        assert_eq!(used_by(&kept, &format!(r"{PF}\Widget")), Some("Widget"));
     }
 
     #[test]

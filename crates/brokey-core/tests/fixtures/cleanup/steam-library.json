@@ -1,0 +1,100 @@
+{
+  "folders": {
+    "ProgramFiles": "C:\\Program Files",
+    "ProgramFilesX86": "C:\\Program Files (x86)",
+    "ProgramData": "C:\\ProgramData",
+    "AppData": "C:\\Users\\you\\AppData\\Roaming",
+    "LocalAppData": "C:\\Users\\you\\AppData\\Local",
+    "LocalLow": "C:\\Users\\you\\AppData\\LocalLow",
+    "Documents": "C:\\Users\\you\\Documents",
+    "SavedGames": "C:\\Users\\you\\Saved Games",
+    "StartMenuMachine": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+    "StartMenuUser": "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+    "Desktop": "C:\\Users\\you\\Desktop",
+    "Windows": "C:\\Windows",
+    "Profile": "C:\\Users\\you"
+  },
+  "dirs": {
+    "C:\\Program Files (x86)": [{ "name": "Steam", "is_dir": true }],
+    "C:\\Program Files (x86)\\Steam": [
+      { "name": "steam.exe", "size": 4000000 },
+      { "name": "uninstall.exe", "size": 100000 },
+      { "name": "steamapps", "is_dir": true }
+    ],
+    "C:\\Program Files (x86)\\Steam\\steamapps": [
+      { "name": "libraryfolders.vdf", "size": 900 },
+      { "name": "appmanifest_620.acf", "size": 600 },
+      { "name": "common", "is_dir": true },
+      { "name": "shadercache", "is_dir": true }
+    ],
+    "C:\\Program Files (x86)\\Steam\\steamapps\\common": [{ "name": "Portal 2", "is_dir": true }],
+    "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Portal 2": [{ "name": "portal2.exe", "size": 9000 }],
+    "C:\\Program Files (x86)\\Steam\\steamapps\\shadercache": [{ "name": "620", "is_dir": true }],
+    "C:\\Program Files (x86)\\Steam\\steamapps\\shadercache\\620": [{ "name": "cache.bin", "size": 500 }],
+    "D:\\SteamLibrary": [{ "name": "steamapps", "is_dir": true }],
+    "D:\\SteamLibrary\\steamapps": [
+      { "name": "common", "is_dir": true },
+      { "name": "shadercache", "is_dir": true }
+    ],
+    "D:\\SteamLibrary\\steamapps\\common": [{ "name": "Deadlock", "is_dir": true }],
+    "D:\\SteamLibrary\\steamapps\\common\\Deadlock": [{ "name": "game", "is_dir": true }],
+    "D:\\SteamLibrary\\steamapps\\common\\Deadlock\\game": [{ "name": "user.cfg", "size": 2000 }],
+    "D:\\SteamLibrary\\steamapps\\shadercache": [{ "name": "1422450", "is_dir": true }],
+    "D:\\SteamLibrary\\steamapps\\shadercache\\1422450": [{ "name": "cache.bin", "size": 7000 }],
+    "C:\\Users\\you\\AppData\\Local": [{ "name": "Deadlock", "is_dir": true }],
+    "C:\\Users\\you\\AppData\\Local\\Deadlock": [{ "name": "crash.log", "size": 300 }]
+  },
+  "files": {
+    "C:\\Program Files (x86)\\Steam\\steamapps\\libraryfolders.vdf": "\"libraryfolders\"\n{\n\t\"0\"\n\t{\n\t\t\"path\"\t\t\"C:\\\\Program Files (x86)\\\\Steam\"\n\t\t\"apps\"\n\t\t{\n\t\t\t\"620\"\t\t\"12000\"\n\t\t}\n\t}\n\t\"1\"\n\t{\n\t\t\"path\"\t\t\"D:\\\\SteamLibrary\"\n\t\t\"apps\"\n\t\t{\n\t\t\t\"1422450\"\t\t\"39049299035\"\n\t\t}\n\t}\n}\n",
+    "C:\\Program Files (x86)\\Steam\\steamapps\\appmanifest_620.acf": "\"AppState\"\n{\n\t\"appid\"\t\t\"620\"\n\t\"name\"\t\t\"Portal 2\"\n\t\"installdir\"\t\t\"Portal 2\"\n}\n",
+    "D:\\SteamLibrary\\steamapps\\appmanifest_1422450.acf": "\"AppState\"\n{\n\t\"appid\"\t\t\"1422450\"\n\t\"name\"\t\t\"Deadlock\"\n\t\"installdir\"\t\t\"Deadlock\"\n}\n"
+  },
+  "registry": {
+    "Hklm": {
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall": {
+        "subkeys": ["Steam App 620"]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Steam App 620": {
+        "values": [
+          ["DisplayName", "Portal 2"],
+          ["Publisher", "Valve"],
+          ["InstallLocation", ""],
+          ["UninstallString", "\"C:\\Program Files (x86)\\Steam\\steam.exe\" steam://uninstall/620"]
+        ]
+      }
+    },
+    "Hklm32": {
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall": {
+        "subkeys": ["Steam"]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Steam": {
+        "values": [
+          ["DisplayName", "Steam"],
+          ["Publisher", "Valve Corporation"],
+          ["UninstallString", "C:\\Program Files (x86)\\Steam\\uninstall.exe"]
+        ]
+      }
+    },
+    "Hkcu": {
+      "Software": { "subkeys": ["Valve", "Classes"] },
+      "Software\\Valve": { "subkeys": ["Steam"] },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Run": {
+        "values": [["Steam", "\"C:\\Program Files (x86)\\Steam\\steam.exe\" -silent"]]
+      },
+      "Software\\Classes": { "subkeys": ["steam", "discord-1346069614634864772"] },
+      "Software\\Classes\\steam\\shell": { "subkeys": ["open"] },
+      "Software\\Classes\\steam\\shell\\open\\command": {
+        "values": [["", "\"C:\\Program Files (x86)\\Steam\\steam.exe\" -- \"%1\""]]
+      },
+      "Software\\Classes\\discord-1346069614634864772\\shell": { "subkeys": ["open"] },
+      "Software\\Classes\\discord-1346069614634864772\\shell\\open\\command": {
+        "values": [["", "\"C:\\Program Files (x86)\\Steam\\steam.exe\" steam://rungameid/1422450"]]
+      }
+    }
+  },
+  "firewall": [
+    { "name": "Deadlock", "program": "D:\\SteamLibrary\\steamapps\\common\\Deadlock\\game\\bin\\win64\\deadlock.exe" },
+    { "name": "Portal 2", "program": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Portal 2\\portal2.exe" },
+    { "name": "Steam", "program": "C:\\Program Files (x86)\\Steam\\steam.exe" }
+  ]
+}

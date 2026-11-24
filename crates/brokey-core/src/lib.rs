@@ -253,7 +253,12 @@ impl Store {
     /// What a leftover scan searches by, for an installed package; see
     /// [`cleanup::hints`].
     pub fn leftover_hints(&self, package: &PackageRef) -> Option<cleanup::hints::Hints> {
-        cleanup::hints::for_package(self, package, &cleanup::hints::start_menu())
+        cleanup::hints::for_package(
+            self,
+            package,
+            &cleanup::hints::start_menu(),
+            &cleanup::steam::read_file,
+        )
     }
 
     /// How to open an installed package, asked of its own source.
