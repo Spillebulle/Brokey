@@ -80,7 +80,7 @@ fn reparse_tag(path: &Path) -> Option<u32> {
 }
 
 /// The `\\?\` form of an absolute path, which lifts the 260 character limit.
-fn long_path(path: &Path) -> std::ffi::OsString {
+pub(crate) fn long_path(path: &Path) -> std::ffi::OsString {
     let text = path.as_os_str();
     let s = text.to_string_lossy();
     if s.starts_with(r"\\?\") || !path.is_absolute() {
@@ -146,7 +146,7 @@ fn open(hive: Hive, path: &str) -> Result<windows_registry::Key, ViewError> {
 }
 
 /// `Software\X` as 32-bit software sees it on a 64-bit machine.
-fn wow6432(path: &str) -> String {
+pub(crate) fn wow6432(path: &str) -> String {
     match path.split_once('\\') {
         Some((first, rest)) if first.eq_ignore_ascii_case("software") => {
             format!(r"{first}\WOW6432Node\{rest}")
