@@ -2526,3 +2526,83 @@ img {
     transform: translateX(100%);
   }
 }
+
+/* ═══ leftovers: the list after a removal and the holding area (lo-) ══════ */
+
+.lo-panel {
+  width: 44rem;
+  max-width: calc(100vw - var(--s6));
+}
+
+.lo-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+/* Header figures sit in the command slot, in the count's voice. */
+.lo-total {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s3);
+  color: var(--text-dim);
+}
+
+.lo-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  max-height: 40vh;
+  overflow: auto;
+}
+
+.lo-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+/* The row's own trail is one figure; here it holds a size and a badge at fixed widths so the columns line up. */
+.lo-row .bk-row-trail {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.lo-size {
+  min-width: 64px;
+  text-align: right;
+}
+
+.lo-conf {
+  display: inline-flex;
+  justify-content: flex-start;
+  min-width: 64px;
+}
+
+.lo-foot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.lo-foot > p {
+  margin: 0;
+}
+
+.lo-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s2);
+}
+
+/* "Forced removal…" under a failed removal's sentence. */
+.lo-offer {
+  display: flex;
+}
+
+/* A holding entry: name and sentence at the left, its size, then its two buttons. */
+.lo-entry > .bk-figure {
+  flex: none;
+  color: var(--text-dim);
+}

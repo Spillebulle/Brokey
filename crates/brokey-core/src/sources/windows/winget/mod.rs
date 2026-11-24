@@ -1904,7 +1904,11 @@ mod tests {
                 | Op::Update { .. }
                 | Op::UpdateAll { .. }
                 | Op::Refresh { .. }
-                | Op::Setup { .. } => {}
+                | Op::Setup { .. }
+                | Op::ClearLeftovers { .. }
+                | Op::Restore { .. }
+                | Op::EmptyHolding { .. }
+                | Op::ForceRemove { .. } => {}
             }
             for step in [false, true]
                 .into_iter()

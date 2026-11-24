@@ -48,6 +48,7 @@
 //! environment, and `run_step` refuses anything that is not one.
 
 use brokey_core::Step;
+use brokey_core::cleanup::internal::{self, InternalContext, Scans};
 use brokey_core::transaction::allow::{self, Allowed};
 use brokey_core::{Event, Plan};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -389,7 +390,14 @@ fn serve_plan(line: &str, cancel: &AtomicBool, writer: &mut impl Write) -> i32 {
                 title: step.title.clone(),
             },
         );
-        let outcome = run_step(&plan.id, index, step, writer);
+        // Brokey's own steps start no program: they were checked with the
+        // rest of the plan above, and `internal::run` checks each again
+        // immediately before it acts.
+        let outcome = if internal::is_internal(&step.command.program) {
+            run_internal(&plan.id, index, step, cancel, writer)
+        } else {
+            run_step(&plan.id, index, step, writer)
+        };
         match outcome {
             // A step that succeeded can still have something to say: DISM
             // made the change and Windows finishes it on a restart. The
@@ -434,6 +442,30 @@ fn serve_plan(line: &str, cancel: &AtomicBool, writer: &mut impl Write) -> i32 {
         },
     );
     EXIT_OK
+}
+
+/// One of Brokey's own steps, as Administrator: moving items to the holding
+/// area, putting an entry back, emptying one, or clearing a Windows
+/// Installer registration. Nothing is spawned; any event it sends is written
+/// like the others.
+fn run_internal(
+    plan: &str,
+    index: usize,
+    step: &Step,
+    cancel: &AtomicBool,
+    writer: &mut impl Write,
+) -> Result<Option<String>, String> {
+    let cancelled = || cancel.load(Ordering::SeqCst);
+    let mut forward = |event: Event| emit(writer, &event);
+    let mut ctx = InternalContext {
+        plan,
+        step: index,
+        sink: &mut forward,
+        cancelled: &cancelled,
+        finished: Arc::new(AtomicBool::new(false)),
+        scans: Scans::default(),
+    };
+    internal::run(step, &mut ctx)
 }
 
 /// Run one step with a minimal environment, streaming its output as log
@@ -1057,5 +1089,169 @@ mod tests {
     fn a_plan_off_the_closed_list_is_refused() {
         let plan = refusable_plan();
         assert!(brokey_core::transaction::allow::validate(&plan).is_err());
+    }
+
+    /// A root plan holding the given items, as the planner will write it.
+    #[cfg(windows)]
+    fn hold_plan(items: &[(brokey_core::model::ItemKind, String)]) -> String {
+        use brokey_core::cleanup::holding::HoldItem;
+        use brokey_core::cleanup::internal::{HOLD, HoldPayload};
+        let payload = HoldPayload {
+            holding: "acme-1".to_string(),
+            name: "Acme Studio".to_string(),
+            items: items
+                .iter()
+                .map(|(kind, location)| HoldItem {
+                    kind: *kind,
+                    location: location.clone(),
+                })
+                .collect(),
+        };
+        let plan = Plan {
+            id: "clear".to_string(),
+            ops: Vec::new(),
+            steps: vec![Step {
+                source: SourceKind::Arp,
+                title: "Moving leftovers to the holding area".to_string(),
+                command: Command {
+                    program: HOLD.to_string(),
+                    args: vec![serde_json::to_string(&payload).expect("a payload is JSON")],
+                    env: Vec::new(),
+                    cwd: None,
+                },
+                needs_root: true,
+                weight: 1,
+            }],
+        };
+        format!(
+            "{}\n",
+            serde_json::to_string(&plan).expect("a plan is JSON")
+        )
+    }
+
+    /// Serve one plan line and say what came back, asserting the refusal
+    /// started nothing.
+    #[cfg(windows)]
+    fn refused_by_the_helper(line: String) -> String {
+        let mut out = Vec::new();
+        let code = serve(std::io::Cursor::new(line), &mut out);
+        let events = String::from_utf8(out).expect("events are UTF-8");
+        assert_eq!(code, EXIT_REFUSED, "{events}");
+        assert!(
+            !events.contains("step_started"),
+            "nothing started: {events}"
+        );
+        events
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_helper_refuses_to_hold_the_windows_directory() {
+        let windows = std::env::var("SystemRoot").expect("Windows says where it is");
+        let events = refused_by_the_helper(hold_plan(&[(
+            brokey_core::model::ItemKind::Folder,
+            format!(r"{windows}\System32"),
+        )]));
+        assert!(events.contains("never clears"), "{events}");
+    }
+
+    /// The all-users Start menu, and `ProgramData\Microsoft` around it, are
+    /// never held; what an application put inside `Programs` may be.
+    #[cfg(windows)]
+    #[test]
+    fn the_helper_holds_inside_the_machine_start_menu_and_never_the_menu() {
+        use brokey_core::cleanup::view::{Known, LiveView, SystemView};
+        use brokey_core::model::ItemKind;
+        let menu = LiveView::new()
+            .known_folder(Known::StartMenuMachine)
+            .expect("Windows says where the all-users Start menu is");
+        let data = std::env::var("ProgramData").expect("Windows says where ProgramData is");
+        for refused in [
+            menu.clone(),
+            menu.parent()
+                .expect("Programs is in the Start menu")
+                .to_path_buf(),
+            std::path::PathBuf::from(format!(r"{data}\Microsoft\Crypto")),
+        ] {
+            let events = refused_by_the_helper(hold_plan(&[(
+                ItemKind::Folder,
+                refused.to_string_lossy().into_owned(),
+            )]));
+            assert!(events.contains("never clears"), "{events}");
+        }
+        // Validated and never run: a shortcut that is there now, whichever
+        // it is, is not refused as a place Brokey never clears.
+        let Some(shortcut) = std::fs::read_dir(&menu).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk")))
+        }) else {
+            return;
+        };
+        let line = hold_plan(&[(ItemKind::Shortcut, shortcut.to_string_lossy().into_owned())]);
+        let plan: Plan = serde_json::from_str(line.trim()).expect("the plan reads back");
+        let verdict = brokey_core::transaction::allow::validate(&plan);
+        assert!(
+            verdict
+                .as_ref()
+                .err()
+                .is_none_or(|e| !e.contains("never clears")),
+            "{verdict:?}"
+        );
+    }
+
+    /// A firewall id the helper's listing of program rules does not have (a
+    /// port or service rule, Windows's own among them, or one made up) is
+    /// refused before anything is exported.
+    #[cfg(windows)]
+    #[test]
+    fn the_helper_refuses_a_firewall_id_that_lets_no_program_through() {
+        let events = refused_by_the_helper(hold_plan(&[(
+            brokey_core::model::ItemKind::FirewallRule,
+            "firewall:Core Networking | {brokey-test-not-a-program-rule}".to_string(),
+        )]));
+        assert!(events.contains("lets a program through"), "{events}");
+    }
+
+    /// Review focus 5, through the helper's own door: one folder of two was
+    /// swapped for a junction after the scan. The whole plan is refused and
+    /// the folder that was fine has not moved either.
+    #[cfg(windows)]
+    #[test]
+    fn the_helper_refuses_a_hold_with_a_folder_swapped_for_a_junction() {
+        use brokey_core::model::ItemKind;
+        let temp = tempfile::tempdir().expect("a temporary folder");
+        let fine = temp.path().join("fine");
+        let elsewhere = temp.path().join("elsewhere");
+        std::fs::create_dir_all(&fine).unwrap();
+        std::fs::create_dir_all(elsewhere.join("data")).unwrap();
+        let swapped = temp.path().join("swapped");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&swapped)
+            .arg(&elsewhere)
+            .stdout(Stdio::null())
+            .status()
+            .expect("cmd starts");
+        assert!(status.success());
+        let events = refused_by_the_helper(hold_plan(&[
+            (ItemKind::Folder, fine.to_string_lossy().into_owned()),
+            (
+                ItemKind::Folder,
+                swapped.join("data").to_string_lossy().into_owned(),
+            ),
+        ]));
+        assert!(events.contains("junction"), "{events}");
+        assert!(fine.is_dir() && elsewhere.join("data").is_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_helper_refuses_a_step_that_only_runs_as_the_user() {
+        let mut line = hold_plan(&[]);
+        line = line.replace("brokey:hold", brokey_core::cleanup::internal::SHELL_OPEN);
+        let events = refused_by_the_helper(line);
+        assert!(events.contains("only ever runs as you"), "{events}");
     }
 }

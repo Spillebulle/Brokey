@@ -14,8 +14,12 @@
 //! The runner starts one helper for the whole plan and writes it each
 //! stretch of consecutive root steps in turn, so a plan costs one password.
 
+use crate::cleanup::internal::Scans;
 use crate::model::*;
 use crate::{Result, Store};
+
+pub mod cleanup;
+pub use cleanup::Planning;
 
 /// The sentence the Updates page shows beside a pacman update that is not
 /// "Update all". A pacman install or update is `pacman -Syu` with names, so
@@ -27,8 +31,67 @@ pub const PARTIAL_UPGRADE_NOTICE: &str = "Arch does not support partial upgrades
 /// steps, put refresh steps first, batch what is adjacent and can be
 /// batched.
 pub fn build(store: &Store, ops: &[Op]) -> Result<Plan> {
+    build_with(store, ops, &Scans::default())
+}
+
+/// [`build`], with the scans a clear takes its items from.
+pub fn build_with(store: &Store, ops: &[Op], scans: &Scans) -> Result<Plan> {
+    live(store, scans, |planning| build_in(store, ops, planning))
+}
+
+/// Hand `f` the planning this machine gives: on Windows the closed list,
+/// the leftover hints, the holding area and the live view; elsewhere none
+/// of them, because nothing is cleaned up there yet.
+fn live<R>(store: &Store, scans: &Scans, f: impl FnOnce(&Planning) -> R) -> R {
+    #[cfg(windows)]
+    {
+        use crate::cleanup::holding;
+        use crate::transaction::allow::{Allowed, check_step};
+        // Read once a plan, and only when a root Add/Remove step asks.
+        let allowed = std::cell::OnceCell::new();
+        let check =
+            |step: &Step| check_step(step, allowed.get_or_init(Allowed::with_registered_removals));
+        let hints = |package: &PackageRef| store.leftover_hints(package);
+        let listing = || holding::list(&holding::user_root(), &holding::machine_root());
+        let view = crate::cleanup::view::LiveView::new();
+        let installed = || {
+            use crate::cleanup::internal::Session;
+            crate::cleanup::internal::LiveSession.installed().0
+        };
+        f(&Planning {
+            scans,
+            check: &check,
+            hints: &hints,
+            holding: &listing,
+            view: Some(&view),
+            installed: &installed,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = store;
+        f(&Planning {
+            scans,
+            check: &|_| Ok(()),
+            hints: &|_| None,
+            holding: &crate::cleanup::holding::Listing::default,
+            view: None,
+            installed: &Vec::new,
+        })
+    }
+}
+
+/// [`build`], with what the cleanup asks of the machine handed in.
+pub fn build_in(store: &Store, ops: &[Op], planning: &Planning) -> Result<Plan> {
+    // A clear is a plan of its own: its HOLDs are checked before anything
+    // runs, so nothing before it may move what it holds, and two clears of
+    // one scan in one plan would share a holding id.
+    if ops.len() > 1 && ops.iter().any(|op| matches!(op, Op::ClearLeftovers { .. })) {
+        return Err(crate::Error::new(cleanup::CLEAR_ALONE));
+    }
     let mut gatherer = Gatherer {
         store,
+        planning,
         expanded: Vec::new(),
         gathered: Vec::new(),
         set_up: Vec::new(),
@@ -39,7 +102,9 @@ pub fn build(store: &Store, ops: &[Op]) -> Result<Plan> {
     let Gatherer {
         expanded, gathered, ..
     } = gatherer;
-    let steps = batch(order(gathered), &expanded);
+    let mut steps = batch(order(gathered), &expanded);
+    let waiting = cleanup::empty_waiting(&steps, planning);
+    steps.extend(waiting);
     Ok(Plan {
         id: new_id(),
         ops: ops.to_vec(),
@@ -61,6 +126,7 @@ pub fn cannot_set_up(kind: SourceKind) -> String {
 /// does.
 struct Gatherer<'a> {
     store: &'a Store,
+    planning: &'a Planning<'a>,
     expanded: Vec<Op>,
     gathered: Vec<Gathered>,
     /// Sources already set up in this plan: a second `Setup` for one, or
@@ -70,7 +136,32 @@ struct Gatherer<'a> {
 
 impl Gatherer<'_> {
     fn gather(&mut self, op: &Op) -> Result<()> {
-        let kind = op.source();
+        let cleanup_steps = match op {
+            Op::ClearLeftovers { scan, items } => Some(cleanup::clear(scan, items, self.planning)?),
+            Op::Restore { holding } => Some(cleanup::restore(holding, self.planning)?),
+            Op::EmptyHolding { holding } => {
+                Some(cleanup::empty(holding.as_deref(), self.planning)?)
+            }
+            Op::ForceRemove { package } => Some(cleanup::force(package, self.planning)?),
+            _ => None,
+        };
+        if let Some(steps) = cleanup_steps {
+            let index = self.expanded.len();
+            self.expanded.push(op.clone());
+            for step in steps {
+                self.gathered.push(Gathered {
+                    step,
+                    op: index,
+                    refresh: false,
+                });
+            }
+            return Ok(());
+        }
+        let Some(kind) = op.source() else {
+            return Err(crate::Error::new(
+                "Brokey does not know how to carry that out. Update Brokey and try again.",
+            ));
+        };
         let Some(source) = self.store.source(kind) else {
             return Err(crate::Error::new(format!(
                 "{} is not a source on this machine.",
@@ -97,7 +188,27 @@ impl Gatherer<'_> {
             }
             return Ok(());
         }
-        for step in source.plan(op)? {
+        let mut steps = source.plan(op)?;
+        if let Op::Remove { package } = op
+            && !steps.is_empty()
+        {
+            // Read before the uninstaller runs: once it has, the entry that
+            // says where the application lived is gone.
+            let hints = (self.planning.hints)(package);
+            let name = hints
+                .as_ref()
+                .map(|h| h.name.clone())
+                .unwrap_or_else(|| display_name(self.store, package));
+            for step in &mut steps {
+                if let Some(open) = cleanup::self_elevating(step, &name, self.planning) {
+                    *step = open;
+                }
+            }
+            if let Some(hints) = &hints {
+                steps.extend(cleanup::wait_and_scan(hints));
+            }
+        }
+        for step in steps {
             self.gathered.push(Gathered {
                 step,
                 op: index,
@@ -106,6 +217,66 @@ impl Gatherer<'_> {
         }
         Ok(())
     }
+}
+
+/// The sentences for removals whose uninstaller will start itself and ask
+/// Windows for Administrator: one per application, named.
+pub fn self_elevating_notices(store: &Store, ops: &[Op], planning: &Planning) -> Vec<String> {
+    let mut notices = Vec::new();
+    for op in ops {
+        let Op::Remove { package } = op else {
+            continue;
+        };
+        let Some(steps) = store.source(package.source).and_then(|s| s.plan(op).ok()) else {
+            continue;
+        };
+        let name = (planning.hints)(package)
+            .map(|h| h.name)
+            .unwrap_or_else(|| display_name(store, package));
+        if steps
+            .iter()
+            .any(|s| cleanup::self_elevating(s, &name, planning).is_some())
+        {
+            notices.push(cleanup::shell_open_notice(&name));
+        }
+    }
+    notices
+}
+
+/// The sentences for holding entries a plan deletes for good that are
+/// incomplete: one per entry, named, so that the confirm says so first.
+pub fn holding_notices(ops: &[Op], planning: &Planning) -> Vec<String> {
+    let mut notices = Vec::new();
+    for op in ops {
+        let Op::EmptyHolding { holding } = op else {
+            continue;
+        };
+        for entry in (planning.holding)()
+            .entries
+            .iter()
+            .filter(|e| e.incomplete && holding.as_deref().is_none_or(|id| id == e.id))
+        {
+            let notice = cleanup::incomplete_notice(&entry.name);
+            if !notices.contains(&notice) {
+                notices.push(notice);
+            }
+        }
+    }
+    notices
+}
+
+/// The sentences for what a clear leaves where it is although it was
+/// ticked, because another application has come to use it since the scan.
+pub fn clear_notices(ops: &[Op], planning: &Planning) -> Vec<String> {
+    ops.iter()
+        .filter_map(|op| match op {
+            Op::ClearLeftovers { scan, items } => {
+                Some(cleanup::left_since_scan(scan, items, planning))
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect()
 }
 
 /// What the page should say beside a plan before it runs.
@@ -129,8 +300,14 @@ impl Gatherer<'_> {
 /// running session already reads that format's export directory (see
 /// [`crate::launch`]).
 pub fn notices(store: &Store, ops: &[Op]) -> Vec<String> {
+    notices_with(store, ops, &Scans::default())
+}
+
+/// [`notices`], with the scans a clear takes its items from.
+pub fn notices_with(store: &Store, ops: &[Op], scans: &Scans) -> Vec<String> {
     #[cfg(unix)]
     {
+        let _ = scans;
         notices_in(store, ops, &crate::launch::this_session())
     }
     #[cfg(windows)]
@@ -138,7 +315,14 @@ pub fn notices(store: &Store, ops: &[Op]) -> Vec<String> {
         // No format here yet lists its applications by desktop entry, so
         // there is no session to read. `log_out_notice` answers `None`
         // itself; the empty session is never inspected.
-        notices_in(store, ops, &[])
+        let mut notices = notices_in(store, ops, &[]);
+        notices.extend(live(store, scans, |planning| {
+            let mut notices = self_elevating_notices(store, ops, planning);
+            notices.extend(holding_notices(ops, planning));
+            notices.extend(clear_notices(ops, planning));
+            notices
+        }));
+        notices
     }
 }
 
@@ -730,6 +914,10 @@ mod tests {
             Op::UpdateAll { .. } => "all".to_string(),
             Op::Refresh { .. } => "refresh".to_string(),
             Op::Setup { .. } => "setup".to_string(),
+            Op::ClearLeftovers { scan, .. } => scan.clone(),
+            Op::Restore { holding } => holding.clone(),
+            Op::EmptyHolding { holding } => holding.clone().unwrap_or_else(|| "all".to_string()),
+            Op::ForceRemove { package } => package.id.clone(),
         }
     }
 
@@ -768,6 +956,10 @@ mod tests {
                 true,
             )],
             Op::Setup { .. } => panic!("the planner never asks a source to plan a setup"),
+            Op::ClearLeftovers { .. }
+            | Op::Restore { .. }
+            | Op::EmptyHolding { .. }
+            | Op::ForceRemove { .. } => panic!("a source is never asked to plan a cleanup"),
         }
     }
 

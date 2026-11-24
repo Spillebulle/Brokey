@@ -1079,6 +1079,11 @@ plan's own workspace is scratch and these outlive it.
   This spec deliberately does not choose; it only guarantees that the
   Add/Remove Programs source exposes the derived install directory and the
   uninstall key path, which all three would need.
+  Closed, 2026-11-24: `docs/superpowers/specs/2026-11-24-leftover-cleanup-design.md`
+  chose none of the three as such. Hints are taken from the entry just before
+  the uninstaller runs, the ownership index is built from every other
+  installed entry at scan time, and the undo journal is the holding area,
+  where what is cleared is moved and can be restored.
 - **An unquoted uninstall string with spaces ran the wrong program.**
   Closed, 2026-11-23: `arp::read_command_line` reads it as `CreateProcess`
   does, the shortest prefix ending at a space that names a file (with `.exe`

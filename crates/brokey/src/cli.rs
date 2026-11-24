@@ -11,7 +11,8 @@
 
 use crate::commands::{logic, selfupdate_adapter, sentence};
 use brokey_core::{
-    App, Op, PackageKind, PackageRef, Plan, Platform, Query, SourceKind, SourceStatus, Store,
+    App, Confidence, Findings, Op, PackageKind, PackageRef, Plan, Platform, Query, SourceKind,
+    SourceStatus, Store,
 };
 use std::io::IsTerminal;
 
@@ -37,6 +38,10 @@ Commands:
   features [--all]
       Windows optional features and whether each is on. Only the
       well-known ones unless --all is given. Windows only.
+  leftovers <source>:<id>
+      What a scan would offer to clear after this installed application is
+      removed, and what it would keep. The application is not removed and
+      nothing is changed. Windows only.
   open <source>:<id> [--dry-run]
       Open an installed application the way the window's Open button does.
       --dry-run says what would be opened and opens nothing.
@@ -82,6 +87,7 @@ pub fn run(args: &[String]) -> i32 {
         "features" => features(rest),
         "self-update" => self_update(rest),
         "open" => open(rest),
+        "leftovers" => leftovers(rest),
         other => usage_error(&format!("{other} is not a command.")),
     }
 }
@@ -567,6 +573,134 @@ fn plan(args: &[String]) -> i32 {
     0
 }
 
+// ------------------------------------------------------------- leftovers
+
+/// `leftovers <source>:<id>`: the scan a removal would run, on an
+/// application that is still installed, so what it would offer is visible
+/// without removing anything.
+fn leftovers(args: &[String]) -> i32 {
+    let [reference] = args else {
+        return usage_error(
+            "leftovers takes one package reference, for example leftovers winget:Discord.Discord.",
+        );
+    };
+    let package = match parse_ref(reference) {
+        Ok(p) => p,
+        Err(e) => return usage_error(&e),
+    };
+    #[cfg(windows)]
+    {
+        scan_installed(&package)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = package;
+        eprintln!(
+            "Leftover cleanup is Windows only for now, and this is the Linux build. Nothing was scanned."
+        );
+        1
+    }
+}
+
+#[cfg(windows)]
+fn scan_installed(package: &PackageRef) -> i32 {
+    use brokey_core::cleanup::{guard, scan, view::LiveView};
+    let store = Store::detect();
+    let Some(hints) = store.leftover_hints(package) else {
+        eprintln!(
+            "{} is not an installed application Brokey can scan for leftovers. Check the reference against brokey installed, and that its source is Add/Remove Programs, winget, Chocolatey, Scoop or GitHub.",
+            package.id
+        );
+        return 1;
+    };
+    let view = LiveView::new();
+    let scanned = scan::scan(&hints, &view);
+    let mut installed = Vec::new();
+    let mut failed = 0;
+    for source in store.sources.iter().filter(|s| s.status().available) {
+        match source.installed() {
+            Ok(found) => installed.extend(found),
+            Err(_) => failed += 1,
+        }
+    }
+    // Itself excluded, as a forced removal does it, so its own files show
+    // as what they would be once it is gone.
+    let claims = guard::claims(&view, &installed, Some(&hints));
+    let mut findings = guard::findings("scan-text".to_string(), &hints, scanned, &claims, &view);
+    findings.unreadable += failed;
+    print!("{}", leftovers_text(&findings, terminal_width()));
+    0
+}
+
+/// The word the page shows for a confidence.
+pub fn confidence_word(confidence: Confidence) -> &'static str {
+    match confidence {
+        Confidence::Certain => "Certain",
+        Confidence::Likely => "Likely",
+        Confidence::Possible => "Possible",
+        Confidence::YourData => "Your data",
+    }
+}
+
+fn kind_word(kind: brokey_core::ItemKind) -> &'static str {
+    use brokey_core::ItemKind::*;
+    match kind {
+        File => "file",
+        Folder => "folder",
+        RegistryKey => "registry key",
+        RegistryValue => "registry value",
+        Shortcut => "shortcut",
+        Service => "service",
+        Task => "task",
+        FirewallRule => "firewall rule",
+    }
+}
+
+/// What a scan found, what it kept and what it could not look at.
+pub fn leftovers_text(findings: &Findings, width: Option<usize>) -> String {
+    let mut out = String::new();
+    if findings.items.is_empty() {
+        out.push_str(&format!(
+            "Nothing was found that {} would leave behind.\n",
+            findings.name
+        ));
+    } else {
+        let mut table = Table::new(&["Kind", "Location", "Size", "Confidence", "Ticked"]);
+        for item in &findings.items {
+            table.row(vec![
+                kind_word(item.kind).to_string(),
+                item.location.clone(),
+                item.size.map(size).unwrap_or_default(),
+                confidence_word(item.confidence).to_string(),
+                if item.ticked { "Yes" } else { "No" }.to_string(),
+            ]);
+        }
+        out.push_str(&table.render(width));
+    }
+    for kept in &findings.kept {
+        out.push_str(&format!(
+            "Kept: {} is used by {}.\n",
+            kept.location, kept.used_by
+        ));
+    }
+    let cloud = findings.not_offered_cloud as usize;
+    if cloud > 0 {
+        out.push_str(&format!(
+            "{cloud} in a cloud-synced folder {} never offered.\n",
+            if cloud == 1 { "is" } else { "are" }
+        ));
+    }
+    let unreadable = findings.unreadable as usize;
+    if unreadable > 0 {
+        out.push_str(&format!(
+            "{unreadable} {} could not be read, so the list may be incomplete.\n",
+            plural(unreadable, "place", "places")
+        ));
+    }
+    out.push_str("Nothing was changed.\n");
+    out
+}
+
 /// Who a privileged step runs as, for the summary sentence: there is no root
 /// on Windows, only Administrator, and UAC asks the user to allow the step
 /// rather than asking for a password.
@@ -977,6 +1111,82 @@ mod tests {
             parse_search(&args(&["x", "--sources", "nix"]))
                 .unwrap_err()
                 .contains("nix is not a source")
+        );
+    }
+
+    #[test]
+    fn leftovers_needs_one_reference() {
+        assert_eq!(run(&args(&["leftovers"])), 2);
+        assert_eq!(run(&args(&["leftovers", "winget:A", "winget:B"])), 2);
+        assert_eq!(run(&args(&["leftovers", "not-a-reference"])), 2);
+    }
+
+    #[test]
+    fn leftovers_table_has_the_confidence_words() {
+        use brokey_core::{ItemKind, KeptItem, LeftoverItem, Scope};
+        let item = |confidence, ticked, size| LeftoverItem {
+            id: "i".into(),
+            kind: ItemKind::Folder,
+            location: r"C:\Users\a\AppData\Roaming\Steam".into(),
+            size,
+            confidence,
+            scope: Scope::User,
+            ticked,
+            reason: String::new(),
+        };
+        let findings = Findings {
+            scan: "s".into(),
+            package: PackageRef {
+                source: SourceKind::Winget,
+                id: "Valve.Steam".into(),
+            },
+            name: "Steam".into(),
+            items: vec![
+                item(Confidence::Certain, true, Some(2_000_000)),
+                item(Confidence::Likely, true, None),
+                item(Confidence::Possible, false, None),
+                item(Confidence::YourData, false, None),
+            ],
+            kept: vec![KeptItem {
+                location: r"C:\Program Files\Valve".into(),
+                used_by: "Another Valve application".into(),
+            }],
+            not_offered_cloud: 1,
+            unreadable: 2,
+        };
+        let text = leftovers_text(&findings, None);
+        for word in ["Kind", "Location", "Size", "Confidence", "Ticked"] {
+            assert!(text.contains(word), "{word} missing from:\n{text}");
+        }
+        for word in ["Certain", "Likely", "Possible", "Your data"] {
+            assert!(text.contains(word), "{word} missing from:\n{text}");
+        }
+        assert!(text.contains("2.0 MB"));
+        assert!(
+            text.contains(r"Kept: C:\Program Files\Valve is used by Another Valve application.")
+        );
+        assert!(text.contains("1 in a cloud-synced folder is never offered."));
+        assert!(text.contains("2 places could not be read"));
+        assert!(text.ends_with("Nothing was changed.\n"));
+    }
+
+    #[test]
+    fn leftovers_with_nothing_found_says_so_and_has_no_table() {
+        let findings = Findings {
+            scan: "s".into(),
+            package: PackageRef {
+                source: SourceKind::Winget,
+                id: "Valve.Steam".into(),
+            },
+            name: "Steam".into(),
+            items: Vec::new(),
+            kept: Vec::new(),
+            not_offered_cloud: 0,
+            unreadable: 0,
+        };
+        assert_eq!(
+            leftovers_text(&findings, None),
+            "Nothing was found that Steam would leave behind.\nNothing was changed.\n"
         );
     }
 

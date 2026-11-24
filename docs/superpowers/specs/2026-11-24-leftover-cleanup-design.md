@@ -443,3 +443,105 @@ or rpm file lists. The scanner trait above should not assume the registry.
   clears its Windows Installer registration, restorably.
 - Only name-surrogate reparse points (junctions, links, mount points) are
   refused by the helper; cloud-synced items are left out of the list.
+
+## As built
+
+Where the build departed from or settled what is written above.
+
+- **Planning (§2, §9, §10).** The cleanup's part of the planner is
+  `transaction/plan/cleanup.rs`. Everything it asks of the machine (the
+  closed list, the hints, the holding area, the live view) comes through a
+  `Planning` value, so it is tested without the registry. The scans a clear
+  reads are passed to `Store::plan_with` / `plan::build_with`;
+  `Store::plan` passes none, so a clear planned through it says the list is
+  no longer known.
+- **A scan is kept with whether it was forced.** `internal::Scans` maps a
+  scan id to a `ScanRecord { hints, findings, forced }` rather than to
+  `(Hints, Findings)`, because §9's registration clear follows only a forced
+  removal and nothing else in the record says so.
+- **A clear is its own plan**, never added to a removal's: the runner checks
+  every step of Brokey's own before the first runs, and a HOLD of something
+  that is not there refuses the whole plan. Items that have gone since the
+  scan (with a parent or with the uninstaller) are left out when the clear
+  is planned; what cannot be read is kept in for the closed list to judge.
+  User items go to an entry with the clear's id and machine items to one
+  with that id and `-m`, so Restore and Delete now each act on exactly one
+  entry. After a forced removal of an MSI product `MSI_UNREGISTER` exports
+  its registration into the machine entry, and only when the uninstall key
+  or the install folder is among the items kept for the clear.
+- **Waiting (§2).** `AWAIT_GONE` looks at the uninstall key every 2 seconds
+  (`internal::AWAIT_POLL`). A package with no uninstall key (a package
+  manager's own removal, an MSIX package) has nothing to wait for and goes
+  straight on. "It has finished" with the key still there ends the plan
+  with "The uninstaller did not remove <name>. It may have been cancelled.
+  Forced removal clears it without the uninstaller.", and no scan is made.
+- **The scan reads every source's installed list afresh**, not the window's
+  store, which was read before the uninstaller ran and would still list the
+  application, making its every file a claim. A source whose list cannot be
+  read adds one to "could not look in N places".
+- **The self-elevating uninstaller (§10)** is asked of the closed list twice:
+  by the planner, which rewrites only an Add/Remove root step refused with
+  the "program this account can replace" sentence, and again by `SHELL_OPEN`
+  immediately before it starts, which starts nothing for any other answer.
+  An uninstaller that ends with a non-zero code is a note, not a failure:
+  the uninstall key, looked at by the next step, decides.
+- **Restoring, emptying and the 30-day machine empty** are steps labelled
+  with the Add/Remove source, which only chooses a badge. A plan that
+  elevates for any reason gets a root `EMPTY` for each waiting machine
+  entry it does not already restore or empty; a plan that does not elevate
+  never gets one.
+- **Steam.** A Steam game is not removed by running `steam.exe`: when Steam
+  is not running that process is the Steam client, and the step would last
+  until Steam closed and Cancel would kill Steam. Instead the step is
+  Brokey's own `STEAM_UNINSTALL` (one app id, digits only), which hands
+  `steam://uninstall/<id>` to Explorer as the user, the way opening an
+  application does, and returns at once without reading Explorer's exit
+  code, which means nothing. A plain Explorer step would not do, because
+  the runner fails a step on a non-zero code. `AWAIT_GONE` does the
+  waiting. A cancelled Steam uninstall ends with "Steam did not remove
+  <name>. It may have been cancelled. Remove the game from your Steam
+  library, then look in Installed." Forced removal is never offered for a
+  `Steam App <id>` entry, and the planner refuses one, because Steam keeps
+  its own record of the game.
+- **A clear that would do nothing is an error**, not a plan that says
+  "Nothing to do.": nothing ticked, or everything ticked already gone
+  ("Everything ticked has already gone, so nothing was cleared."). A plan
+  in which a clear is not the only operation is refused, so nothing before
+  it can move what it holds and two clears of one scan never share a
+  holding id.
+- **The self-elevating uninstaller's call is sealed.**
+  `transaction::elevate::shell_open` is `pub(crate)` and takes a
+  `cleanup::internal::Refused`, made only by `Refused::by` from the closed
+  list's replaceable refusal of that command. `SHELL_OPEN` names a full path
+  to an `.exe` and nothing else. It waits on the uninstaller in 250 ms
+  slices (`SHELL_OPEN_SLICE`); "Stop waiting" stops the wait and the plan
+  and never kills the uninstaller, which is the user's window.
+- **Settled by the reference machine and the final reviews (2026-11-24).**
+  - Paths are compared without a trailing separator, so a spelling with
+    one and without one are one candidate. A publisher folder that holds
+    nothing but the install folder is one row, at the inner one's confidence.
+  - A Steam game's home is `<library>\steamapps\common\<installdir>`, read
+    from `libraryfolders.vdf` and `appmanifest_<id>.acf` when the hints are
+    taken, plus `shadercache\<id>` and `workshop\content\<id>`. Steam's own
+    folder is never a game's home. An uninstaller outside an entry's own
+    `InstallLocation` does not claim its folder for that entry, so a
+    launcher's folder is claimed by the launcher; with no `InstallLocation`
+    the uninstaller's folder is still claimed.
+  - A firewall rule is held by its id (`firewall:<name> | <id>`), never by
+    name, and the helper refuses an id that is not in its list of rules
+    with a program.
+  - The clear builds the claims again from a fresh installed list and
+    drops, with a sentence, anything a new install uses.
+  - The all-users Start menu's `Programs` folder is cleared inside, but
+    `Programs` itself, `Startup` and Windows's own tool folders stay refused.
+  - A service that runs under an account with a password, or a task set to
+    run whether the user is signed in or not, is never held: the holding
+    area could not put it back.
+  - A shortcut carries its target, so a forced removal keeps the shortcuts
+    of a separately installed application that lives inside the removed
+    one's folder.
+  - An entry whose manifest cannot be read, or that holds something moved in
+    part, is never emptied by age.
+  - Left for later: a leftover service in a normal removal claims itself and
+    is kept; a move across drives gives the held copy the holding folder's
+    permissions; each clear scans the machine again two or three times.

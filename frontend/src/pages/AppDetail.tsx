@@ -1,6 +1,7 @@
 import { Check, ChevronLeft, ChevronRight, Download, ExternalLink, Package, Play, RotateCw, Trash } from "lucide-react";
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import { startOps } from "../activity/flow";
+import { forcedRemovalIntro, isSteamGame } from "../activity/forced";
 import { openPackage, useLaunch, useLaunchTarget } from "../activity/launch";
 import { useActivity } from "../activity/store";
 import * as api from "../api";
@@ -232,6 +233,11 @@ function Detail({ app }: { app: App }) {
   const remove = () => {
     void startOps([{ op: "remove", package: refOf(chosen) }], `Remove ${app.name}`);
   };
+  // Add/Remove only: the other Windows sources remove through their own tool, which has no uninstaller to get past.
+  const forcible = pkg.installed && pkg.source === "arp" && !isSteamGame(refOf(chosen));
+  const forceRemove = () => {
+    void startOps([{ op: "forceremove", package: refOf(chosen) }], `Forced removal of ${app.name}`, forcedRemovalIntro(app.name));
+  };
   const rebuild = () => {
     void startOps([{ op: "update", package: refOf(chosen) }], `Rebuild ${app.name}`);
   };
@@ -339,6 +345,11 @@ function Detail({ app }: { app: App }) {
                         Remove…
                       </Button>
                     )}
+                    {forcible && busyOp !== "remove" ? (
+                      <Button kind="ghost" onClick={forceRemove} title="For an application whose uninstaller is missing or broken. Does not run it. Asks first.">
+                        Forced removal…
+                      </Button>
+                    ) : null}
                   </>
                 ) : busyOp === "install" ? (
                   <Button kind="primary" disabled disabledReason="It is being installed. The activity panel shows progress.">

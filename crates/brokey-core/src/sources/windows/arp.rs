@@ -251,7 +251,7 @@ fn windows_file_name(path: &str) -> &str {
 /// answers that same directory rather than its parent, which no caller here
 /// wants and none asks for: the only input is an executable path out of
 /// [`split_command_line`].
-fn windows_parent(path: &str) -> Option<String> {
+pub(crate) fn windows_parent(path: &str) -> Option<String> {
     let cut = path.rfind(['\\', '/'])?;
     Some(windows_dir(&path[..cut]))
 }
@@ -438,13 +438,30 @@ pub enum Removal {
     /// The publisher's own uninstaller opens a window the user clicks
     /// through. The interface says so rather than drawing a progress rail.
     Interactive(Command),
+    /// A Steam game: `"…\steam.exe" steam://uninstall/<appid>`, carrying the
+    /// app id. Run as the user and never through the helper; Steam asks for
+    /// its own confirmation.
+    Steam(String),
+}
+
+/// The Steam app id of an uninstall command that is exactly
+/// `"…\steam.exe" steam://uninstall/<digits>`, and of nothing else.
+fn steam_app(command: &Command) -> Option<String> {
+    if !windows_file_name(&command.program).eq_ignore_ascii_case("steam.exe") {
+        return None;
+    }
+    let [only] = command.args.as_slice() else {
+        return None;
+    };
+    let id = only.strip_prefix("steam://uninstall/")?;
+    crate::cleanup::internal::is_steam_app_id(id).then(|| id.to_string())
 }
 
 /// Whether a key name is shaped like an MSI ProductCode: braces around a
 /// GUID. The shape alone proves nothing, because plenty of things are keyed
 /// by a GUID without being MSI products; `removal` asks for the
 /// `WindowsInstaller` flag as well.
-fn product_code(key_name: &str) -> Option<&str> {
+pub fn product_code(key_name: &str) -> Option<&str> {
     let inner = key_name.strip_prefix('{')?.strip_suffix('}')?;
     let groups: Vec<&str> = inner.split('-').collect();
     let expected = [8, 4, 4, 4, 12];
@@ -470,6 +487,16 @@ fn command(line: &str) -> Option<Command> {
 }
 
 pub fn removal(e: &RawEntry) -> Option<Removal> {
+    // First, so that a Steam game never reaches the helper whatever else
+    // its key says.
+    if let Some(app) = e
+        .uninstall_string
+        .as_deref()
+        .and_then(command)
+        .and_then(|c| steam_app(&c))
+    {
+        return Some(Removal::Steam(app));
+    }
     if let Some(quiet) = e.quiet_uninstall_string.as_deref().and_then(command) {
         return Some(Removal::Quiet(quiet));
     }
@@ -547,6 +574,24 @@ pub fn msiexec_program() -> String {
 pub fn removal_step(e: &RawEntry, msiexec: &str) -> Option<Step> {
     let name = e.display_name.clone().unwrap_or_else(|| e.key_name.clone());
     let command = match removal(e)? {
+        // Not `steam.exe` itself: when Steam is not running that process is
+        // the Steam client, and the step would last until Steam closed. The
+        // address goes to Explorer, which hands it to Steam and returns, and
+        // the step after it waits for the key to go.
+        Removal::Steam(app) => {
+            return Some(Step {
+                source: SourceKind::Arp,
+                title: format!("Removing {name} through Steam"),
+                command: Command {
+                    program: crate::cleanup::internal::STEAM_UNINSTALL.to_string(),
+                    args: vec![app],
+                    env: Vec::new(),
+                    cwd: None,
+                },
+                needs_root: false,
+                weight: 10,
+            });
+        }
         Removal::Quiet(c) | Removal::Interactive(c) => c,
         Removal::Msi { product_code } => Command {
             program: msiexec.to_string(),
@@ -607,7 +652,7 @@ impl Arp {
     /// icon extraction writes into a temporary directory instead of the
     /// user's real cache.
     #[cfg(test)]
-    fn with_cache(entries: Vec<RawEntry>, cache: PathBuf) -> Arp {
+    pub(crate) fn with_cache(entries: Vec<RawEntry>, cache: PathBuf) -> Arp {
         Arp { entries, cache }
     }
 
@@ -682,6 +727,10 @@ impl Source for Arp {
     fn launcher(&self, id: &str) -> Option<crate::launch::Launch> {
         let entry = self.find(id)?;
         super::shortcut::launch_for_entries(&[entry], &super::shortcut::start_menu())
+    }
+
+    fn add_remove_entry(&self, package_id: &str) -> Option<RawEntry> {
+        self.find(package_id).cloned()
     }
 
     /// Removal is the only operation this source has. Any other kind is
@@ -1585,6 +1634,58 @@ mod tests {
     /// caller keeps the returned guard alive for as long as `Arp` is used, so
     /// the directory is removed when the test is done with it rather than
     /// leaked.
+    /// An entry with only what removal reads.
+    fn entry(hive: Hive, key: &str, name: &str, uninstall: &str) -> RawEntry {
+        serde_json::from_value(serde_json::json!({
+            "hive": match hive { Hive::Machine => "machine", Hive::Machine32 => "machine32", Hive::User => "user" },
+            "key_name": key,
+            "display_name": name,
+            "uninstall_string": uninstall,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_steam_game_is_removed_through_steam_as_the_user() {
+        let game = entry(
+            Hive::Machine32,
+            "Steam App 1091500",
+            "Cyberpunk 2077",
+            r#""C:\Program Files (x86)\Steam\steam.exe" steam://uninstall/1091500"#,
+        );
+        assert_eq!(removal(&game), Some(Removal::Steam("1091500".to_string())));
+        let step = removal_step(&game, "msiexec.exe").unwrap();
+        assert!(!step.needs_root, "never through the helper");
+        assert_eq!(
+            step.command.program,
+            crate::cleanup::internal::STEAM_UNINSTALL,
+            "handed to Explorer as an address, never steam.exe itself"
+        );
+        assert_eq!(step.command.args, vec!["1091500"]);
+        assert_eq!(step.title, "Removing Cyberpunk 2077 through Steam");
+    }
+
+    #[test]
+    fn only_exactly_steams_uninstall_command_is_a_steam_removal() {
+        for line in [
+            // Steam's own uninstaller is an ordinary one.
+            r#""C:\Program Files (x86)\Steam\uninstall.exe""#,
+            // Another program handed the same address.
+            r#""C:\Tools\notsteam.exe" steam://uninstall/10"#,
+            // Something besides the address.
+            r#""C:\Steam\steam.exe" steam://uninstall/10 -silent"#,
+            r#""C:\Steam\steam.exe" steam://uninstall/10x"#,
+            r#""C:\Steam\steam.exe" steam://run/10"#,
+            r#""C:\Steam\steam.exe" steam://uninstall/"#,
+        ] {
+            let e = entry(Hive::Machine, "X", "X", line);
+            assert!(
+                !matches!(removal(&e), Some(Removal::Steam(_))),
+                "{line} is not a Steam removal"
+            );
+        }
+    }
+
     fn source_from_fixture() -> (Arp, tempfile::TempDir) {
         let cache = tempdir();
         let arp = Arp::with_cache(fixture(), cache.path().to_path_buf());

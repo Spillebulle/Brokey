@@ -1,0 +1,179 @@
+//! The machine, as the scan is allowed to see it: a read-only view.
+//!
+//! Everything the scan asks about files, the registry, services, scheduled
+//! tasks and firewall rules goes through [`SystemView`]. That is what lets the
+//! scan be tested against a JSON snapshot of a machine ([`FixtureView`]) and
+//! lets it be proved to change nothing: there is no method here that writes.
+//! The trait and its types compile on every OS; `LiveView` is Windows only.
+
+use crate::sources::windows::arp;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+pub mod fixture;
+#[cfg(windows)]
+pub mod windows;
+
+pub use fixture::FixtureView;
+#[cfg(windows)]
+pub use windows::LiveView;
+
+/// What kind of reparse point a path is, as far as the scan cares.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Reparse {
+    /// An ordinary file or folder.
+    #[default]
+    None,
+    /// A junction, a symbolic link or a mount point: a name that leads
+    /// somewhere else, and so a way to make a clean-up reach outside itself.
+    NameSurrogate,
+    /// A cloud-synced placeholder, whose content lives elsewhere and which
+    /// reading may download.
+    Cloud,
+}
+
+/// One thing in a folder.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub name: String,
+    #[serde(default)]
+    pub is_dir: bool,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub reparse: Reparse,
+}
+
+/// Where in the registry. The 32-bit view is its own word so that the scan
+/// can say which one it found a key in.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Hive {
+    Hklm,
+    Hklm32,
+    Hkcu,
+}
+
+impl From<arp::Hive> for Hive {
+    fn from(h: arp::Hive) -> Hive {
+        match h {
+            arp::Hive::Machine => Hive::Hklm,
+            arp::Hive::Machine32 => Hive::Hklm32,
+            arp::Hive::User => Hive::Hkcu,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Service {
+    pub name: String,
+    pub image_path: String,
+    /// The account it runs as (`ObjectName`), when it says.
+    #[serde(default)]
+    pub account: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ScheduledTask {
+    /// The task's path under the Task Scheduler root, such as `\Vendor\Update`.
+    pub path: String,
+    /// The `<Exec><Command>` of each action.
+    pub actions: Vec<String>,
+    /// Saved to run whether the user is signed in or not, with a stored
+    /// password that registering it again would need.
+    #[serde(default)]
+    pub needs_password: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FirewallRule {
+    /// The value Windows stores the rule under in `FirewallRules`. Names are
+    /// not unique (two Java runtimes both add "Java(TM) Platform SE
+    /// binary"), so this is what a rule is held by.
+    pub id: String,
+    pub name: String,
+    /// The `App=` field: the program the rule is about.
+    pub program: String,
+}
+
+impl FirewallRule {
+    /// What the page calls it: its name, or its id when it has none.
+    pub fn shown_name(&self) -> &str {
+        match self.name.trim() {
+            "" => &self.id,
+            _ => &self.name,
+        }
+    }
+}
+
+/// The well-known places a leftover can be in.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Known {
+    ProgramFiles,
+    ProgramFilesX86,
+    ProgramData,
+    AppData,
+    LocalAppData,
+    LocalLow,
+    Documents,
+    SavedGames,
+    StartMenuMachine,
+    StartMenuUser,
+    Desktop,
+    /// The user's own folders, wherever they have been moved to. Nothing
+    /// is looked for in them; they are known so that none of them is ever
+    /// taken for an application's folder.
+    Downloads,
+    Pictures,
+    Music,
+    Videos,
+    Windows,
+    Profile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ViewError {
+    /// It is there and may not be read. The scan counts these and says so.
+    #[error("{0} could not be read.")]
+    Unreadable(String),
+    /// It is not there.
+    #[error("{0} does not exist.")]
+    Missing(String),
+}
+
+/// What a read found, and how many places it could not look in. The scan
+/// reports the count rather than skipping those places silently.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed<T> {
+    pub items: Vec<T>,
+    pub unreadable: u32,
+}
+
+impl<T> Default for Listed<T> {
+    fn default() -> Self {
+        Listed {
+            items: Vec::new(),
+            unreadable: 0,
+        }
+    }
+}
+
+pub trait SystemView {
+    fn known_folder(&self, which: Known) -> Option<PathBuf>;
+    /// `Err` only when the directory itself cannot be read; entries inside
+    /// it that cannot be read are counted in `unreadable`.
+    fn list(&self, dir: &Path) -> Result<Listed<Entry>, ViewError>;
+    fn exists(&self, path: &Path) -> bool;
+    /// Of the path itself, not of what it leads to.
+    fn reparse(&self, path: &Path) -> Reparse;
+    fn dir_size(&self, dir: &Path) -> u64;
+    fn subkeys(&self, hive: Hive, path: &str) -> Result<Vec<String>, ViewError>;
+    /// Each value's data as text.
+    fn values(&self, hive: Hive, path: &str) -> Result<Vec<(String, String)>, ViewError>;
+    fn shortcut_target(&self, lnk: &Path) -> Option<PathBuf>;
+    fn services(&self) -> Listed<Service>;
+    fn tasks(&self) -> Listed<ScheduledTask>;
+    fn firewall_rules(&self) -> Listed<FirewallRule>;
+    /// A small text file's contents, such as Steam's library list. `None`
+    /// when it is not there, cannot be read or is too large to be one.
+    fn read_text(&self, path: &Path) -> Option<String>;
+}

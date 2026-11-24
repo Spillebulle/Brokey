@@ -34,6 +34,7 @@
 //! helper's stdin and the helper stops after the step that is running; the
 //! events say so.
 
+use crate::cleanup::internal::{self, InternalContext, Scans};
 use crate::model::*;
 use crate::transaction::CancelToken;
 use crate::transaction::allow::{self, Allowed};
@@ -45,6 +46,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as Process, Stdio};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, TryLockError, mpsc};
 use std::time::{Duration, Instant};
 
@@ -132,6 +134,11 @@ pub struct Runner {
     allowed: Allowed,
     queue: Option<Arc<Mutex<()>>>,
     pacman_lock: Option<PathBuf>,
+    /// Set by the page's "It has finished", for a step waiting on an
+    /// uninstaller.
+    finished: Arc<AtomicBool>,
+    /// The scans this session has made, shared with every runner.
+    scans: Scans,
 }
 
 impl Default for Runner {
@@ -163,6 +170,8 @@ impl Runner {
             allowed,
             queue: None,
             pacman_lock: pacman_lock_file(),
+            finished: Arc::new(AtomicBool::new(false)),
+            scans: Scans::default(),
         }
     }
 
@@ -214,6 +223,19 @@ impl Runner {
     /// a machine that has pacman.
     pub fn with_pacman_lock(mut self, lock: Option<PathBuf>) -> Runner {
         self.pacman_lock = lock;
+        self
+    }
+
+    /// The flag the page's "It has finished" sets for this plan.
+    pub fn with_finished(mut self, finished: Arc<AtomicBool>) -> Runner {
+        self.finished = finished;
+        self
+    }
+
+    /// The scans a clear looks its items up in, shared with the runner
+    /// that made them.
+    pub fn with_scans(mut self, scans: Scans) -> Runner {
+        self.scans = scans;
         self
     }
 
@@ -382,6 +404,18 @@ impl Runner {
                 return fail(message);
             }
         }
+        // And Brokey's own steps that run as the user, by the same rules, so
+        // that a refusal never arrives half-way through a plan.
+        #[cfg(windows)]
+        for step in plan
+            .steps
+            .iter()
+            .filter(|s| !s.needs_root && internal::is_internal(&s.command.program))
+        {
+            if let Err(message) = allow::check_internal(step) {
+                return fail(message);
+            }
+        }
         let mut state = ProgressState::new(&plan.steps);
         for run in &runs {
             if self.cancel.is_cancelled() {
@@ -404,7 +438,7 @@ impl Runner {
         }
         Outcome {
             ok: true,
-            message: summary(&plan.ops),
+            message: summary_with(&plan.ops, &self.scans),
         }
     }
 
@@ -428,6 +462,11 @@ impl Runner {
             title: step.title.clone(),
         });
         emit_progress(sink, &id, index, state, None);
+        // Brokey's own steps are carried out here and never started as a
+        // program, whatever their name would find on `PATH`.
+        if internal::is_internal(&step.command.program) {
+            return self.run_internal(plan, index, state, sink);
+        }
         let mut process = Process::new(&step.command.program);
         process
             .args(&step.command.args)
@@ -533,6 +572,55 @@ impl Runner {
             message: Some(message.clone()),
         });
         Err(message)
+    }
+
+    /// One of Brokey's own steps, as the user: run here, with the events it
+    /// sends forwarded, and finished like any other step.
+    fn run_internal(
+        &self,
+        plan: &Plan,
+        index: usize,
+        state: &mut ProgressState,
+        sink: &mut dyn Sink,
+    ) -> Result<(), String> {
+        let step = &plan.steps[index];
+        let id = plan.id.clone();
+        let cancel = self.cancel.clone();
+        let cancelled = move || cancel.is_cancelled();
+        let result = {
+            let mut forward = |event: Event| sink.event(event);
+            let mut ctx = InternalContext {
+                plan: &id,
+                step: index,
+                sink: &mut forward,
+                cancelled: &cancelled,
+                finished: self.finished.clone(),
+                scans: self.scans.clone(),
+            };
+            internal::run(step, &mut ctx)
+        };
+        match result {
+            Ok(note) => {
+                state.finish(index);
+                sink.event(Event::StepFinished {
+                    plan: id.clone(),
+                    step: index,
+                    ok: true,
+                    message: note,
+                });
+                emit_progress(sink, &id, index, state, None);
+                Ok(())
+            }
+            Err(message) => {
+                sink.event(Event::StepFinished {
+                    plan: id,
+                    step: index,
+                    ok: false,
+                    message: Some(message.clone()),
+                });
+                Err(message)
+            }
+        }
     }
 
     /// One stretch of root steps, written to the plan's helper as a
@@ -669,7 +757,14 @@ impl Runner {
                         helper_said = Some((ok, message));
                         break;
                     }
-                    Ok(Event::PlanStarted { .. } | Event::AuthRequired { .. }) => {}
+                    // The helper never says these: the session raises them
+                    // itself, from the steps it runs.
+                    Ok(
+                        Event::PlanStarted { .. }
+                        | Event::AuthRequired { .. }
+                        | Event::Leftovers { .. }
+                        | Event::Waiting { .. },
+                    ) => {}
                     Err(_) => sink.event(Event::Log {
                         plan: id.clone(),
                         step: current,
@@ -1211,8 +1306,63 @@ fn pkexec_refusal(stderr: &str) -> String {
 /// The final sentence for a plan that ran through: what was asked for, in
 /// the past tense.
 pub fn summary(ops: &[Op]) -> String {
+    summary_with(ops, &Scans::default())
+}
+
+/// A scan id's place in time: `scan-<millis>-<counter>`, compared as
+/// numbers. An id of another shape comes first.
+fn scan_order(id: &str) -> (u128, u32) {
+    let mut parts = id.strip_prefix("scan-").unwrap_or_default().splitn(2, '-');
+    let millis = parts.next().and_then(|m| m.parse().ok()).unwrap_or(0);
+    let counter = parts.next().and_then(|c| c.parse().ok()).unwrap_or(0);
+    (millis, counter)
+}
+
+/// [`summary`], with the scans a clear names its application from.
+pub fn summary_with(ops: &[Op], scans: &Scans) -> String {
     if ops.is_empty() {
         return "Finished.".to_string();
+    }
+    if let [only] = ops {
+        match only {
+            Op::ClearLeftovers { scan, .. } => {
+                let name = scans
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(scan)
+                    .map(|r| r.findings.name.clone());
+                return match name {
+                    Some(name) => format!("Cleared leftovers from {name}."),
+                    None => "Cleared leftovers from the uninstalled application.".to_string(),
+                };
+            }
+            Op::Restore { .. } => return "Restored the cleared items.".to_string(),
+            Op::EmptyHolding { .. } => return "Emptied the holding area.".to_string(),
+            Op::ForceRemove { package } => {
+                // A forced removal removes nothing itself: its scan lists
+                // what is left, and the user chooses from that list.
+                let scans = scans.lock().unwrap_or_else(|p| p.into_inner());
+                let latest = scans
+                    .values()
+                    .filter(|r| r.forced && r.findings.package == *package)
+                    .max_by_key(|r| scan_order(&r.findings.scan));
+                return match latest {
+                    Some(r) if r.findings.items.is_empty() => {
+                        format!("Brokey found nothing {} left behind.", r.findings.name)
+                    }
+                    Some(r) => {
+                        let n = r.findings.items.len();
+                        let word = if n == 1 { "leftover" } else { "leftovers" };
+                        format!(
+                            "Brokey found {n} {word} of {}. Choose what to clear from the list.",
+                            r.findings.name
+                        )
+                    }
+                    None => "Brokey looked for what the application left behind.".to_string(),
+                };
+            }
+            _ => {}
+        }
     }
     let n = ops.len();
     let all = |pred: fn(&Op) -> bool| ops.iter().all(pred);
@@ -1240,6 +1390,181 @@ pub fn summary(ops: &[Op]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_plan(steps: Vec<(&str, Vec<String>)>) -> Plan {
+        Plan {
+            id: "p".to_string(),
+            ops: Vec::new(),
+            steps: steps
+                .into_iter()
+                .map(|(program, args)| Step {
+                    source: SourceKind::Arp,
+                    title: "Starting Acme's uninstaller".to_string(),
+                    command: Command {
+                        program: program.to_string(),
+                        args,
+                        env: Vec::new(),
+                        cwd: None,
+                    },
+                    needs_root: false,
+                    weight: 1,
+                })
+                .collect(),
+        }
+    }
+
+    /// Brokey's own steps are carried out by the runner and never started
+    /// as a program: the failure is the step's own sentence, not "Could not
+    /// start brokey:…", and it ends the plan like any failed step.
+    #[test]
+    fn an_internal_session_step_is_run_here_and_never_spawned() {
+        let plan = session_plan(vec![(internal::SCAN, vec!["x".to_string()])]);
+        let mut events = Vec::new();
+        let mut sink = |e: Event| events.push(e);
+        let outcome = Runner::new().with_helper(None).execute(&plan, &mut sink);
+        assert!(!outcome.ok);
+        assert!(
+            outcome.message.contains(internal::SCAN),
+            "{}",
+            outcome.message
+        );
+        assert!(
+            !outcome.message.contains("Could not start"),
+            "{}",
+            outcome.message
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::StepFinished { ok: false, message: Some(m), .. } if m.contains(internal::SCAN)
+        )));
+    }
+
+    /// One of Brokey's own session steps that the rules refuse is refused
+    /// before the plan's first step starts, as a root step would be, so the
+    /// plan never stops half-way for it.
+    #[cfg(windows)]
+    #[test]
+    fn a_refused_internal_session_step_stops_the_plan_before_it_starts() {
+        for refused in [
+            ("brokey:nothing-like-this", vec![]),
+            (internal::RESTORE, vec!["Not An Id".to_string()]),
+            (internal::HOLD, vec!["not json".to_string()]),
+        ] {
+            let plan = session_plan(vec![
+                (internal::SCAN, vec!["x".to_string()]),
+                refused.clone(),
+            ]);
+            let mut events = Vec::new();
+            let mut sink = |e: Event| events.push(e);
+            let outcome = Runner::new().with_helper(None).execute(&plan, &mut sink);
+            assert!(!outcome.ok);
+            assert!(outcome.message.contains("refused"), "{}", outcome.message);
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, Event::StepStarted { .. })),
+                "nothing started for {refused:?}: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cleanup_operations_have_their_own_closing_sentences() {
+        let one = |op: Op| summary(&[op]);
+        assert_eq!(
+            one(Op::ClearLeftovers {
+                scan: "s".into(),
+                items: Vec::new()
+            }),
+            "Cleared leftovers from the uninstalled application."
+        );
+        assert_eq!(
+            one(Op::Restore {
+                holding: "h".into()
+            }),
+            "Restored the cleared items."
+        );
+        assert_eq!(
+            one(Op::EmptyHolding { holding: None }),
+            "Emptied the holding area."
+        );
+        assert_eq!(
+            one(Op::ForceRemove {
+                package: PackageRef {
+                    source: SourceKind::Winget,
+                    id: "Valve.Steam".into()
+                }
+            }),
+            "Brokey looked for what the application left behind."
+        );
+    }
+
+    /// A forced removal removes nothing itself: it finds what is left and
+    /// lists it. The sentence names the application, never its raw id.
+    #[test]
+    fn a_forced_removal_names_the_application_and_says_the_list_waits() {
+        use crate::cleanup::internal::ScanRecord;
+        let package = PackageRef {
+            source: SourceKind::Arp,
+            id: r"HKLM\{12345678-9ABC-DEF0-1234-56789ABCDEF0}".into(),
+        };
+        let scans = Scans::default();
+        let record = |scan: &str, items: usize| ScanRecord {
+            hints: crate::cleanup::hints::Hints {
+                package: package.clone(),
+                name: "Acme Studio".into(),
+                publisher: None,
+                uninstall_key: None,
+                product_code: None,
+                install_dir: None,
+                install_location: None,
+                icon_dir: None,
+                shortcuts: Vec::new(),
+                extra_dirs: Vec::new(),
+            },
+            findings: Findings {
+                scan: scan.into(),
+                package: package.clone(),
+                name: "Acme Studio".into(),
+                items: (0..items)
+                    .map(|i| LeftoverItem {
+                        id: format!("item-{i}"),
+                        kind: ItemKind::Folder,
+                        location: format!(r"C:\Acme\{i}"),
+                        size: None,
+                        confidence: Confidence::Certain,
+                        scope: Scope::User,
+                        ticked: true,
+                        reason: "It is Acme Studio's.".into(),
+                    })
+                    .collect(),
+                kept: Vec::new(),
+                not_offered_cloud: 0,
+                unreadable: 0,
+            },
+            forced: true,
+        };
+        let forced = [Op::ForceRemove {
+            package: package.clone(),
+        }];
+        scans
+            .lock()
+            .unwrap()
+            .insert("scan-1-0".into(), record("scan-1-0", 3));
+        assert_eq!(
+            summary_with(&forced, &scans),
+            "Brokey found 3 leftovers of Acme Studio. Choose what to clear from the list."
+        );
+        // A later scan of the same application is the one that counts.
+        scans
+            .lock()
+            .unwrap()
+            .insert("scan-2-1".into(), record("scan-2-1", 0));
+        assert_eq!(
+            summary_with(&forced, &scans),
+            "Brokey found nothing Acme Studio left behind."
+        );
+    }
 
     /// The wrapper `Runner::new` actually builds on this platform, which is
     /// the state a real run meets. On Windows it is empty, and that used to

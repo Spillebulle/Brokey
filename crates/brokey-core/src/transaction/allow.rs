@@ -60,6 +60,17 @@ use crate::system::windows::owned_handle;
 #[cfg(windows)]
 use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
 
+/// How the refusal of a program this account could replace begins.
+pub const CAN_BE_REPLACED: &str = "The helper refused a program this account can replace: ";
+
+/// Whether a refusal is that one: the program's file, or a folder above it,
+/// is one this account can write. It is the only refusal of an Add/Remove
+/// uninstaller that the planner answers by starting it as the user, so that
+/// it elevates itself and Windows asks about that file.
+pub fn is_can_be_replaced(refusal: &str) -> bool {
+    refusal.starts_with(CAN_BE_REPLACED)
+}
+
 /// The facts the closed list cannot derive for itself, handed to it by the
 /// caller: the directories a package file (`pacman -U`, `dpkg -i`, `rpm -U`,
 /// a `.deb` given to `apt-get install`) may come from, and on Windows the
@@ -131,6 +142,8 @@ impl Allowed {
             .iter()
             .filter(|e| e.hive.needs_elevation())
             .filter_map(|e| crate::sources::windows::arp::removal_step(e, &msiexec))
+            // A Steam game is removed through Steam as the user, never here.
+            .filter(|step| step.needs_root)
             .map(|step| step.command)
             .collect();
         Allowed {
@@ -419,6 +432,11 @@ pub fn validate_with(plan: &Plan, allowed: &Allowed) -> Result<(), String> {
 /// the winget under `C:\Program Files\WindowsApps`.
 #[cfg(windows)]
 pub fn check_step(step: &Step, allowed: &Allowed) -> Result<(), String> {
+    // Brokey's own steps start no program, so neither question below is
+    // theirs: they are asked their own, whatever source they claim.
+    if crate::cleanup::internal::is_internal(&step.command.program) {
+        return check_internal(step);
+    }
     match step.source {
         SourceKind::Winget => check_winget(&step.command)?,
         SourceKind::Choco => check_choco(&step.command)?,
@@ -439,6 +457,22 @@ pub fn check_step(step: &Step, allowed: &Allowed) -> Result<(), String> {
         return Err(not_allowed(&step.command.program));
     }
     program_this_process_cannot_replace(&step.command.program)
+}
+
+/// Whether one of Brokey's own steps may run: as Administrator only moving
+/// items to the holding area, putting an entry back, emptying one, or
+/// clearing a removed product's Windows Installer registration, each item
+/// checked against the live machine. The rules, and why each is there, are
+/// in [`crate::cleanup::internal::check`]; this is the closed list's door to
+/// them, so that a refusal there refuses the whole plan before anything
+/// moves.
+#[cfg(windows)]
+pub fn check_internal(step: &Step) -> Result<(), String> {
+    crate::cleanup::internal::check(
+        step,
+        &crate::cleanup::view::LiveView::new(),
+        &crate::cleanup::internal::Roots::live(),
+    )
 }
 
 /// Whether `command` is one the winget source would have built, rebuilt
@@ -640,7 +674,7 @@ fn on_a_local_disk(path: &Path) -> bool {
 /// puts. Nothing without a drive letter is ever asked, so no UNC root
 /// reaches this.
 #[cfg(windows)]
-fn a_fixed_volume(letter: u8) -> bool {
+pub(crate) fn a_fixed_volume(letter: u8) -> bool {
     let root: [u16; 4] = [u16::from(letter), u16::from(b':'), u16::from(b'\\'), 0];
     // SAFETY: `root` is a null-terminated wide string of four units that
     // outlives the call, and the call reads it and takes nothing else.
@@ -1292,10 +1326,15 @@ fn program_this_process_cannot_replace(program: &str) -> Result<(), String> {
 /// the program and what to do, and nothing of the permissions themselves:
 /// an access control list in an error message is nothing a reader can act
 /// on, and it tells anyone reading over their shoulder where to aim.
+///
+/// Its opening, [`CAN_BE_REPLACED`], is also how the planner knows an
+/// Add/Remove uninstaller was refused for this reason and nothing else, the
+/// one refusal it answers by letting the uninstaller elevate itself (see
+/// [`is_can_be_replaced`]).
 #[cfg(windows)]
 fn can_be_replaced(program: &str) -> String {
     format!(
-        "The helper refused a program this account can replace: {program}. Starting it as \
+        "{CAN_BE_REPLACED}{program}. Starting it as \
          Administrator would hand Administrator to whoever replaced it, so Brokey will not. \
          Install it somewhere only an administrator can write, under Program Files or \
          ProgramData, and try again."
@@ -3671,6 +3710,386 @@ mod windows_tests {
             let mut step = features_step(Change::On, "NetFx3");
             step.source = source;
             assert!(check_step(&step, &Allowed::system()).is_err(), "{source:?}");
+        }
+    }
+}
+
+/// The closed list's rules for Brokey's own steps: what the helper will move
+/// into the holding area, put back, empty or unregister as Administrator.
+/// Every refusal below is one the helper makes before the first item moves.
+#[cfg(windows)]
+#[cfg(test)]
+mod internal_tests {
+    use super::*;
+    use crate::cleanup::holding::HoldItem;
+    use crate::cleanup::internal::{
+        AWAIT_GONE, EMPTY, HOLD, HoldPayload, MSI_UNREGISTER, RESTORE, SCAN, SHELL_OPEN,
+    };
+    use crate::model::{ItemKind, SourceKind};
+
+    fn internal(program: &str, args: Vec<String>, root: bool) -> Step {
+        Step {
+            source: SourceKind::Arp,
+            title: "Test".to_string(),
+            command: Command {
+                program: program.to_string(),
+                args,
+                env: Vec::new(),
+                cwd: None,
+            },
+            needs_root: root,
+            weight: 1,
+        }
+    }
+
+    fn hold_of(holding: &str, items: &[(ItemKind, &str)]) -> Step {
+        let payload = HoldPayload {
+            holding: holding.to_string(),
+            name: "Acme Studio".to_string(),
+            items: items
+                .iter()
+                .map(|(kind, location)| HoldItem {
+                    kind: *kind,
+                    location: location.to_string(),
+                })
+                .collect(),
+        };
+        internal(
+            HOLD,
+            vec![serde_json::to_string(&payload).expect("a payload is JSON")],
+            true,
+        )
+    }
+
+    fn plan_of(steps: Vec<Step>) -> Plan {
+        Plan {
+            id: "test".to_string(),
+            ops: Vec::new(),
+            steps,
+        }
+    }
+
+    /// The refusal, checked against the copy rules on the way.
+    fn refused(step: Step) -> String {
+        let err = validate(&plan_of(vec![step])).expect_err("the closed list refuses this");
+        assert!(err.ends_with('.'), "the reason is a sentence: {err}");
+        assert!(!err.contains('\u{2014}'), "no em dashes: {err}");
+        err
+    }
+
+    fn folder(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
+    /// `mklink /J` needs no privilege, unlike a directory symbolic link.
+    fn junction(link: &Path, target: &Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("cmd starts");
+        assert!(status.success(), "the junction was made");
+    }
+
+    #[test]
+    fn a_hold_of_the_windows_directory_is_refused() {
+        let windows = std::env::var("SystemRoot").expect("Windows says where it is");
+        let system32 = format!(r"{windows}\System32");
+        for path in [windows.as_str(), system32.as_str()] {
+            let err = refused(hold_of("abc", &[(ItemKind::Folder, path)]));
+            assert!(err.contains(path), "the refusal names the place: {err}");
+        }
+    }
+
+    #[test]
+    fn a_hold_of_program_files_is_refused() {
+        let program_files = std::env::var("ProgramFiles").expect("Program Files is there");
+        refused(hold_of("abc", &[(ItemKind::Folder, &program_files)]));
+    }
+
+    #[test]
+    fn a_hold_of_a_relative_path_is_refused() {
+        for path in [
+            r"Temp\Acme",
+            r"\Temp\Acme",
+            r"C:Temp\Acme",
+            r"\\server\share\Acme",
+        ] {
+            refused(hold_of("abc", &[(ItemKind::Folder, path)]));
+        }
+    }
+
+    #[test]
+    fn a_hold_of_a_path_with_dot_dot_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("a")).unwrap();
+        std::fs::create_dir_all(temp.path().join("b")).unwrap();
+        for tail in [r"a\..\b", r"a\.\b", r"a\\b"] {
+            let path = format!(r"{}\{tail}", folder(temp.path()));
+            refused(hold_of("abc", &[(ItemKind::Folder, &path)]));
+        }
+    }
+
+    #[test]
+    fn an_hkcu_key_in_a_root_step_is_refused() {
+        let err = refused(hold_of(
+            "abc",
+            &[(ItemKind::RegistryKey, r"HKCU\Software\BrokeyTest")],
+        ));
+        assert!(
+            err.contains("HKLM"),
+            "the refusal says what is allowed: {err}"
+        );
+        refused(hold_of(
+            "abc",
+            &[(ItemKind::RegistryValue, r"HKCU\Software\BrokeyTest | Value")],
+        ));
+    }
+
+    #[test]
+    fn a_malformed_holding_id_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = folder(temp.path());
+        let long = "a".repeat(65);
+        for id in ["", "Bad", "a_b", r"..\x", "a b", long.as_str()] {
+            refused(hold_of(id, &[(ItemKind::Folder, &path)]));
+            refused(internal(RESTORE, vec![id.to_string()], true));
+            refused(internal(EMPTY, vec![id.to_string()], true));
+        }
+    }
+
+    #[test]
+    fn the_session_only_steps_are_refused_in_a_root_step() {
+        for program in [AWAIT_GONE, SCAN, SHELL_OPEN] {
+            let err = refused(internal(program, vec!["{}".to_string()], true));
+            assert!(err.contains(program), "the refusal names the step: {err}");
+        }
+    }
+
+    #[test]
+    fn an_msi_unregister_with_a_non_guid_is_refused() {
+        for code in [
+            "",
+            "not-a-guid",
+            "12345678-1234-1234-1234-123456789012",
+            "{12345678-1234-1234-1234-12345678901Z}",
+            r"{12345678-1234-1234-1234-123456789012}\..\..",
+        ] {
+            refused(internal(
+                MSI_UNREGISTER,
+                vec![code.to_string(), "abc".to_string()],
+                true,
+            ));
+        }
+        // A well-formed one passes, and only as Administrator.
+        let good = "{12345678-1234-1234-1234-123456789012}".to_string();
+        assert_eq!(
+            validate(&plan_of(vec![internal(
+                MSI_UNREGISTER,
+                vec![good.clone(), "abc".to_string()],
+                true
+            )])),
+            Ok(())
+        );
+        assert!(
+            crate::cleanup::internal::check(
+                &internal(MSI_UNREGISTER, vec![good, "abc".to_string()], false),
+                &crate::cleanup::view::LiveView::new(),
+                &crate::cleanup::internal::Roots::live(),
+            )
+            .is_err(),
+            "unregistering is never a session step"
+        );
+    }
+
+    /// Review focus 5: a folder swapped for a junction between the scan and
+    /// the clear. The junction leads somewhere else entirely, and the helper
+    /// refuses the whole step rather than follow it.
+    #[test]
+    fn a_hold_through_a_junction_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let elsewhere = temp.path().join("elsewhere");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(elsewhere.join("data")).unwrap();
+        let link = app.join("cache");
+        junction(&link, &elsewhere);
+
+        let through = folder(&link.join("data"));
+        let err = refused(hold_of("abc", &[(ItemKind::Folder, &through)]));
+        assert!(err.contains("junction"), "the refusal says why: {err}");
+        // The junction itself, too.
+        refused(hold_of("abc", &[(ItemKind::Folder, &folder(&link))]));
+        // And the whole step, though the first item is fine.
+        let real = temp.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        refused(hold_of(
+            "abc",
+            &[
+                (ItemKind::Folder, &folder(&real)),
+                (ItemKind::Folder, &through),
+            ],
+        ));
+        assert!(elsewhere.join("data").is_dir() && real.is_dir());
+    }
+
+    #[test]
+    fn a_well_formed_hold_of_a_temp_path_is_allowed() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("Acme Studio");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("settings.ini"), "x").unwrap();
+        let plan = plan_of(vec![hold_of(
+            "acme-studio-1",
+            &[
+                (ItemKind::Folder, &folder(&app)),
+                (ItemKind::File, &folder(&app.join("settings.ini"))),
+            ],
+        )]);
+        assert_eq!(validate(&plan), Ok(()));
+    }
+
+    /// A path longer than 260 characters, in either spelling, is checked
+    /// all the way down rather than given up on or let through.
+    #[test]
+    fn a_long_path_is_checked_whole() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut deep = temp.path().to_path_buf();
+        while deep.as_os_str().len() < 300 {
+            deep.push("a-rather-long-folder-name");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        assert!(folder(&deep).len() > 260);
+        let verbatim = format!(r"\\?\{}", folder(&deep));
+        for path in [folder(&deep), verbatim] {
+            assert_eq!(
+                validate(&plan_of(vec![hold_of("abc", &[(ItemKind::Folder, &path)])])),
+                Ok(()),
+                "{path}"
+            );
+        }
+        // A junction far down a long path is still found.
+        let link = deep.join("link");
+        junction(&link, temp.path());
+        let through = format!(r"\\?\{}\a-rather-long-folder-name", folder(&link));
+        refused(hold_of("abc", &[(ItemKind::Folder, &through)]));
+        // And the verbatim spelling of a protected place is still protected.
+        let windows = std::env::var("SystemRoot").unwrap();
+        refused(hold_of(
+            "abc",
+            &[(ItemKind::Folder, &format!(r"\\?\{windows}\System32"))],
+        ));
+        refused(hold_of(
+            "abc",
+            &[(ItemKind::Folder, r"\\?\UNC\server\share\Acme")],
+        ));
+        refused(hold_of("abc", &[(ItemKind::Folder, r"\\.\C:\Acme")]));
+    }
+
+    /// Something that is not there cannot be checked for a junction on the
+    /// way to it, so it is refused rather than assumed to be safe.
+    #[test]
+    fn a_hold_of_something_that_is_not_there_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let gone = temp.path().join("gone").join("deeper");
+        refused(hold_of("abc", &[(ItemKind::Folder, &folder(&gone))]));
+    }
+
+    #[test]
+    fn an_unknown_brokey_step_is_refused() {
+        refused(internal("brokey:format-c", vec![], true));
+        refused(internal("brokey:", vec![], true));
+    }
+
+    #[test]
+    fn a_hold_with_an_environment_or_a_working_folder_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = folder(temp.path());
+        let mut with_env = hold_of("abc", &[(ItemKind::Folder, &path)]);
+        with_env.command.env = vec![("PATH".into(), "x".into())];
+        refused(with_env);
+        let mut with_cwd = hold_of("abc", &[(ItemKind::Folder, &path)]);
+        with_cwd.command.cwd = Some(temp.path().to_path_buf());
+        refused(with_cwd);
+    }
+
+    #[test]
+    fn a_hold_that_is_not_one_payload_is_refused() {
+        refused(internal(HOLD, vec![], true));
+        refused(internal(HOLD, vec!["not json".to_string()], true));
+        refused(internal(
+            HOLD,
+            vec!["{}".to_string(), "{}".to_string()],
+            true,
+        ));
+        refused(internal(
+            HOLD,
+            vec![r#"{"holding":"abc","name":"A","items":[],"extra":1}"#.to_string()],
+            true,
+        ));
+        // Nothing to move is not a step anyone built.
+        refused(hold_of("abc", &[]));
+    }
+
+    /// Only Administrator clears the machine's services, tasks and rules,
+    /// and only those that are not Windows's own.
+    #[test]
+    fn a_windows_service_task_or_rule_is_refused() {
+        refused(hold_of("abc", &[(ItemKind::Service, "service:wuauserv")]));
+        refused(hold_of(
+            "abc",
+            &[(
+                ItemKind::Task,
+                r"task:\Microsoft\Windows\Defrag\ScheduledDefrag",
+            )],
+        ));
+        refused(hold_of("abc", &[(ItemKind::Service, r"service:..\x")]));
+        refused(hold_of(
+            "abc",
+            &[(ItemKind::Task, r"task:\Acme\..\Microsoft\x")],
+        ));
+        refused(hold_of(
+            "abc",
+            &[(
+                ItemKind::FirewallRule,
+                "firewall:@FirewallAPI.dll,-28502 | {x}",
+            )],
+        ));
+    }
+
+    /// Places on the system drive Windows needs that the guard's list of
+    /// application roots does not name.
+    #[test]
+    fn the_places_windows_keeps_beside_the_roots_are_refused() {
+        let drive = std::env::var("SystemDrive").unwrap();
+        let program_data = std::env::var("ProgramData").unwrap();
+        let program_files = std::env::var("ProgramFiles").unwrap();
+        for path in [
+            format!(r"{drive}\Recovery"),
+            format!(r"{drive}\$Recycle.Bin"),
+            format!(r"{drive}\pagefile.sys"),
+            format!(r"{program_data}\Microsoft\Windows Defender"),
+            format!(r"{program_files}\Windows Defender"),
+        ] {
+            let err = refused(hold_of("abc", &[(ItemKind::Folder, &path)]));
+            assert!(err.contains("never clears"), "{err}");
+        }
+        let err = refused(hold_of(
+            "abc",
+            &[(ItemKind::Folder, &format!(r"{drive}\Acme\nul"))],
+        ));
+        assert!(err.contains("device"), "{err}");
+        for key in [
+            r"HKLM\Software\Classes\Installer",
+            r"HKLM\Software\Classes\Installer\Products\0123",
+            r"HKLM\Software\Microsoft\Windows\CurrentVersion\Installer\UserData",
+            r"HKLM\Software\WOW6432Node\Classes\Installer",
+            r"HKLM\SYSTEM\CurrentControlSet\Services\wuauserv",
+            r"HKLM\Software\Clients",
+        ] {
+            refused(hold_of("abc", &[(ItemKind::RegistryKey, key)]));
         }
     }
 }

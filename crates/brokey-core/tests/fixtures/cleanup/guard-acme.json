@@ -1,0 +1,455 @@
+{
+  "folders": {
+    "ProgramFiles": "C:\\Program Files",
+    "ProgramFilesX86": "C:\\Program Files (x86)",
+    "ProgramData": "C:\\ProgramData",
+    "AppData": "C:\\Users\\you\\AppData\\Roaming",
+    "LocalAppData": "C:\\Users\\you\\AppData\\Local",
+    "LocalLow": "C:\\Users\\you\\AppData\\LocalLow",
+    "Documents": "C:\\Users\\you\\Documents",
+    "SavedGames": "C:\\Users\\you\\Saved Games",
+    "StartMenuMachine": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+    "StartMenuUser": "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+    "Desktop": "C:\\Users\\you\\Desktop",
+    "Windows": "C:\\Windows",
+    "Profile": "C:\\Users\\you"
+  },
+  "dirs": {
+    "C:\\Program Files": [
+      {
+        "name": "Acme",
+        "is_dir": true
+      },
+      {
+        "name": "Common Files",
+        "is_dir": true
+      }
+    ],
+    "C:\\Program Files\\Acme": [
+      {
+        "name": "Acme Writer",
+        "is_dir": true
+      }
+    ],
+    "C:\\Program Files\\Acme\\Acme Writer": [
+      {
+        "name": "writer.exe",
+        "size": 10
+      },
+      {
+        "name": "svc.exe",
+        "size": 10
+      }
+    ],
+    "C:\\Program Files\\Common Files": [
+      {
+        "name": "Acme",
+        "is_dir": true
+      }
+    ],
+    "C:\\Program Files\\Common Files\\Acme": [
+      {
+        "name": "shared.dll",
+        "size": 10
+      }
+    ],
+    "C:\\Program Files (x86)": [
+      {
+        "name": "Acme Paint",
+        "is_dir": true
+      }
+    ],
+    "C:\\Program Files (x86)\\Acme Paint": [
+      {
+        "name": "paint.exe",
+        "size": 10
+      },
+      {
+        "name": "uninstall.exe",
+        "size": 10
+      }
+    ],
+    "C:\\ProgramData": [
+      {
+        "name": "Acme Writer",
+        "is_dir": true
+      },
+      {
+        "name": "AcmeUpdate",
+        "is_dir": true
+      },
+      {
+        "name": "AcmeCheck",
+        "is_dir": true
+      },
+      {
+        "name": "AcmeLicences",
+        "is_dir": true
+      },
+      {
+        "name": "Toolbox",
+        "is_dir": true
+      },
+      {
+        "name": "chocolatey",
+        "is_dir": true
+      },
+      {
+        "name": "Microsoft",
+        "is_dir": true
+      }
+    ],
+    "C:\\ProgramData\\Acme Writer": [
+      {
+        "name": "x.dat",
+        "size": 10
+      }
+    ],
+    "C:\\ProgramData\\AcmeUpdate": [
+      {
+        "name": "update.exe",
+        "size": 10
+      }
+    ],
+    "C:\\ProgramData\\AcmeCheck": [
+      {
+        "name": "check.exe",
+        "size": 10
+      }
+    ],
+    "C:\\ProgramData\\AcmeLicences": [
+      {
+        "name": "lic.dat",
+        "size": 10
+      }
+    ],
+    "C:\\ProgramData\\Toolbox": [
+      {
+        "name": "tool.exe",
+        "size": 10
+      }
+    ],
+    "C:\\ProgramData\\chocolatey": [
+      {
+        "name": "lib",
+        "is_dir": true
+      }
+    ],
+    "C:\\ProgramData\\chocolatey\\lib": [
+      {
+        "name": "git",
+        "is_dir": true
+      }
+    ],
+    "C:\\ProgramData\\chocolatey\\lib\\git": [
+      {
+        "name": "git.nupkg",
+        "size": 10
+      }
+    ],
+    "C:\\Users\\you\\AppData\\Roaming": [
+      {
+        "name": "Acme",
+        "is_dir": true
+      },
+      {
+        "name": "Python",
+        "is_dir": true
+      }
+    ],
+    "C:\\Users\\you\\AppData\\Roaming\\Acme": [
+      {
+        "name": "Acme Writer",
+        "is_dir": true
+      },
+      {
+        "name": "Acme Paint",
+        "is_dir": true
+      }
+    ],
+    "C:\\Users\\you\\AppData\\Roaming\\Acme\\Acme Writer": [
+      {
+        "name": "w.ini",
+        "size": 10
+      }
+    ],
+    "C:\\Users\\you\\AppData\\Roaming\\Acme\\Acme Paint": [
+      {
+        "name": "p.ini",
+        "size": 10
+      }
+    ],
+    "C:\\Users\\you\\AppData\\Roaming\\Python": [
+      {
+        "name": "pip.ini",
+        "size": 10
+      }
+    ],
+    "C:\\Users\\you\\AppData\\Local": [
+      {
+        "name": "Packages",
+        "is_dir": true
+      }
+    ],
+    "C:\\Users\\you\\AppData\\Local\\Packages": [
+      {
+        "name": "Microsoft.WindowsCalculator_8wekyb3d8bbwe",
+        "is_dir": true
+      }
+    ],
+    "C:\\Users\\you\\scoop\\apps": [
+      {
+        "name": "ripgrep",
+        "is_dir": true
+      }
+    ],
+    "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs": [
+      {
+        "name": "Acme Paint.lnk",
+        "size": 10
+      },
+      {
+        "name": "Acme Writer.lnk",
+        "size": 10
+      },
+      {
+        "name": "Toolbox.lnk",
+        "size": 10
+      },
+      {
+        "name": "Gone.lnk",
+        "size": 10
+      }
+    ]
+  },
+  "reparse": {
+    "C:\\ProgramData\\Linked": "NameSurrogate"
+  },
+  "shortcuts": {
+    "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Acme Paint.lnk": "C:\\Program Files (x86)\\Acme Paint\\paint.exe",
+    "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Acme Writer.lnk": "C:\\Program Files\\Acme\\Acme Writer\\writer.exe",
+    "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Toolbox.lnk": "C:\\ProgramData\\Toolbox\\tool.exe",
+    "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Gone.lnk": "C:\\ProgramData\\Gone\\gone.exe"
+  },
+  "registry": {
+    "Hklm": {
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall": {
+        "subkeys": [
+          "AcmePaint",
+          "{12345678-9ABC-DEF0-1234-56789ABCDEF0}",
+          "Sloppy",
+          "Python312"
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AcmePaint": {
+        "values": [
+          [
+            "DisplayName",
+            "Acme Paint"
+          ],
+          [
+            "Publisher",
+            "Acme"
+          ],
+          [
+            "UninstallString",
+            "\"C:\\Program Files (x86)\\Acme Paint\\uninstall.exe\""
+          ]
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{12345678-9ABC-DEF0-1234-56789ABCDEF0}": {
+        "values": [
+          [
+            "DisplayName",
+            "Acme Writer"
+          ],
+          [
+            "Publisher",
+            "Acme"
+          ],
+          [
+            "InstallLocation",
+            "C:\\Program Files\\Acme\\Acme Writer\\"
+          ],
+          [
+            "WindowsInstaller",
+            "1"
+          ],
+          [
+            "UninstallString",
+            "MsiExec.exe /X{12345678-9ABC-DEF0-1234-56789ABCDEF0}"
+          ]
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Sloppy": {
+        "values": [
+          [
+            "DisplayName",
+            "Sloppy Tool"
+          ],
+          [
+            "InstallLocation",
+            "C:\\Program Files\\"
+          ]
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Python312": {
+        "values": [
+          [
+            "DisplayName",
+            "Python 3.12.0 (64-bit)"
+          ],
+          [
+            "Publisher",
+            "Python Software Foundation"
+          ],
+          [
+            "InstallLocation",
+            "C:\\Python312"
+          ]
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData": {
+        "subkeys": [
+          "S-1-5-18"
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18": {
+        "subkeys": [
+          "Components",
+          "Products"
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Components": {
+        "subkeys": [
+          "C1",
+          "C2",
+          "C3",
+          "C4",
+          "C5"
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Components\\C1": {
+        "values": [
+          [
+            "87654321CBA90FED21436587A9CBED0F",
+            "C:\\Program Files\\Common Files\\Acme\\shared.dll"
+          ],
+          [
+            "D3C2B1A0F5E4170628394A5B6C7D8E9F",
+            "C:\\Program Files\\Common Files\\Acme\\shared.dll"
+          ]
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Components\\C2": {
+        "values": [
+          [
+            "87654321CBA90FED21436587A9CBED0F",
+            "C:\\Program Files\\Acme\\Acme Writer\\writer.exe"
+          ]
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Components\\C3": {
+        "values": [
+          [
+            "87654321CBA90FED21436587A9CBED0F",
+            "02:\\SOFTWARE\\Acme\\Shared\\"
+          ],
+          [
+            "D3C2B1A0F5E4170628394A5B6C7D8E9F",
+            "02:\\SOFTWARE\\Acme\\Shared\\"
+          ]
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Components\\C4": {
+        "values": [
+          [
+            "87654321CBA90FED21436587A9CBED0F",
+            "C:\\ProgramData\\Acme Writer\\x.dat"
+          ]
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Components\\C5": {
+        "values": [
+          [
+            "00000000000000000000000000000000",
+            "C:\\ProgramData\\AcmeLicences\\lic.dat"
+          ]
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Products": {
+        "subkeys": [
+          "D3C2B1A0F5E4170628394A5B6C7D8E9F"
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Products\\D3C2B1A0F5E4170628394A5B6C7D8E9F\\InstallProperties": {
+        "values": [
+          [
+            "DisplayName",
+            "Acme Runtime"
+          ]
+        ]
+      }
+    },
+    "Hkcu": {
+      "Software": {
+        "subkeys": [
+          "Acme",
+          "Python"
+        ]
+      },
+      "Software\\Acme": {
+        "subkeys": [
+          "Acme Writer"
+        ]
+      },
+      "Software\\Acme\\Acme Writer": {},
+      "Software\\Python": {
+        "subkeys": [
+          "PythonCore"
+        ]
+      },
+      "Software\\Python\\PythonCore": {},
+      "Software\\Classes\\.acw": {
+        "values": [
+          [
+            "",
+            "AcmeWriter.Doc"
+          ]
+        ]
+      },
+      "Software\\Classes\\AcmeWriter.Doc": {
+        "subkeys": [
+          "shell"
+        ]
+      },
+      "Software\\Classes\\.txt": {
+        "values": [
+          [
+            "",
+            "txtfile"
+          ]
+        ]
+      },
+      "Software\\Classes\\txtfile": {}
+    }
+  },
+  "services": [
+    {
+      "name": "AcmeUpdate",
+      "image_path": "\"C:\\ProgramData\\AcmeUpdate\\update.exe\" /service"
+    },
+    {
+      "name": "AcmeWriterSvc",
+      "image_path": "\"C:\\Program Files\\Acme\\Acme Writer\\svc.exe\""
+    }
+  ],
+  "tasks": [
+    {
+      "path": "\\Acme\\Check",
+      "actions": [
+        "C:\\ProgramData\\AcmeCheck\\check.exe"
+      ]
+    }
+  ]
+}

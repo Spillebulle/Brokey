@@ -14,6 +14,9 @@ import type {
   App,
   DriversReport,
   FeaturesReport,
+  Findings,
+  HoldingListing,
+  LeftoverItem,
   Edition,
   Event,
   Op,
@@ -51,6 +54,14 @@ const MB = 1000 * 1000;
 //   ?hold=unknown       pauses inside a step that reports no fraction (an AUR build)
 //   ?selfupdate=asset   the release check answers an install_asset remedy
 //   ?selfupdate=none    this copy is the newest, so no notice
+//   ?leftovers=1        a removal ends with a scan (Discord's, as in the
+//                       design's section 6) and the holding area has two
+//                       entries, one of them waiting. Combine it with
+//                       ?platform=windows
+//   ?clearfail=1        with ?leftovers=1, the first move to the holding area
+//                       fails (the list is still there to try again from)
+//   ?waiting=1          with ?leftovers=1, a removal waits for the uninstaller
+//                       until "It has finished" is pressed
 // A plan whose operations name a package called "fail-please" fails at that
 // step; one naming "no-such-package" cannot be planned at all, so the confirm
 // dialog shows what api.plan failing looks like.
@@ -58,6 +69,9 @@ const MB = 1000 * 1000;
 const PARAMS = new URLSearchParams(window.location.search);
 const FAST = PARAMS.has("fast");
 const HOLD: string | null = PARAMS.get("hold");
+const LEFTOVERS = PARAMS.get("leftovers") === "1";
+const WAITING = PARAMS.get("waiting") === "1";
+let clearFailsLeft = PARAMS.get("clearfail") === "1" ? 1 : 0;
 const FAIL_ID = "fail-please";
 const UNPLANNABLE_ID = "no-such-package";
 
@@ -1019,6 +1033,14 @@ function stepsFor(op: Op): Step[] {
         default:
           return [];
       }
+    case "clearleftovers":
+      return [{ source: "arp", title: "Moving leftovers to the holding area", command: cmd("brokey-clear", op.scan), needs_root: false, weight: 2 }];
+    case "restore":
+      return [{ source: "arp", title: "Restoring from the holding area", command: cmd("brokey-restore", op.holding), needs_root: false, weight: 1 }];
+    case "emptyholding":
+      return [{ source: "arp", title: "Emptying the holding area", command: cmd("brokey-empty", op.holding ?? "all"), needs_root: false, weight: 1 }];
+    case "forceremove":
+      return [{ source: "arp", title: "Removing its folder and registry entry", command: cmd("brokey-force", op.package.id), needs_root: false, weight: 2 }];
   }
 }
 
@@ -1085,6 +1107,77 @@ export async function plan(ops: Op[]): Promise<PlanPreview> {
     notices.push("AUR packages are built on this machine as your user. A large build can take several minutes.");
   }
   return { plan: built, notices };
+}
+
+// ── Leftovers and the holding area ──────────────────────────────────────────
+
+const MOCK_SCAN = "scan-mock-1";
+
+function discordFindings(pkg: PackageRef): Findings {
+  const item = (
+    id: string,
+    kind: LeftoverItem["kind"],
+    location: string,
+    size: number | null,
+    confidence: LeftoverItem["confidence"],
+    reason: string,
+  ): LeftoverItem => ({
+    id,
+    kind,
+    location,
+    size,
+    confidence,
+    scope: "user",
+    ticked: confidence === "certain" || confidence === "likely",
+    reason,
+  });
+  return {
+    scan: MOCK_SCAN,
+    package: pkg,
+    name: "Discord",
+    items: [
+      item("item-0", "folder", "C:\\Users\\you\\AppData\\Local\\Discord", 388 * MB, "certain", "It is the application's own install folder."),
+      item("item-1", "folder", "C:\\Users\\you\\AppData\\Roaming\\discord", 24 * MB, "likely", "The folder is named after the application."),
+      item("item-2", "folder", "C:\\Users\\you\\Documents\\Discord", 12000, "yourdata", "The folder is named after the application and is in Documents, where you keep your own files."),
+      item("item-3", "registry_key", "HKCU\\Software\\Discord", null, "likely", "The key is named after the application."),
+      item("item-4", "registry_value", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run | Discord", null, "certain", "It starts a file inside the application's folder."),
+      item("item-5", "shortcut", "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Discord Inc", null, "certain", "The shortcut starts the application."),
+    ],
+    kept: [
+      { location: "C:\\Users\\you\\AppData\\Local\\Squirrel", used_by: "Another application that updates itself the same way" },
+      { location: "HKCU\\Software\\Discord Inc", used_by: "Discord PTB" },
+    ],
+    not_offered_cloud: 0,
+    unreadable: 0,
+  };
+}
+
+const findingsByScan = new Map<string, Findings>();
+
+export async function leftovers_get(scan: string): Promise<Findings | null> {
+  await delay(60);
+  return findingsByScan.get(scan) ?? null;
+}
+
+/** The user saying the uninstaller has finished; the mock never waits for one. */
+export async function await_finished(plan: string): Promise<void> {
+  if (plans.get(plan)?.state !== "running") throw new Error(`There is no running plan ${plan} to tell. It may have finished already.`);
+  finishers.get(plan)?.();
+}
+
+/** Resolves a plan's wait for its uninstaller, by plan id. */
+const finishers = new Map<string, () => void>();
+
+export async function holding_list(): Promise<HoldingListing> {
+  await delay(60);
+  if (!LEFTOVERS) return { entries: [], unreadable: [] };
+  return {
+    entries: [
+      { id: "h-discord", name: "Discord", created: new Date((NOW - 2 * DAY) * 1000).toISOString(), size: 412 * MB, items: 5, scope_machine: false, waiting: false, incomplete: false },
+      { id: "h-oldapp", name: "Old Application", created: new Date((NOW - 45 * DAY) * 1000).toISOString(), size: 96 * MB, items: 3, scope_machine: true, waiting: true, incomplete: false },
+    ],
+    unreadable: [],
+  };
 }
 
 const target = new EventTarget();
@@ -1226,6 +1319,10 @@ function logLines(step: Step): string[] {
 
 /** Whether this step is the one that fails: its command names the package called fail-please. */
 function fails(step: Step): boolean {
+  if (step.command.program === "brokey-clear" && clearFailsLeft > 0) {
+    clearFailsLeft -= 1;
+    return true;
+  }
   return step.command.args.includes(FAIL_ID);
 }
 
@@ -1269,13 +1366,29 @@ async function run(status: PlanStatus) {
       if (midway && ((HOLD === "" || HOLD === "step") && i === 0)) await hold();
       if (midway && HOLD === "unknown" && !known) await hold();
     }
+    if (WAITING && LEFTOVERS && i === 0 && p.ops.some((o) => o.op === "remove")) {
+      emit({ event: "waiting", plan: id, step: i, message: "Waiting for the uninstaller to finish. Close its window when it is done." });
+      await new Promise<void>((resolve) => {
+        const poll = window.setInterval(() => {
+          if (cancelled.has(id)) done();
+        }, 200);
+        const done = () => {
+          window.clearInterval(poll);
+          resolve();
+        };
+        finishers.set(id, done);
+      });
+      finishers.delete(id);
+      if (!alive()) return;
+    }
     if (failing) {
       await delay(200);
       if (!alive()) return;
-      const reason = `error: target not found: ${FAIL_ID}`;
+      const clearing = step.command.program === "brokey-clear";
+      const reason = clearing ? "error: access denied" : `error: target not found: ${FAIL_ID}`;
       emit({ event: "log", plan: id, step: i, line: reason, stderr: true });
       emit({ event: "log", plan: id, step: i, line: "error: failed to prepare transaction (target not found)", stderr: true });
-      emit({ event: "step_finished", plan: id, step: i, ok: false, message: `${step.command.program} could not find a package called ${FAIL_ID}.` });
+      emit({ event: "step_finished", plan: id, step: i, ok: false, message: clearing ? "Brokey could not move one item because Windows refused access. Nothing else was changed." : `${step.command.program} could not find a package called ${FAIL_ID}.` });
       running.delete(id);
       emit({ event: "plan_finished", plan: id, ok: false, message: summary(p.ops, false, step) });
       return;
@@ -1286,6 +1399,12 @@ async function run(status: PlanStatus) {
   running.delete(id);
   if (!alive()) return;
   for (const op of p.ops) applyOp(op);
+  const removed = p.ops.find((o) => o.op === "remove" || o.op === "forceremove");
+  if (LEFTOVERS && removed && (removed.op === "remove" || removed.op === "forceremove")) {
+    const found = discordFindings(removed.package);
+    findingsByScan.set(found.scan, found);
+    emit({ event: "leftovers", plan: id, scan: found.scan, count: found.items.length });
+  }
   // DISM exits 3010 for most feature changes, and the runner says so at the end.
   const restart = p.ops.some((o) => "package" in o && o.package.source === "features") ? ` ${RESTART_NOTE}` : "";
   emit({ event: "plan_finished", plan: id, ok: true, message: summary(p.ops, true) + restart });

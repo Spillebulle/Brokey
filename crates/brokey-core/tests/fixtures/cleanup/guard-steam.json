@@ -1,0 +1,170 @@
+{
+  "folders": {
+    "ProgramFiles": "C:\\Program Files",
+    "ProgramFilesX86": "C:\\Program Files (x86)",
+    "ProgramData": "C:\\ProgramData",
+    "AppData": "C:\\Users\\you\\AppData\\Roaming",
+    "LocalAppData": "C:\\Users\\you\\AppData\\Local",
+    "LocalLow": "C:\\Users\\you\\AppData\\LocalLow",
+    "Documents": "C:\\Users\\you\\Documents",
+    "SavedGames": "C:\\Users\\you\\Saved Games",
+    "StartMenuMachine": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+    "StartMenuUser": "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+    "Desktop": "C:\\Users\\you\\Desktop",
+    "Windows": "C:\\Windows",
+    "Profile": "C:\\Users\\you"
+  },
+  "dirs": {
+    "C:\\Program Files (x86)": [
+      {
+        "name": "Steam",
+        "is_dir": true
+      }
+    ],
+    "C:\\Program Files (x86)\\Steam": [
+      {
+        "name": "steam.exe",
+        "size": 4000000
+      },
+      {
+        "name": "steamapps",
+        "is_dir": true
+      }
+    ],
+    "C:\\Program Files (x86)\\Steam\\steamapps": [
+      {
+        "name": "common",
+        "is_dir": true
+      }
+    ],
+    "C:\\Program Files (x86)\\Steam\\steamapps\\common": [
+      {
+        "name": "Fallout 4",
+        "is_dir": true
+      },
+      {
+        "name": "Portal 2",
+        "is_dir": true
+      }
+    ],
+    "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Fallout 4": [
+      {
+        "name": "Data",
+        "is_dir": true
+      }
+    ],
+    "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Fallout 4\\Data": [
+      {
+        "name": "plugin.dll",
+        "size": 3000
+      }
+    ],
+    "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Portal 2": [
+      {
+        "name": "portal2.exe",
+        "size": 9000
+      }
+    ],
+    "C:\\Users\\you\\AppData\\Local": [
+      {
+        "name": "Fallout4",
+        "is_dir": true
+      }
+    ],
+    "C:\\Users\\you\\AppData\\Local\\Fallout4": [
+      {
+        "name": "Plugins.txt",
+        "size": 100
+      }
+    ],
+    "C:\\Users\\you\\Documents": [
+      {
+        "name": "My Games",
+        "is_dir": true
+      }
+    ],
+    "C:\\Users\\you\\Documents\\My Games": [
+      {
+        "name": "Fallout4",
+        "is_dir": true
+      },
+      {
+        "name": "Skyrim",
+        "is_dir": true
+      }
+    ],
+    "C:\\Users\\you\\Documents\\My Games\\Fallout4": [
+      {
+        "name": "Fallout4.ini",
+        "size": 1000
+      }
+    ],
+    "C:\\Users\\you\\Documents\\My Games\\Skyrim": [
+      {
+        "name": "Skyrim.ini",
+        "size": 1000
+      }
+    ]
+  },
+  "registry": {
+    "Hkcu": {
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Run": {
+        "values": [
+          [
+            "Steam",
+            "\"C:\\Program Files (x86)\\Steam\\steam.exe\" -silent"
+          ]
+        ]
+      }
+    },
+    "Hklm32": {
+      "Software": {
+        "subkeys": [
+          "Valve"
+        ]
+      },
+      "Software\\Valve": {
+        "subkeys": [
+          "Steam"
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall": {
+        "subkeys": [
+          "Steam"
+        ]
+      },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Steam": {
+        "values": [
+          [
+            "DisplayName",
+            "Steam"
+          ],
+          [
+            "Publisher",
+            "Valve Corporation"
+          ],
+          [
+            "UninstallString",
+            "C:\\Program Files (x86)\\Steam\\uninstall.exe"
+          ]
+        ]
+      }
+    }
+  },
+  "services": [
+    {
+      "name": "Steam Client Service",
+      "image_path": "\"C:\\Program Files (x86)\\Common Files\\Steam\\steamservice.exe\" /RunAsService"
+    }
+  ],
+  "firewall": [
+    {
+      "id": "{Fallout 4}", "name": "Fallout 4",
+      "program": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Fallout 4\\Fallout4.exe"
+    },
+    {
+      "id": "{Steam}", "name": "Steam",
+      "program": "C:\\Program Files (x86)\\Steam\\steam.exe"
+    }
+  ]
+}

@@ -17,11 +17,13 @@ import { sourceLabel, type Op, type PlanPreview, type PlanStatus, type SourceKin
 import { useActivity } from "./store";
 
 /** "Turn on" and "Turn off" are a Windows feature's words: it is switched, never installed or removed. */
-export type Verb = "Install" | "Remove" | "Update" | "Apply" | "Turn on" | "Turn off";
+export type Verb = "Install" | "Remove" | "Update" | "Apply" | "Turn on" | "Turn off" | "Move" | "Restore" | "Empty";
 
 export interface FlowState {
   open: boolean;
   title: string;
+  /** A sentence the caller wants read first, in place of the removal sentence. */
+  intro: string | null;
   ops: Op[];
   /** What api.plan answered; null until it has. */
   preview: PlanPreview | null;
@@ -57,6 +59,7 @@ export function trackPlan(status: PlanStatus): string {
 export const useFlow = create<FlowState>((set, get) => ({
   open: false,
   title: "",
+  intro: null,
   ops: [],
   preview: null,
   error: null,
@@ -84,7 +87,7 @@ export const useFlow = create<FlowState>((set, get) => ({
 }));
 
 /** Start a plan for these operations. Resolves with the plan's id, or null when it did not start. */
-export function startOps(ops: Op[], title: string): Promise<string | null> {
+export function startOps(ops: Op[], title: string, intro: string | null = null): Promise<string | null> {
   if (useFlow.getState().open) {
     toast("Another transaction is waiting to be confirmed. Finish with that one first.", "caution");
     return Promise.resolve(null);
@@ -96,7 +99,7 @@ export function startOps(ops: Op[], title: string): Promise<string | null> {
   return new Promise((resolve) => {
     settle = resolve;
     const generation = useFlow.getState().generation + 1;
-    useFlow.setState({ open: true, title, ops, preview: null, error: null, starting: false, generation });
+    useFlow.setState({ open: true, title, intro, ops, preview: null, error: null, starting: false, generation });
     api
       .plan(ops)
       .then((preview) => {
@@ -125,6 +128,10 @@ export function verbFor(ops: Op[]): Verb {
   const features = ops.length > 0 && ops.every((o) => "package" in o && o.package.source === "features");
   if (features && kinds.size === 1 && kinds.has("install")) return "Turn on";
   if (features && kinds.size === 1 && kinds.has("remove")) return "Turn off";
+  if (kinds.size === 1 && kinds.has("clearleftovers")) return "Move";
+  if (kinds.size === 1 && kinds.has("restore")) return "Restore";
+  if (kinds.size === 1 && kinds.has("emptyholding")) return "Empty";
+  if (kinds.size === 1 && kinds.has("forceremove")) return "Remove";
   if (kinds.size === 0) return "Install";
   if (kinds.size === 1 && kinds.has("install")) return "Install";
   if (kinds.size === 1 && kinds.has("remove")) return "Remove";
@@ -162,6 +169,7 @@ export function summarise(ops: Op[]): string {
     if (op.op === "updateall") whole.push(op.source);
     else if (op.op === "refresh") refreshed.push(op.source);
     else if (op.op === "setup") setups.push(op.source);
+    else if (op.op === "clearleftovers" || op.op === "restore" || op.op === "emptyholding") continue;
     else perSource.set(op.package.source, (perSource.get(op.package.source) ?? 0) + 1);
   }
   const parts: string[] = [];

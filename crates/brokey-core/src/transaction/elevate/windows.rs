@@ -46,11 +46,14 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcessToken, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Shell::{
-    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    ShellExecuteExW,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 
 use super::Elevated;
+use crate::cleanup::internal::{Refused, SHELL_OPEN_SLICE, STOPPED_WAITING};
+use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
 
 /// The base name no other run will choose, which the two pipe names are
 /// derived from. The process id alone is not enough: one session can run
@@ -513,9 +516,267 @@ pub fn start(helper: &Path, wrapper: &[String]) -> io::Result<Elevated> {
     })
 }
 
+/// One argument as `CommandLineToArgvW` will read it back: quoted when it
+/// has a space, a tab or a quote or is empty, with each quote and the
+/// backslashes before a quote or before the closing quote doubled.
+fn quote_argument(arg: &str) -> String {
+    if !arg.is_empty() && !arg.contains([' ', '\t', '"']) {
+        return arg.to_string();
+    }
+    let mut out = String::from("\"");
+    let mut backslashes = 0usize;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.push_str(&"\\".repeat(backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.push_str(&"\\".repeat(backslashes));
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    out.push_str(&"\\".repeat(backslashes * 2));
+    out.push('"');
+    out
+}
+
+/// The program the shell is asked to open, opened as itself and checked
+/// on that handle: a regular file whose name ends in `.exe`, never a folder,
+/// a junction, a symbolic link or any other reparse point named like one.
+/// Opened without `FILE_FLAG_BACKUP_SEMANTICS`, so a folder does not open
+/// at all, and shared for reading only, so that while the handle is held
+/// nobody can write the file, rename it or delete it: what Windows starts
+/// is what was checked.
+fn open_program(path: &Path) -> Result<OwnedHandle, String> {
+    use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        FileAttributeTagInfo, GetFileInformationByHandleEx, OPEN_EXISTING,
+    };
+    let shown = path.display();
+    let not_a_program = || {
+        format!(
+            "Brokey did not start {shown}, because it is not a program file. Remove the \
+             application again from Brokey."
+        )
+    };
+    if !path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+    {
+        return Err(not_a_program());
+    }
+    let name = wide_null(&path.to_string_lossy());
+    // SAFETY: `name` is NUL-terminated and outlives the call; no security
+    // attributes and no template.
+    let raw = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    let Some(handle) = crate::system::windows::owned_handle(raw) else {
+        return Err(format!(
+            "Brokey did not start {shown}, because it could not open it as a program file ({}). \
+             Close anything using it and remove the application again from Brokey.",
+            io::Error::last_os_error()
+        ));
+    };
+    let mut info = FILE_ATTRIBUTE_TAG_INFO {
+        FileAttributes: 0,
+        ReparseTag: 0,
+    };
+    // SAFETY: an open handle and a plain-data out parameter of the size given.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle.as_raw_handle() as _,
+            FileAttributeTagInfo,
+            (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+            size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if ok == 0
+        || info.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
+    {
+        return Err(not_a_program());
+    }
+    Ok(handle)
+}
+
+/// Start an uninstaller **as the user** and wait for it, for the one case
+/// spec §10 sanctions: an Add/Remove uninstaller the closed list refused
+/// because this account could replace its file. Brokey will not elevate
+/// such a file itself; started this way, with the `open` verb and never
+/// `runas`, it elevates itself through its own manifest if it wants to, so
+/// the prompt Windows shows names that file, exactly as when it is started
+/// from Settings. Brokey asks for nothing here.
+///
+/// It takes a [`Refused`], which only `cleanup::internal`'s `SHELL_OPEN`
+/// step can make, and only out of the closed list refusing that very command
+/// as one this account can replace. So nothing else in the workspace can get
+/// here. It lives here so that every call to `ShellExecuteEx` in the
+/// workspace stays in one place to audit.
+///
+/// The wait is in slices of `SHELL_OPEN_SLICE`, and when `cancelled` says so
+/// it stops waiting: the uninstaller is the user's window and is never
+/// killed.
+///
+/// `Ok` is the exit code, or 0 when the shell handed the file on without a
+/// process to wait on; whether the uninstall happened is the next step's
+/// question, which looks at the uninstall key.
+pub(crate) fn shell_open(refused: &Refused, cancelled: &dyn Fn() -> bool) -> Result<u32, String> {
+    let program = refused.program();
+    // Held until the shell has started it, so that it cannot be swapped
+    // for something else after the check.
+    let checked = open_program(program)?;
+    let file_wide = wide_null(&program.to_string_lossy());
+    let verb_wide = wide_null("open");
+    let parameters = refused
+        .args()
+        .iter()
+        .map(|a| quote_argument(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let parameters_wide = wide_null(&parameters);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: shell_execute_info_size(),
+        // `NOCLOSEPROCESS` to wait on it; `NOASYNC` because this runs on the
+        // runner's worker thread, which has no message pump; `FLAG_NO_UI` so
+        // a failure comes back as a sentence of ours.
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+        lpVerb: verb_wide.as_ptr(),
+        lpFile: file_wide.as_ptr(),
+        lpParameters: parameters_wide.as_ptr(),
+        nShow: SW_SHOWNORMAL,
+        ..Default::default()
+    };
+    // SAFETY: `info` is a fully initialised `SHELLEXECUTEINFOW` whose string
+    // pointers are all alive in the bindings above for the whole call.
+    let ok = unsafe { ShellExecuteExW(&mut info) };
+    drop(checked);
+    if ok == 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(ERROR_CANCELLED as i32) {
+            return Err(format!(
+                "You did not allow {} to start, so nothing was removed. Remove it again and \
+                 choose Yes when Windows asks.",
+                program.display()
+            ));
+        }
+        return Err(format!(
+            "Windows could not start {} ({err}). Remove it again from Brokey, or from \
+             Settings, Apps.",
+            program.display()
+        ));
+    }
+    if info.hProcess.is_null() {
+        return Ok(0);
+    }
+    // SAFETY: `hProcess` is a process handle `ShellExecuteExW` opened for us
+    // because of `SEE_MASK_NOCLOSEPROCESS`, checked non-null above; this
+    // takes ownership of it so it is closed exactly once.
+    let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess as RawHandle) };
+    let handle = process.as_raw_handle() as HANDLE;
+    let could_not_wait = |e: io::Error| {
+        format!(
+            "Brokey could not wait for {} ({e}). Check whether it finished, then look in \
+             Installed.",
+            program.display()
+        )
+    };
+    let slice = SHELL_OPEN_SLICE.as_millis() as u32;
+    loop {
+        // SAFETY: `handle` is the valid process handle `process` owns for
+        // the whole loop; this waits at most `slice` milliseconds.
+        let waited = unsafe { WaitForSingleObject(handle, slice) };
+        if waited == WAIT_OBJECT_0 {
+            break;
+        }
+        if waited != WAIT_TIMEOUT {
+            return Err(could_not_wait(io::Error::last_os_error()));
+        }
+        if cancelled() {
+            return Err(STOPPED_WAITING.to_string());
+        }
+    }
+    let mut code: u32 = 0;
+    // SAFETY: the same valid, now-exited process handle, and a writable
+    // out-parameter.
+    if unsafe { GetExitCodeProcess(handle, &mut code) } == 0 {
+        return Err(could_not_wait(io::Error::last_os_error()));
+    }
+    Ok(code)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the shell is asked to open is a program file, checked on a
+    /// handle opened as itself: not a folder named like one, not a junction
+    /// or a link named like one, and not a document. While the handle is
+    /// held the file cannot be renamed or replaced.
+    #[test]
+    fn only_a_plain_exe_file_is_opened_for_the_shell() {
+        let temp = tempfile::tempdir().unwrap();
+        let program = temp.path().join("uninstall.exe");
+        std::fs::write(&program, "MZ").unwrap();
+        let document = temp.path().join("readme.txt");
+        std::fs::write(&document, "hello").unwrap();
+        let folder = temp.path().join("folder.exe");
+        std::fs::create_dir(&folder).unwrap();
+        let junction = temp.path().join("junction.exe");
+        let made = std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&junction)
+            .arg(&folder)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+
+        let held = open_program(&program).expect("a plain program file");
+        let moved = std::fs::rename(&program, temp.path().join("other.exe"));
+        assert!(moved.is_err(), "it cannot be swapped while it is held");
+        drop(held);
+
+        for refused in [
+            &document,
+            &folder,
+            &junction,
+            &temp.path().join("missing.exe"),
+        ] {
+            let said = open_program(refused).map(|_| ());
+            assert!(
+                matches!(&said, Err(s) if s.contains(&refused.display().to_string())),
+                "{}: {said:?}",
+                refused.display()
+            );
+        }
+        std::fs::remove_dir(&junction).unwrap();
+    }
+
+    #[test]
+    fn a_shell_argument_reads_back_as_itself() {
+        assert_eq!(quote_argument("plain"), "plain");
+        assert_eq!(quote_argument(""), "\"\"");
+        assert_eq!(quote_argument("two words"), "\"two words\"");
+        assert_eq!(quote_argument(r#"say "hi""#), r#""say \"hi\"""#);
+        assert_eq!(quote_argument(r"C:\a dir\"), r#""C:\a dir\\""#);
+        assert_eq!(quote_argument(r"C:\no\space\"), r"C:\no\space\");
+    }
 
     /// The client half of a run, without elevating anything: open both
     /// pipes in the order `accept` connects them, read one line of plan,

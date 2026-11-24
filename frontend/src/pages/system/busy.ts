@@ -32,7 +32,7 @@ export function useBusy(): Busy {
       for (const op of status.plan.ops) {
         if (op.op === "updateall") sources.add(op.source);
         else if (op.op === "setup") setups.add(op.source);
-        else if (op.op === "refresh") continue;
+        else if (op.op === "refresh" || op.op === "clearleftovers" || op.op === "restore" || op.op === "emptyholding") continue;
         else refs.add(refKey(op.package));
       }
     }

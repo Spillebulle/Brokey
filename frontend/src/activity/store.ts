@@ -41,6 +41,12 @@ function stub(id: string): PlanStatus {
 
 const LIVE: ReadonlySet<PlanState> = new Set<PlanState>(["pending", "authorising", "running"]);
 
+/** The scan a removal ended with, or null when it made none. */
+export function leftoversOf(plan: PlanStatus): { scan: string; count: number } | null {
+  for (const e of plan.events) if (e.event === "leftovers") return { scan: e.scan, count: e.count };
+  return null;
+}
+
 export function isLive(state: PlanState): boolean {
   return LIVE.has(state);
 }
@@ -111,11 +117,22 @@ export const useActivity = create<ActivityState>((set, get) => ({
       if (!(next.state === "done" && namesItsOwnOutcome(next))) {
         toast(event.message, next.state === "done" ? "good" : next.state === "failed" ? "error" : "neutral");
       }
-      if (next.state !== "failed") {
+      // A removal that found leftovers stays until the list has been answered.
+      if (next.state !== "failed" && !(next.state === "done" && leftoversOf(next) !== null)) {
         window.setTimeout(() => {
           const now = get().plans[event.plan];
           if (now && now.state === next.state) get().dismiss(event.plan);
         }, LINGER_MS);
+      }
+      // The list a clear came from stays until the clear has finished well, so a clear that fails or is
+      // cancelled can be tried again from it.
+      if (next.state === "done") {
+        for (const op of next.plan.ops) {
+          if (op.op !== "clearleftovers") continue;
+          for (const other of Object.values(get().plans)) {
+            if (other.plan.id !== next.plan.id && leftoversOf(other)?.scan === op.scan) get().dismiss(other.plan.id);
+          }
+        }
       }
       if (next.state === "done") for (const listener of [...finished]) listener(next);
     }

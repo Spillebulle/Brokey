@@ -11,6 +11,8 @@ import type {
   DriversReport,
   Event,
   FeaturesReport,
+  Findings,
+  HoldingListing,
   Op,
   Package,
   PackageRef,
@@ -117,6 +119,21 @@ export function cancel_plan(id: string): Promise<void> {
 
 export function active_plans(): Promise<PlanStatus[]> {
   return inTauri ? call("active_plans") : mock().then((m) => m.active_plans());
+}
+
+/** The scan a removal made, or null when this session has no scan by that id. */
+export function leftovers_get(scan: string): Promise<Findings | null> {
+  return inTauri ? call("leftovers_get", { scan }) : mock().then((m) => m.leftovers_get(scan));
+}
+
+/** The user saying the uninstaller a plan is waiting on has finished. */
+export function await_finished(plan: string): Promise<void> {
+  return inTauri ? call("await_finished", { plan }) : mock().then((m) => m.await_finished(plan));
+}
+
+/** Every holding entry, newest first, and the roots that could not be read. */
+export function holding_list(): Promise<HoldingListing> {
+  return inTauri ? call("holding_list") : mock().then((m) => m.holding_list());
 }
 
 export function drivers(): Promise<DriversReport> {

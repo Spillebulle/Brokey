@@ -10,9 +10,10 @@ import { startOps } from "../activity/flow";
 import * as api from "../api";
 import { Button, Dropdown, Figure, Notice, Segmented, Skeleton, Toggle, toast, type DropdownOption } from "../components";
 import { ICON } from "../components/icons";
-import { useShell } from "../shell/store";
+import { selectIsWindows, useShell } from "../shell/store";
 import { SOURCE_KINDS, sourceLabel, type SelfUpdate, type Settings, type SourceKind, type SourceSetup, type Theme } from "../types";
 import { useBusy } from "./system/busy";
+import { Holding } from "./system/Holding";
 import { ThemeCard } from "./system/ThemeCard";
 import "./system/system.css";
 
@@ -131,6 +132,7 @@ export function SettingsPage() {
   const load = useShell((s) => s.load);
   const saveSettings = useShell((s) => s.saveSettings);
 
+  const windows = useShell(selectIsWindows);
   const busy = useBusy();
 
   const [self, setSelf] = useState<SelfUpdate | null>(null);
@@ -326,6 +328,12 @@ export function SettingsPage() {
               }
             />
           </Group>
+
+          {windows ? (
+            <Group eyebrow="Holding area">
+              <Holding />
+            </Group>
+          ) : null}
 
           <Group eyebrow="About">
             <Setting
