@@ -2200,6 +2200,66 @@ mod tests {
         assert_eq!(used_by(&kept, &format!(r"{PF}\Widget")), Some("Widget"));
     }
 
+    /// Two more applications from the publisher being removed, an Inno
+    /// one with no `InstallLocation` and an NSIS one whose value is blank:
+    /// each still claims its uninstaller's folder, and so the publisher's
+    /// folder around it is kept, never offered (Review Focus 1).
+    const SIBLINGS: &str = r#"{
+      "folders": {
+        "ProgramFiles": "C:\\Program Files",
+        "ProgramFilesX86": "C:\\Program Files (x86)",
+        "ProgramData": "C:\\ProgramData",
+        "AppData": "C:\\Users\\you\\AppData\\Roaming",
+        "LocalAppData": "C:\\Users\\you\\AppData\\Local",
+        "LocalLow": "C:\\Users\\you\\AppData\\LocalLow",
+        "Documents": "C:\\Users\\you\\Documents",
+        "SavedGames": "C:\\Users\\you\\Saved Games",
+        "StartMenuMachine": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+        "StartMenuUser": "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+        "Desktop": "C:\\Users\\you\\Desktop",
+        "Windows": "C:\\Windows",
+        "Profile": "C:\\Users\\you"
+      },
+      "registry": { "Hklm32": {
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall": {
+          "subkeys": ["Acme Paint_is1", "Acme Draw"]
+        },
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Acme Paint_is1": { "values": [
+          ["DisplayName", "Acme Paint"],
+          ["Publisher", "Acme"],
+          ["UninstallString", "\"C:\\Program Files\\Acme\\Paint\\unins000.exe\""]
+        ] },
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Acme Draw": { "values": [
+          ["DisplayName", "Acme Draw"],
+          ["Publisher", "Acme"],
+          ["InstallLocation", "  "],
+          ["UninstallString", "C:\\Program Files (x86)\\Acme\\Draw\\uninst.exe /S"]
+        ] }
+      } }
+    }"#;
+
+    #[test]
+    fn an_uninstaller_with_no_install_location_still_claims_its_publishers_folder() {
+        let view = FixtureView::from_json(SIBLINGS);
+        let removing = blank_hints("Acme Studio", Some("Acme"));
+        let (offered, kept) = guard(
+            vec![
+                folder(&format!(r"{PF}\Acme"), Confidence::Likely),
+                folder(&format!(r"{X86}\Acme"), Confidence::Likely),
+                folder(&format!(r"{PF}\Acme\Studio"), Confidence::Certain),
+            ],
+            &claims(&view, &[], Some(&removing)),
+            &view,
+        );
+        assert_eq!(
+            locations(&offered),
+            vec![format!(r"{PF}\Acme\Studio")],
+            "{kept:?}"
+        );
+        assert_eq!(used_by(&kept, &format!(r"{PF}\Acme")), Some("Acme Paint"));
+        assert_eq!(used_by(&kept, &format!(r"{X86}\Acme")), Some("Acme Draw"));
+    }
+
     #[test]
     fn only_the_machine_hive_has_a_32_bit_view_to_fold() {
         assert_eq!(
