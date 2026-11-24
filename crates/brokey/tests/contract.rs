@@ -439,6 +439,20 @@ fn every_op() -> Vec<Op> {
         Op::Setup {
             source: SourceKind::Snap,
         },
+        Op::ClearLeftovers {
+            scan: "scan-1".into(),
+            items: vec!["i1".into(), "i2".into()],
+        },
+        Op::Restore {
+            holding: "h-1".into(),
+        },
+        Op::EmptyHolding { holding: None },
+        Op::EmptyHolding {
+            holding: Some("h-1".into()),
+        },
+        Op::ForceRemove {
+            package: reference(),
+        },
     ]
 }
 
@@ -480,6 +494,16 @@ fn every_event() -> Vec<Event> {
             step: 0,
             ok: true,
             message: None,
+        },
+        Event::Leftovers {
+            plan: plan.clone(),
+            scan: "scan-1".into(),
+            count: 3,
+        },
+        Event::Waiting {
+            plan: plan.clone(),
+            step: 0,
+            message: "Waiting for the uninstaller.".into(),
         },
         Event::PlanFinished {
             plan,
@@ -640,6 +664,74 @@ fn everything_the_page_receives_matches_types_ts() {
     for op in every_op() {
         c.value("Op", &op);
     }
+    for confidence in [
+        Confidence::Certain,
+        Confidence::Likely,
+        Confidence::Possible,
+        Confidence::YourData,
+    ] {
+        c.value("Confidence", &confidence);
+    }
+    for kind in [
+        ItemKind::File,
+        ItemKind::Folder,
+        ItemKind::RegistryKey,
+        ItemKind::RegistryValue,
+        ItemKind::Shortcut,
+        ItemKind::Service,
+        ItemKind::Task,
+        ItemKind::FirewallRule,
+    ] {
+        c.value("ItemKind", &kind);
+    }
+    for scope in [Scope::User, Scope::Machine] {
+        c.value("Scope", &scope);
+    }
+    let item = |confidence, ticked| LeftoverItem {
+        id: "i1".into(),
+        kind: ItemKind::Folder,
+        location: r"C:\Users\a\AppData\Roaming\Steam".into(),
+        size: Some(1024),
+        confidence,
+        scope: Scope::User,
+        ticked,
+        reason: "The folder is named after the application.".into(),
+    };
+    c.value(
+        "Findings",
+        &Findings {
+            scan: "scan-1".into(),
+            package: reference(),
+            name: "Steam".into(),
+            items: vec![
+                item(Confidence::Certain, true),
+                item(Confidence::Likely, true),
+                item(Confidence::Possible, false),
+                LeftoverItem {
+                    size: None,
+                    ..item(Confidence::YourData, false)
+                },
+            ],
+            kept: vec![KeptItem {
+                location: r"C:\Program Files\Valve".into(),
+                used_by: "Another Valve application".into(),
+            }],
+            not_offered_cloud: 2,
+            unreadable: 1,
+        },
+    );
+    c.value(
+        "HoldingEntry",
+        &HoldingEntry {
+            id: "h-1".into(),
+            name: "Steam".into(),
+            created: "2026-11-24T10:00:00+00:00".into(),
+            size: 2048,
+            items: 4,
+            scope_machine: true,
+            waiting: false,
+        },
+    );
     c.value("Plan", &plan());
     for event in every_event() {
         c.value("Event", &event);

@@ -354,18 +354,126 @@ pub enum Op {
     Setup {
         source: SourceKind,
     },
+    /// Move the ticked leftovers of a scan into the holding area. `items`
+    /// are the ids from `Findings`, so the page never sends a path.
+    ClearLeftovers {
+        scan: String,
+        items: Vec<String>,
+    },
+    /// Put a holding entry back where it came from.
+    Restore {
+        holding: String,
+    },
+    /// Delete a holding entry for good, or every entry when `None`.
+    EmptyHolding {
+        holding: Option<String>,
+    },
+    /// Remove the application's own uninstall entry when its uninstaller
+    /// cannot be run.
+    ForceRemove {
+        package: PackageRef,
+    },
 }
 
 impl Op {
-    /// The source that carries the operation out, or is set up by it.
-    pub fn source(&self) -> SourceKind {
+    /// The source that carries the operation out, or is set up by it. The
+    /// cleanup operations that name no package have none.
+    pub fn source(&self) -> Option<SourceKind> {
         match self {
-            Op::Install { package } | Op::Remove { package } | Op::Update { package } => {
-                package.source
+            Op::Install { package }
+            | Op::Remove { package }
+            | Op::Update { package }
+            | Op::ForceRemove { package } => Some(package.source),
+            Op::UpdateAll { source } | Op::Refresh { source } | Op::Setup { source } => {
+                Some(*source)
             }
-            Op::UpdateAll { source } | Op::Refresh { source } | Op::Setup { source } => *source,
+            Op::ClearLeftovers { .. } | Op::Restore { .. } | Op::EmptyHolding { .. } => None,
         }
     }
+}
+
+/// How sure the scanner is that a leftover belongs to the removed
+/// application. Shown as a word in a neutral badge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Confidence {
+    Certain,
+    Likely,
+    Possible,
+    /// Documents and saves the user made; never ticked.
+    YourData,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemKind {
+    File,
+    Folder,
+    RegistryKey,
+    RegistryValue,
+    Shortcut,
+    Service,
+    Task,
+    FirewallRule,
+}
+
+/// Whose it is: clearing a machine item needs the helper.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    User,
+    Machine,
+}
+
+/// One thing a scan found that the removed application left behind.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LeftoverItem {
+    /// Stable within its scan; what `Op::ClearLeftovers` carries.
+    pub id: String,
+    pub kind: ItemKind,
+    pub location: String,
+    pub size: Option<u64>,
+    pub confidence: Confidence,
+    pub scope: Scope,
+    pub ticked: bool,
+    /// One sentence on why it matched, shown on hover.
+    pub reason: String,
+}
+
+/// Something that looked like a leftover and was left alone because
+/// another installed application uses it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptItem {
+    pub location: String,
+    pub used_by: String,
+}
+
+/// What a scan found after an uninstall.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Findings {
+    pub scan: String,
+    pub package: PackageRef,
+    pub name: String,
+    pub items: Vec<LeftoverItem>,
+    pub kept: Vec<KeptItem>,
+    /// Items in cloud-synced folders, which the scan never offers.
+    pub not_offered_cloud: u32,
+    /// Places the scan could not read.
+    pub unreadable: u32,
+}
+
+/// One cleared batch waiting in the holding area.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HoldingEntry {
+    pub id: String,
+    pub name: String,
+    /// RFC 3339.
+    pub created: String,
+    pub size: u64,
+    pub items: u32,
+    pub scope_machine: bool,
+    /// Machine items past 30 days that have not been emptied yet.
+    pub waiting: bool,
 }
 
 /// A process to run. The helper validates `program` and `args` against its
@@ -432,6 +540,20 @@ pub enum Event {
         step: usize,
         ok: bool,
         message: Option<String>,
+    },
+    /// The uninstaller has finished and a scan found leftovers; the page
+    /// opens the review for `scan`.
+    Leftovers {
+        plan: String,
+        scan: String,
+        count: usize,
+    },
+    /// The publisher's uninstaller is still running or open. The page shows
+    /// its two buttons: carry on, or stop waiting.
+    Waiting {
+        plan: String,
+        step: usize,
+        message: String,
     },
     PlanFinished {
         plan: String,
@@ -619,7 +741,7 @@ mod tests {
         let json = serde_json::to_value(&op).unwrap();
         assert_eq!(json, serde_json::json!({"op": "setup", "source": "snap"}));
         assert_eq!(serde_json::from_value::<Op>(json).unwrap(), op);
-        assert_eq!(op.source(), SourceKind::Snap);
+        assert_eq!(op.source(), Some(SourceKind::Snap));
         assert_eq!(
             Op::Install {
                 package: PackageRef {
@@ -628,7 +750,7 @@ mod tests {
                 }
             }
             .source(),
-            SourceKind::Aur
+            Some(SourceKind::Aur)
         );
     }
 }

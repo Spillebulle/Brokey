@@ -208,7 +208,11 @@ export type Op =
   | { op: "update"; package: PackageRef }
   | { op: "updateall"; source: SourceKind }
   | { op: "refresh"; source: SourceKind }
-  | { op: "setup"; source: SourceKind };
+  | { op: "setup"; source: SourceKind }
+  | { op: "clearleftovers"; scan: string; items: string[] }
+  | { op: "restore"; holding: string }
+  | { op: "emptyholding"; holding: string | null }
+  | { op: "forceremove"; package: PackageRef };
 
 export interface Command {
   program: string;
@@ -251,7 +255,62 @@ export type Event =
       ok: boolean;
       message: string | null;
     }
+  | { event: "leftovers"; plan: string; scan: string; count: number }
+  | { event: "waiting"; plan: string; step: number; message: string }
   | { event: "plan_finished"; plan: string; ok: boolean; message: string };
+
+export type Confidence = "certain" | "likely" | "possible" | "yourdata";
+
+export type ItemKind =
+  | "file"
+  | "folder"
+  | "registry_key"
+  | "registry_value"
+  | "shortcut"
+  | "service"
+  | "task"
+  | "firewall_rule";
+
+export type Scope = "user" | "machine";
+
+export interface LeftoverItem {
+  id: string;
+  kind: ItemKind;
+  location: string;
+  size: number | null;
+  confidence: Confidence;
+  scope: Scope;
+  ticked: boolean;
+  /** One sentence on why it matched, shown on hover. */
+  reason: string;
+}
+
+export interface KeptItem {
+  location: string;
+  used_by: string;
+}
+
+export interface Findings {
+  scan: string;
+  package: PackageRef;
+  name: string;
+  items: LeftoverItem[];
+  kept: KeptItem[];
+  not_offered_cloud: number;
+  unreadable: number;
+}
+
+export interface HoldingEntry {
+  id: string;
+  name: string;
+  /** RFC 3339. */
+  created: string;
+  size: number;
+  items: number;
+  scope_machine: boolean;
+  /** Machine items past 30 days that have not been emptied yet. */
+  waiting: boolean;
+}
 
 export interface SystemInfo {
   distro_id: string;

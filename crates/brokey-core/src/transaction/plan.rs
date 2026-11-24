@@ -70,7 +70,9 @@ struct Gatherer<'a> {
 
 impl Gatherer<'_> {
     fn gather(&mut self, op: &Op) -> Result<()> {
-        let kind = op.source();
+        let Some(kind) = op.source() else {
+            return Err(crate::Error::new("Clearing leftovers is not planned yet."));
+        };
         let Some(source) = self.store.source(kind) else {
             return Err(crate::Error::new(format!(
                 "{} is not a source on this machine.",
@@ -730,6 +732,10 @@ mod tests {
             Op::UpdateAll { .. } => "all".to_string(),
             Op::Refresh { .. } => "refresh".to_string(),
             Op::Setup { .. } => "setup".to_string(),
+            Op::ClearLeftovers { scan, .. } => scan.clone(),
+            Op::Restore { holding } => holding.clone(),
+            Op::EmptyHolding { holding } => holding.clone().unwrap_or_else(|| "all".to_string()),
+            Op::ForceRemove { package } => package.id.clone(),
         }
     }
 
@@ -768,6 +774,10 @@ mod tests {
                 true,
             )],
             Op::Setup { .. } => panic!("the planner never asks a source to plan a setup"),
+            Op::ClearLeftovers { .. }
+            | Op::Restore { .. }
+            | Op::EmptyHolding { .. }
+            | Op::ForceRemove { .. } => panic!("a source is never asked to plan a cleanup"),
         }
     }
 

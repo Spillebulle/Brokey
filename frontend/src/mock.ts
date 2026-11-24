@@ -1019,6 +1019,11 @@ function stepsFor(op: Op): Step[] {
         default:
           return [];
       }
+    case "clearleftovers":
+    case "restore":
+    case "emptyholding":
+    case "forceremove":
+      return [];
   }
 }
 

@@ -10,6 +10,7 @@
 //! sending the root steps to the helper and running the rest in the session.
 
 pub mod appstream;
+pub mod cleanup;
 pub mod drivers;
 pub mod group;
 pub mod http;
@@ -354,7 +355,7 @@ impl Store {
     /// Tell each operation's source how its plan ended.
     pub fn finished(&self, ops: &[Op], ok: bool) {
         for op in ops {
-            if let Some(source) = self.source(op.source()) {
+            if let Some(source) = op.source().and_then(|kind| self.source(kind)) {
                 source.finished(op, ok);
             }
         }

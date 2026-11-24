@@ -669,7 +669,14 @@ impl Runner {
                         helper_said = Some((ok, message));
                         break;
                     }
-                    Ok(Event::PlanStarted { .. } | Event::AuthRequired { .. }) => {}
+                    // The helper never says these: the session raises them
+                    // itself, from the steps it runs.
+                    Ok(
+                        Event::PlanStarted { .. }
+                        | Event::AuthRequired { .. }
+                        | Event::Leftovers { .. }
+                        | Event::Waiting { .. },
+                    ) => {}
                     Err(_) => sink.event(Event::Log {
                         plan: id.clone(),
                         step: current,
@@ -1214,6 +1221,19 @@ pub fn summary(ops: &[Op]) -> String {
     if ops.is_empty() {
         return "Finished.".to_string();
     }
+    if let [only] = ops {
+        match only {
+            Op::ClearLeftovers { .. } => {
+                return "Cleared leftovers from the uninstalled application.".to_string();
+            }
+            Op::Restore { .. } => return "Restored the cleared items.".to_string(),
+            Op::EmptyHolding { .. } => return "Emptied the holding area.".to_string(),
+            Op::ForceRemove { package } => {
+                return format!("Forced removal of {}.", package.id);
+            }
+            _ => {}
+        }
+    }
     let n = ops.len();
     let all = |pred: fn(&Op) -> bool| ops.iter().all(pred);
     let (verb, counted) = if all(|op| matches!(op, Op::Install { .. })) {
@@ -1240,6 +1260,37 @@ pub fn summary(ops: &[Op]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cleanup_operations_have_their_own_closing_sentences() {
+        let one = |op: Op| summary(&[op]);
+        assert_eq!(
+            one(Op::ClearLeftovers {
+                scan: "s".into(),
+                items: Vec::new()
+            }),
+            "Cleared leftovers from the uninstalled application."
+        );
+        assert_eq!(
+            one(Op::Restore {
+                holding: "h".into()
+            }),
+            "Restored the cleared items."
+        );
+        assert_eq!(
+            one(Op::EmptyHolding { holding: None }),
+            "Emptied the holding area."
+        );
+        assert_eq!(
+            one(Op::ForceRemove {
+                package: PackageRef {
+                    source: SourceKind::Winget,
+                    id: "Valve.Steam".into()
+                }
+            }),
+            "Forced removal of Valve.Steam."
+        );
+    }
 
     /// The wrapper `Runner::new` actually builds on this platform, which is
     /// the state a real run meets. On Windows it is empty, and that used to

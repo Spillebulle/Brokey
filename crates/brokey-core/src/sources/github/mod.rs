@@ -984,6 +984,11 @@ impl Source for Github {
             }
             // The planner expands a setup through `Source::setup`.
             Op::Refresh { .. } | Op::Setup { .. } => Ok(Vec::new()),
+            // Cleanup is planned by the planner, not by a source.
+            Op::ClearLeftovers { .. }
+            | Op::Restore { .. }
+            | Op::EmptyHolding { .. }
+            | Op::ForceRemove { .. } => Ok(Vec::new()),
         }
     }
 
@@ -1043,7 +1048,13 @@ impl Source for Github {
                 })
             }
             Op::Remove { package } => self.forget_install(&package.id),
-            Op::UpdateAll { .. } | Op::Refresh { .. } | Op::Setup { .. } => Ok(()),
+            Op::UpdateAll { .. }
+            | Op::Refresh { .. }
+            | Op::Setup { .. }
+            | Op::ClearLeftovers { .. }
+            | Op::Restore { .. }
+            | Op::EmptyHolding { .. }
+            | Op::ForceRemove { .. } => Ok(()),
         };
         if let Err(e) = outcome {
             log::warn!("GitHub could not update its install record: {}", e.message);

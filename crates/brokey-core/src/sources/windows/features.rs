@@ -714,7 +714,12 @@ impl Source for Features {
                     "Windows features are turned on or off. Windows Update keeps them up to date.",
                 ));
             }
-            Op::Refresh { .. } | Op::Setup { .. } => return Ok(Vec::new()),
+            Op::Refresh { .. }
+            | Op::Setup { .. }
+            | Op::ClearLeftovers { .. }
+            | Op::Restore { .. }
+            | Op::EmptyHolding { .. }
+            | Op::ForceRemove { .. } => return Ok(Vec::new()),
         };
         let feature = self.find(&package.id)?;
         let already = match change {

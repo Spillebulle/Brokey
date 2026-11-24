@@ -162,6 +162,7 @@ export function summarise(ops: Op[]): string {
     if (op.op === "updateall") whole.push(op.source);
     else if (op.op === "refresh") refreshed.push(op.source);
     else if (op.op === "setup") setups.push(op.source);
+    else if (op.op === "clearleftovers" || op.op === "restore" || op.op === "emptyholding") continue;
     else perSource.set(op.package.source, (perSource.get(op.package.source) ?? 0) + 1);
   }
   const parts: string[] = [];
