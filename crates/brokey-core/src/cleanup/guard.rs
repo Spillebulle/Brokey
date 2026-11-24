@@ -112,11 +112,10 @@ fn parse_reg(location: &str) -> Option<Reg> {
     } else {
         rest.split('\\').map(str::to_lowercase).collect()
     };
-    if parts.len() > 2 && parts[0] == "software" && parts[1] == "wow6432node" {
+    // Only the machine's hive has a 32-bit view of its own.
+    if hive == "hklm" && parts.len() > 2 && parts[0] == "software" && parts[1] == "wow6432node" {
         parts.remove(1);
-        if hive == "hklm" {
-            hive = "hklm32";
-        }
+        hive = "hklm32";
     }
     Some(Reg { hive, parts, value })
 }
@@ -695,6 +694,43 @@ struct Places {
     roots: Vec<String>,
     /// Never offered, nor anything in it.
     windows: Option<String>,
+    /// A folder protection depends on did not resolve: no path is offered,
+    /// because what it would have protected cannot be told apart.
+    unresolved: bool,
+}
+
+/// Whether a path names a place by another spelling than its own, so that
+/// comparing it with the protected places as text would say nothing: an
+/// 8.3 short name (`PROGRA~1`), an NTFS stream (`::$INDEX_ALLOCATION`), or a
+/// name ending in a dot or a space, which Windows drops when it opens it.
+pub(super) fn another_spelling(path: &str) -> bool {
+    let trimmed = path.trim_start().trim_end_matches(['\\', '/']);
+    let mut names = trimmed.split(['\\', '/']);
+    let drive = names.next().unwrap_or_default();
+    // A colon belongs only right after the drive letter.
+    let odd_drive = drive.contains(':') && !(drive.len() == 2 && drive.ends_with(':'));
+    odd_drive
+        || names.any(|name| {
+            let bytes = name.as_bytes();
+            name.contains(':')
+                || name.ends_with(['.', ' '])
+                || bytes
+                    .windows(2)
+                    .any(|w| w[0] == b'~' && w[1].is_ascii_digit())
+        })
+}
+
+/// The shapes of a profile's folders, whatever this machine's well-known
+/// folders say: `Users\<name>`, its `AppData` and the three folders in it.
+/// `Users\Public` and `Users\Default` are profiles of this shape too.
+fn profile_shape(parts: &[&str]) -> bool {
+    matches!(
+        parts,
+        ["users"]
+            | ["users", _]
+            | ["users", _, "appdata"]
+            | ["users", _, "appdata", "local" | "roaming" | "locallow"]
+    )
 }
 
 impl Places {
@@ -704,6 +740,7 @@ impl Places {
                 .map(|p| shortcut::normalise(&p.to_string_lossy()))
         };
         let mut roots = Vec::new();
+        let mut unresolved = false;
         for which in [
             Known::ProgramFiles,
             Known::ProgramFilesX86,
@@ -723,6 +760,19 @@ impl Places {
             Known::StartMenuUser,
         ] {
             let Some(root) = folder(which) else {
+                // The user's own media folders protect only themselves, and
+                // the profile's shape below covers them; the rest are what
+                // the brief's protected places are made of.
+                unresolved |= !matches!(
+                    which,
+                    Known::Documents
+                        | Known::SavedGames
+                        | Known::Desktop
+                        | Known::Downloads
+                        | Known::Pictures
+                        | Known::Music
+                        | Known::Videos
+                );
                 continue;
             };
             // The Start menu folder is `Programs`; the one above it is the
@@ -747,9 +797,11 @@ impl Places {
                 roots.push(format!(r"{root}\{tail}"));
             }
         }
+        let windows = folder(Known::Windows);
         Places {
             roots,
-            windows: folder(Known::Windows),
+            unresolved: unresolved || windows.is_none(),
+            windows,
         }
     }
 
@@ -769,6 +821,9 @@ impl Places {
     }
 
     fn path_protected(&self, path: &str, view: &dyn SystemView) -> bool {
+        if self.unresolved || another_spelling(path) {
+            return true;
+        }
         let n = shortcut::normalise(path);
         let parts: Vec<&str> = n.split('\\').collect();
         let drive = parts[0];
@@ -779,6 +834,9 @@ impl Places {
             .iter()
             .any(|p| p.is_empty() || *p == "." || *p == "..")
         {
+            return true;
+        }
+        if profile_shape(&parts[1..]) {
             return true;
         }
         if self.windows.as_deref().is_some_and(|w| related(&n, w)) {
@@ -832,7 +890,8 @@ fn key_protected(reg: &Reg) -> bool {
         "classes" => match &parts[2..] {
             [] | ["applications"] => true,
             ["applications", _, ..] => false,
-            [first, ..] => SHELL_CLASSES.contains(first),
+            // `Wow6432Node` is the 32-bit view of every class at once.
+            [first, ..] => *first == "wow6432node" || SHELL_CLASSES.contains(first),
         },
         _ => false,
     }
@@ -911,7 +970,8 @@ fn holds(candidate: &Candidate) -> bool {
 
 /// What may be offered, and what was held back with who uses it. Protected
 /// places are in neither. What lies inside an offered folder or key goes
-/// with it, so it is not offered again; what holds something kept is kept.
+/// with it, so it is not offered again, unless the match on it is surer;
+/// what holds something kept is kept.
 pub fn guard(
     candidates: Vec<Candidate>,
     claims: &Claims,
@@ -960,13 +1020,21 @@ pub fn guard(
     let clearing: HashSet<String> = still.iter().filter_map(|c| normal(&c.location)).collect();
     still.retain(|c| !extension_in_use(&c.location, view, &clearing));
 
-    let containers: Vec<String> = still
+    // What lies inside an offered folder or key goes with it, unless the
+    // match on it is surer than on what holds it: a Likely item is never
+    // hidden inside a Possible folder that is not ticked.
+    let containers: Vec<(String, u8)> = still
         .iter()
         .filter(|c| holds(c))
-        .filter_map(|c| normal(&c.location))
+        .filter_map(|c| normal(&c.location).map(|at| (at, scan::rank(c.confidence))))
         .collect();
     still.retain(|c| {
-        normal(&c.location).is_none_or(|at| !containers.iter().any(|dir| strictly_inside(&at, dir)))
+        let rank = scan::rank(c.confidence);
+        normal(&c.location).is_none_or(|at| {
+            !containers
+                .iter()
+                .any(|(dir, held)| strictly_inside(&at, dir) && rank >= *held)
+        })
     });
     (still, kept)
 }
@@ -1470,7 +1538,8 @@ mod tests {
         let candidates = vec![
             folder(&format!(r"{PD}\Acme Writer\cache"), Confidence::Likely),
             folder(&format!(r"{PD}\Acme Writer"), Confidence::Likely),
-            key(r"HKCU\Software\Acme Writer", Confidence::Likely),
+            // Certain, so that the Certain value inside it is covered too.
+            key(r"HKCU\Software\Acme Writer", Confidence::Certain),
             key(r"HKCU\Software\Acme Writer\Prefs", Confidence::Likely),
             candidate(
                 ItemKind::RegistryValue,
@@ -1581,6 +1650,32 @@ mod tests {
         assert!(p(r"\\server\share\Acme"));
         assert!(p(r"C:\Acme\..\Windows"));
         assert!(p(r"C:\ProgramData\Linked\Acme"));
+        // Other spellings of a protected place: 8.3 short names, NTFS
+        // streams, a name ending in a dot or a space.
+        assert!(p(r"C:\PROGRA~1"));
+        assert!(p(r"C:\PROGRA~2"));
+        assert!(p(r"C:\PROGRA~3"));
+        assert!(p(r"C:\PROGRA~1\Acme"));
+        assert!(p(r"C:\Users\you\APPDATA~1\Acme"));
+        assert!(p(r"C:\Program Files::$INDEX_ALLOCATION"));
+        assert!(p(r"C:\Program Files\Acme::$DATA"));
+        assert!(p(r"C:\Program Files."));
+        assert!(p(r"C:\Program Files "));
+        assert!(p(r"C:\Program Files.\Acme"));
+        assert!(p(r"C:\Program Files \Acme"));
+        // The shapes of any profile, whatever the well-known folders say.
+        assert!(p(r"D:\Users"));
+        assert!(p(r"D:\Users\other"));
+        assert!(p(r"D:\Users\other\AppData"));
+        assert!(p(r"D:\Users\other\AppData\Local"));
+        assert!(p(r"D:\Users\other\AppData\Roaming"));
+        assert!(p(r"D:\Users\other\AppData\LocalLow"));
+        assert!(p(r"C:\Users\Public"));
+        assert!(p(r"C:\Users\Default"));
+        assert!(p(r"HKCU\Software\WOW6432Node\Acme"));
+        assert!(p(r"HKLM\Software\Classes\Wow6432Node"));
+        assert!(p(r"HKLM\Software\Classes\Wow6432Node\CLSID\{0}"));
+        assert!(p(r"HKLM\Software\WOW6432Node\Classes\Wow6432Node\Acme"));
         // The registry outside an application's own keys.
         assert!(p("HKLM"));
         assert!(p(r"HKLM\Software"));
@@ -1614,6 +1709,11 @@ mod tests {
             r"HKCU\Software\Acme".to_string(),
             format!(r"{PF}\Acme"),
             format!(r"{ROAMING}\Acme Writer"),
+            format!(r"{MENU}\Acme"),
+            r"D:\Users\other\AppData\Local\Acme".to_string(),
+            r"C:\Users\Public\Desktop\Acme.lnk".to_string(),
+            r"C:\Program Files\Acme 1.0".to_string(),
+            r"C:\Program Files\Acme~Tools".to_string(),
             "service:AcmeSvc".to_string(),
             r"task:\Acme\Update".to_string(),
             "firewall:Acme".to_string(),
@@ -1674,5 +1774,119 @@ mod tests {
         assert_eq!(f.not_offered_cloud, 2);
         assert_eq!(f.unreadable, 3);
         assert!(f.kept.is_empty());
+    }
+
+    #[test]
+    fn a_short_name_for_program_files_is_never_a_home_nor_offered() {
+        // `UninstallString = C:\PROGRA~1\uninst.exe` derives `C:\PROGRA~1`,
+        // which `shortcut::specific` would take for one application's folder.
+        let view = FixtureView::from_json(
+            r#"{ "folders": {
+                "ProgramFiles": "C:\\Program Files",
+                "ProgramFilesX86": "C:\\Program Files (x86)",
+                "ProgramData": "C:\\ProgramData",
+                "AppData": "C:\\Users\\you\\AppData\\Roaming",
+                "LocalAppData": "C:\\Users\\you\\AppData\\Local",
+                "LocalLow": "C:\\Users\\you\\AppData\\LocalLow",
+                "StartMenuMachine": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+                "StartMenuUser": "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+                "Windows": "C:\\Windows",
+                "Profile": "C:\\Users\\you"
+              },
+              "dirs": {
+                "C:\\PROGRA~1": [{ "name": "uninst.exe", "size": 10 }, { "name": "Other", "is_dir": true }],
+                "C:\\PROGRA~1\\Other": [{ "name": "other.exe", "size": 10 }]
+              },
+              "registry": { "Hkcu": {
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Run": {
+                  "values": [["Other", "C:\\PROGRA~1\\Other\\other.exe"]]
+                }
+              } }
+            }"#,
+        );
+        let hints = Hints {
+            install_dir: Some(PathBuf::from(r"C:\PROGRA~1")),
+            ..blank_hints("Shortname Tool", None)
+        };
+        let scanned = scan(&hints, &view);
+        // Not a home, so nothing is matched for pointing into it either.
+        assert!(
+            scanned.candidates.is_empty(),
+            "{:?}",
+            locations(&scanned.candidates)
+        );
+
+        // And should anything offer it, the guard does not.
+        let candidates = vec![
+            folder(r"C:\PROGRA~1", Confidence::Certain),
+            folder(r"C:\Program Files::$INDEX_ALLOCATION", Confidence::Certain),
+        ];
+        let (offered, kept) = guard(candidates, &claims(&view, &[], Some(&hints)), &view);
+        assert!(offered.is_empty() && kept.is_empty());
+    }
+
+    #[test]
+    fn nothing_is_offered_when_a_protected_folder_does_not_resolve() {
+        // No Windows directory and no LocalLow: what they protect cannot be
+        // told, so no path is offered at all.
+        let view = FixtureView::from_json(
+            r#"{ "folders": {
+                "ProgramFiles": "C:\\Program Files",
+                "ProgramFilesX86": "C:\\Program Files (x86)",
+                "ProgramData": "C:\\ProgramData",
+                "AppData": "C:\\Users\\you\\AppData\\Roaming",
+                "LocalAppData": "C:\\Users\\you\\AppData\\Local",
+                "StartMenuMachine": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+                "StartMenuUser": "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+                "Profile": "C:\\Users\\you"
+            } }"#,
+        );
+        assert!(is_protected(r"C:\Program Files\Acme", &view));
+        assert!(is_protected(r"C:\Windows\System32", &view));
+        // Registry keys are judged by their own names and still may be.
+        assert!(!is_protected(r"HKCU\Software\Acme", &view));
+        // With every folder known, the same path may be offered.
+        assert!(!is_protected(r"C:\Program Files\Acme", &bare()));
+    }
+
+    #[test]
+    fn a_surer_match_inside_a_less_sure_folder_stays_on_the_list() {
+        let view = bare();
+        let candidates = vec![
+            folder(&format!(r"{ROAMING}\Acme"), Confidence::Possible),
+            folder(&format!(r"{ROAMING}\Acme\Acme Writer"), Confidence::Likely),
+            folder(&format!(r"{LOCAL}\Acme Writer"), Confidence::Likely),
+            folder(&format!(r"{LOCAL}\Acme Writer\logs"), Confidence::Possible),
+            folder(&format!(r"{LOCAL}\Acme Writer\cache"), Confidence::Likely),
+            folder(&format!(r"{PD}\Acme Writer"), Confidence::YourData),
+            folder(&format!(r"{PD}\Acme Writer\data"), Confidence::Possible),
+        ];
+        let (offered, kept) = guard(candidates, &claims(&view, &[], Some(&writer())), &view);
+        assert_eq!(
+            locations(&offered),
+            vec![
+                format!(r"{ROAMING}\Acme"),
+                // Likely is ticked and its Possible parent is not: it is
+                // never hidden inside it.
+                format!(r"{ROAMING}\Acme\Acme Writer"),
+                format!(r"{LOCAL}\Acme Writer"),
+                format!(r"{PD}\Acme Writer"),
+                // Possible is surer than Your data.
+                format!(r"{PD}\Acme Writer\data"),
+            ]
+        );
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn only_the_machine_hive_has_a_32_bit_view_to_fold() {
+        assert_eq!(
+            normal(r"HKLM\Software\WOW6432Node\Acme"),
+            normal(r"HKLM32\Software\Acme")
+        );
+        assert_ne!(
+            normal(r"HKCU\Software\WOW6432Node\Acme"),
+            normal(r"HKCU\Software\Acme")
+        );
     }
 }

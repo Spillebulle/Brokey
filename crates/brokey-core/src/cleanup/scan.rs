@@ -229,7 +229,7 @@ pub(super) fn hive_word(hive: Hive) -> &'static str {
     }
 }
 
-fn rank(confidence: Confidence) -> u8 {
+pub(super) fn rank(confidence: Confidence) -> u8 {
     match confidence {
         Confidence::Certain => 0,
         Confidence::Likely => 1,
@@ -420,6 +420,7 @@ impl<'a> Scan<'a> {
     /// Whether a folder is narrow enough to be one application's.
     fn narrow(&self, dir: &str) -> bool {
         shortcut::specific(dir)
+            && !super::guard::another_spelling(dir)
             && !self.holds_known(dir)
             && !self.shared_root(dir)
             && !self.windows.as_deref().is_some_and(|w| within(dir, w))
