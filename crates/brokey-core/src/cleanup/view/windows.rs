@@ -361,9 +361,15 @@ impl SystemView for LiveView {
             };
             match key.get_value("ImagePath") {
                 Ok(v) => {
+                    let account = key
+                        .get_value("ObjectName")
+                        .ok()
+                        .map(value_text)
+                        .filter(|a| !a.trim().is_empty());
                     out.items.push(Service {
                         name,
                         image_path: value_text(v),
+                        account,
                     });
                 }
                 Err(e) if NOT_FOUND.contains(&e.code().0) => {}
@@ -398,9 +404,11 @@ impl SystemView for LiveView {
                     pending.push(path);
                 } else if let Ok(bytes) = std::fs::read(&path) {
                     let rel = path.strip_prefix(root).unwrap_or(&path);
+                    let xml = decode(&bytes);
                     out.items.push(ScheduledTask {
                         path: format!(r"\{}", rel.display()),
-                        actions: task_commands(&decode(&bytes)),
+                        actions: task_commands(&xml),
+                        needs_password: crate::cleanup::holding::task_needs_password(&xml),
                     });
                 } else {
                     out.unreadable += 1;

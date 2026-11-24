@@ -400,6 +400,66 @@ impl std::fmt::Display for HardLink {
 
 impl std::error::Error for HardLink {}
 
+/// An account Windows can start a service as without a password.
+pub fn needs_no_password(account: Option<&str>) -> bool {
+    let Some(account) = account else {
+        return true;
+    };
+    let lower = account.trim().to_lowercase();
+    lower.is_empty()
+        || lower == "localsystem"
+        || lower.starts_with(r"nt authority\")
+        || lower.starts_with(r"nt service\")
+}
+
+/// The account a service's key says it runs as (`ObjectName`).
+fn service_account(key: &KeyNode) -> Option<String> {
+    let value = key
+        .values
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("ObjectName"))
+        .map(|(_, v)| v)
+        .filter(|v| matches!(v.ty, REG_SZ | REG_EXPAND_SZ))?;
+    let units: Vec<u16> = value
+        .data
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| u16::from_le_bytes(pair))
+        .take_while(|&u| u != 0)
+        .collect();
+    Some(String::from_utf16_lossy(&units)).filter(|a| !a.trim().is_empty())
+}
+
+/// Whether a task's definition says it runs whether the user is signed in
+/// or not with a stored password, which registering it again would need.
+pub fn task_needs_password(xml: &str) -> bool {
+    let Some(start) = xml.find("<LogonType>") else {
+        return false;
+    };
+    let rest = &xml[start + "<LogonType>".len()..];
+    let logon = rest[..rest.find("</LogonType>").unwrap_or(rest.len())].trim();
+    matches!(logon, "Password" | "InteractiveTokenOrPassword")
+}
+
+/// Why a service could not be put back: the end of a sentence.
+pub fn password_reason_for_service(account: &str) -> String {
+    format!("it runs as {account}, and Windows would need that account's password to put it back")
+}
+
+/// Why a scheduled task could not be put back: the end of a sentence.
+pub fn password_reason_for_task() -> String {
+    "it runs whether you are signed in or not, and Windows would need its account's password \
+     to put it back"
+        .to_string()
+}
+
+/// The sentence for an item left where it is because putting it back
+/// would need a password.
+pub fn left_for_password(location: &str, why: &str) -> String {
+    format!("{location} was left where it is, because {why}.")
+}
+
 /// The sentence for a file another program has open.
 pub fn in_use(location: &str) -> String {
     format!(
@@ -1092,6 +1152,20 @@ fn sorted_node(node: &KeyNode) -> KeyNode {
 }
 
 impl Export {
+    /// Why Windows would need a password to put this back, which the
+    /// restore never has: the end of a sentence, or `None`.
+    fn needs_a_password(&self) -> Option<String> {
+        match self {
+            Export::Service(key) => {
+                let account = service_account(key);
+                (!needs_no_password(account.as_deref()))
+                    .then(|| password_reason_for_service(account.as_deref().unwrap_or_default()))
+            }
+            Export::Task(xml) => task_needs_password(xml).then(password_reason_for_task),
+            _ => None,
+        }
+    }
+
     /// Read the item as it is now. A file or folder is moved rather than
     /// exported, so it has none.
     fn of(place: &Place, m: &mut dyn Mutate) -> Done<Export> {
@@ -1196,6 +1270,10 @@ fn take(place: &Place, target: &Path, location: &str, m: &mut dyn Mutate) -> Don
         return Ok(size_of(target));
     }
     let export = Export::of(place, m)?;
+    // What the restore could not recreate is never taken.
+    if let Some(why) = export.needs_a_password() {
+        return Err(Failure::Failed(left_for_password(location, &why)));
+    }
     let size = write_export_bytes(target, &export.bytes(), location)?;
     let Err(failure) = export.delete(place, m) else {
         return Ok(size);
@@ -2710,6 +2788,58 @@ mod tests {
         assert_eq!(listed.unreadable, vec![loc(&mc.root)]);
         assert_eq!(emptied.held, 0);
         assert_eq!(emptied.failed.len(), 1, "{emptied:?}");
+    }
+
+    /// A service that runs as an account with a password, or a task saved
+    /// to run whether the user is signed in or not, could not be put back
+    /// without that password, so neither is taken; what can be put back is.
+    #[test]
+    fn what_could_not_be_put_back_without_a_password_is_never_taken() {
+        let mc = machine();
+        let mut m = Fake::default();
+        let utf16 = |text: &str| -> Vec<u8> {
+            text.encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect()
+        };
+        let service = |account: &str| KeyNode {
+            values: vec![
+                ("Start".into(), value(REG_DWORD, &2u32.to_le_bytes())),
+                ("ObjectName".into(), value(REG_SZ, &utf16(account))),
+            ],
+            subkeys: Vec::new(),
+        };
+        m.services
+            .insert("AcmeUser".into(), service(r".\acme-user"));
+        m.services
+            .insert("AcmeSystem".into(), service("LocalSystem"));
+        let task = |logon: &str| {
+            format!(
+                "<Task><Principals><Principal><LogonType>{logon}</LogonType></Principal></Principals></Task>"
+            )
+        };
+        m.tasks.insert(r"\Acme\Nightly".into(), task("Password"));
+        m.tasks
+            .insert(r"\Acme\Update".into(), task("InteractiveToken"));
+        let items = vec![
+            item(ItemKind::Service, "service:AcmeUser"),
+            item(ItemKind::Service, "service:AcmeSystem"),
+            item(ItemKind::Task, r"task:\Acme\Nightly"),
+            item(ItemKind::Task, r"task:\Acme\Update"),
+        ];
+        let report = hold(&mc.root, "acme-1", "Acme", &items, &mut m);
+        assert_eq!(report.held, 2, "{report:?}");
+        let failed: Vec<&str> = report.failed.iter().map(|(_, why)| why.as_str()).collect();
+        assert_eq!(
+            failed,
+            vec![
+                r"service:AcmeUser was left where it is, because it runs as .\acme-user, and Windows would need that account's password to put it back.",
+                r"task:\Acme\Nightly was left where it is, because it runs whether you are signed in or not, and Windows would need its account's password to put it back.",
+            ]
+        );
+        assert_eq!(m.services.keys().collect::<Vec<_>>(), vec!["AcmeUser"]);
+        assert_eq!(m.tasks.keys().collect::<Vec<_>>(), vec![r"\Acme\Nightly"]);
     }
 
     /// A hard link is refused for good, so its sentence never says to try

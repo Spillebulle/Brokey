@@ -9,7 +9,7 @@
 
 use super::{
     Done, Failure, KeyNode, Mutate, REG_DWORD, REG_EXPAND_SZ, REG_MULTI_SZ, REG_SZ, RegValue,
-    merge_with, move_with, path_text,
+    merge_with, move_with, needs_no_password, path_text,
 };
 use crate::cleanup::view::Hive;
 use crate::cleanup::view::windows::{long_path, wow6432};
@@ -1036,17 +1036,6 @@ impl ServiceConfig {
             account: text("ObjectName"),
         })
     }
-}
-
-/// An account Windows can start a service as without a password.
-pub fn needs_no_password(account: Option<&str>) -> bool {
-    let Some(account) = account else {
-        return true;
-    };
-    let lower = account.to_lowercase();
-    lower == "localsystem"
-        || lower.starts_with(r"nt authority\")
-        || lower.starts_with(r"nt service\")
 }
 
 struct ServiceHandle(SC_HANDLE);

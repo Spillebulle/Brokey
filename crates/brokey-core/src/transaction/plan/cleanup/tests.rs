@@ -660,6 +660,77 @@ fn a_firewall_rule_whose_program_is_now_elsewhere_is_left_out_of_the_clear() {
     );
 }
 
+/// The window leaves out, as the helper does, a service or task that could
+/// not be put back without a password, and says why in the confirm.
+#[test]
+fn what_could_not_be_put_back_without_a_password_is_left_out_of_the_clear() {
+    let mut machine = Machine::new();
+    // Forced, so that the application's own services and tasks are not
+    // claims, as in the scan.
+    scanned_items(
+        &machine,
+        true,
+        None,
+        vec![
+            leftover(
+                "user",
+                ItemKind::Service,
+                "service:AcmeUser",
+                Scope::Machine,
+            ),
+            leftover(
+                "system",
+                ItemKind::Service,
+                "service:AcmeSystem",
+                Scope::Machine,
+            ),
+            leftover(
+                "nightly",
+                ItemKind::Task,
+                r"task:\Acme\Nightly",
+                Scope::Machine,
+            ),
+            leftover(
+                "update",
+                ItemKind::Task,
+                r"task:\Acme\Update",
+                Scope::Machine,
+            ),
+        ],
+    );
+    machine.view = Some(FixtureView::from_json(
+        r#"{
+            "services": [
+                { "name": "AcmeUser", "image_path": "C:\\Program Files (x86)\\Acme\\svc.exe", "account": ".\\acme-user" },
+                { "name": "AcmeSystem", "image_path": "C:\\Program Files (x86)\\Acme\\svc.exe", "account": "LocalSystem" }
+            ],
+            "tasks": [
+                { "path": "\\Acme\\Nightly", "actions": ["C:\\Program Files (x86)\\Acme\\a.exe"], "needs_password": true },
+                { "path": "\\Acme\\Update", "actions": ["C:\\Program Files (x86)\\Acme\\a.exe"] }
+            ]
+        }"#,
+    ));
+    let all = ["user", "system", "nightly", "update"];
+    let plan = machine
+        .plan(&store(uninstaller), &[clear_op(&all)])
+        .unwrap();
+    let held: Vec<String> = payload(&plan.steps[0])
+        .items
+        .into_iter()
+        .map(|i| i.location)
+        .collect();
+    assert_eq!(held, vec!["service:AcmeSystem", r"task:\Acme\Update"]);
+    assert_eq!(
+        machine.with(|p| clear_notices(&[clear_op(&all)], p)),
+        vec![
+            r"service:AcmeUser was left where it is, because it runs as .\acme-user, and Windows would need that account's password to put it back."
+                .to_string(),
+            r"task:\Acme\Nightly was left where it is, because it runs whether you are signed in or not, and Windows would need its account's password to put it back."
+                .to_string(),
+        ]
+    );
+}
+
 #[test]
 fn a_clear_of_an_unknown_scan_or_item_is_refused_with_a_sentence() {
     let machine = Machine::new();

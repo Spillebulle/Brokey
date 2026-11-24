@@ -401,6 +401,33 @@ struct Now<'a> {
 impl Now<'_> {
     /// Why an item still there may no longer be moved, if it may not.
     fn why_left(&self, item: &LeftoverItem, name: &str) -> Option<String> {
+        // What the restore could not recreate is never taken; the helper
+        // leaves it too, and this says so before the clear starts.
+        let password = match item.kind {
+            ItemKind::Service => {
+                let wanted = item.location.strip_prefix("service:").unwrap_or_default();
+                self.view
+                    .services()
+                    .items
+                    .into_iter()
+                    .find(|s| s.name.eq_ignore_ascii_case(wanted))
+                    .filter(|s| !holding::needs_no_password(s.account.as_deref()))
+                    .map(|s| holding::password_reason_for_service(&s.account.unwrap_or_default()))
+            }
+            ItemKind::Task => {
+                let wanted = item.location.strip_prefix("task:").unwrap_or_default();
+                self.view
+                    .tasks()
+                    .items
+                    .iter()
+                    .any(|t| t.needs_password && t.path.eq_ignore_ascii_case(wanted))
+                    .then(holding::password_reason_for_task)
+            }
+            _ => None,
+        };
+        if let Some(why) = password {
+            return Some(holding::left_for_password(&item.location, &why));
+        }
         let found = self
             .found
             .iter()

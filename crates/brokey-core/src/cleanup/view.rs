@@ -67,6 +67,9 @@ impl From<arp::Hive> for Hive {
 pub struct Service {
     pub name: String,
     pub image_path: String,
+    /// The account it runs as (`ObjectName`), when it says.
+    #[serde(default)]
+    pub account: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -75,6 +78,10 @@ pub struct ScheduledTask {
     pub path: String,
     /// The `<Exec><Command>` of each action.
     pub actions: Vec<String>,
+    /// Saved to run whether the user is signed in or not, with a stored
+    /// password that registering it again would need.
+    #[serde(default)]
+    pub needs_password: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
