@@ -33,7 +33,8 @@ use windows_sys::Win32::Security::{
     GetSecurityDescriptorOwner, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW,
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
     SE_PRIVILEGE_ENABLED, SECURITY_ATTRIBUTES, SECURITY_MAX_SID_SIZE, TOKEN_ADJUST_PRIVILEGES,
-    TOKEN_PRIVILEGES, WELL_KNOWN_SID_TYPE, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+    TOKEN_PRIVILEGES, TOKEN_QUERY, WELL_KNOWN_SID_TYPE, WinAuthenticatedUserSid,
+    WinBuiltinAdministratorsSid, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, DELETE, MoveFileExW};
 use windows_sys::Win32::System::Com::CoTaskMemFree;
@@ -180,12 +181,17 @@ fn secure_dir(dir: &Path, descriptor: &Descriptor) -> Done<()> {
             )))
         }
         Ok(_) => {
-            if is_admin_only(dir).map_err(failed)? {
+            // A folder only an Administrator could have filled, but that
+            // signed-in users cannot read (made before they were given read
+            // and list), is put right here too, by the helper, which is an
+            // Administrator already: never accepted as it is.
+            if as_made(dir).map_err(failed)? {
                 return Ok(());
             }
-            enable_privilege("SeTakeOwnershipPrivilege");
-            enable_privilege("SeRestorePrivilege");
-            let taken = apply_descriptor(dir, descriptor.0).and_then(|()| is_admin_only(dir));
+            // Disabled again when these go, at the end of this arm.
+            let _own = Privilege::enable("SeTakeOwnershipPrivilege");
+            let _restore = Privilege::enable("SeRestorePrivilege");
+            let taken = apply_descriptor(dir, descriptor.0).and_then(|()| as_made(dir));
             match taken {
                 Ok(true) => Ok(()),
                 _ => Err(Failure::Failed(format!(
@@ -213,33 +219,83 @@ fn secure_dir(dir: &Path, descriptor: &Descriptor) -> Done<()> {
     }
 }
 
-/// Enable a privilege this process's token holds, if it holds it. A token
-/// that does not (a process that is not elevated) is left as it is, and
-/// what needed the privilege then fails on its own.
-fn enable_privilege(name: &str) {
-    let name = wide(name);
-    // SAFETY: plain out parameters; the token handle is closed once.
-    unsafe {
-        let mut token: HANDLE = ptr::null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &mut token) == 0 {
+/// A privilege this process's token holds, enabled for as long as this
+/// lives and put back as it was when it goes, on every way out of the
+/// operation that needed it: the helper never keeps `SeTakeOwnership` or
+/// `SeRestore` switched on past the one folder it was enabled for. A token
+/// that does not hold the privilege (a process that is not elevated) is
+/// left as it is, and what needed the privilege then fails on its own.
+struct Privilege {
+    token: HANDLE,
+    /// What the privilege was before, when enabling it changed it.
+    previous: Option<TOKEN_PRIVILEGES>,
+}
+
+impl Privilege {
+    fn enable(name: &str) -> Privilege {
+        let name = wide(name);
+        let mut held = Privilege {
+            token: ptr::null_mut(),
+            previous: None,
+        };
+        // SAFETY: plain out parameters; the token handle is closed once, in
+        // `drop`.
+        unsafe {
+            if OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                &mut held.token,
+            ) == 0
+            {
+                held.token = ptr::null_mut();
+                return held;
+            }
+            let mut wanted = TOKEN_PRIVILEGES {
+                PrivilegeCount: 1,
+                Privileges: [LUID_AND_ATTRIBUTES {
+                    Luid: std::mem::zeroed(),
+                    Attributes: SE_PRIVILEGE_ENABLED,
+                }],
+            };
+            if LookupPrivilegeValueW(ptr::null(), name.as_ptr(), &mut wanted.Privileges[0].Luid)
+                == 0
+            {
+                return held;
+            }
+            let mut previous: TOKEN_PRIVILEGES = std::mem::zeroed();
+            let mut length = 0u32;
+            let ok = AdjustTokenPrivileges(
+                held.token,
+                0,
+                &wanted,
+                size_of::<TOKEN_PRIVILEGES>() as u32,
+                &mut previous,
+                &mut length,
+            );
+            // Only what changed is listed: nothing when the token does not
+            // hold it, or when it was enabled already.
+            if ok != 0 && previous.PrivilegeCount > 0 {
+                held.previous = Some(previous);
+            }
+        }
+        held
+    }
+}
+
+impl Drop for Privilege {
+    fn drop(&mut self) {
+        if self.token.is_null() {
             return;
         }
-        let mut privileges = TOKEN_PRIVILEGES {
-            PrivilegeCount: 1,
-            Privileges: [LUID_AND_ATTRIBUTES {
-                Luid: std::mem::zeroed(),
-                Attributes: SE_PRIVILEGE_ENABLED,
-            }],
-        };
-        if LookupPrivilegeValueW(
-            ptr::null(),
-            name.as_ptr(),
-            &mut privileges.Privileges[0].Luid,
-        ) != 0
-        {
-            AdjustTokenPrivileges(token, 0, &privileges, 0, ptr::null_mut(), ptr::null_mut());
+        // SAFETY: the token is open with TOKEN_ADJUST_PRIVILEGES and
+        // `previous` is the state the call above handed back; the handle is
+        // closed once.
+        unsafe {
+            if let Some(previous) = &self.previous {
+                AdjustTokenPrivileges(self.token, 0, previous, 0, ptr::null_mut(), ptr::null_mut());
+            }
+            CloseHandle(self.token);
         }
-        CloseHandle(token);
     }
 }
 
@@ -325,6 +381,79 @@ pub fn is_admin_only(path: &Path) -> io::Result<bool> {
         LocalFree(descriptor as HLOCAL);
         Ok(ok)
     }
+}
+
+/// `FILE_GENERIC_READ`: read, read attributes and extended attributes,
+/// list a folder, and read its permissions.
+const READ_AND_LIST: u32 = 0x0012_0089;
+/// `OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE`.
+const INHERITED_BY_ALL: u8 = 0x1 | 0x2;
+/// `INHERIT_ONLY_ACE`.
+const INHERIT_ONLY: u8 = 0x8;
+
+/// Whether signed-in users (`Authenticated Users`) may read and list the
+/// folder and everything made in it, as [`ADMIN_ONLY_SDDL`] lets them: an
+/// allow for them that reaches the folder itself and is inherited by every
+/// file and folder in it, and no deny for them before it. Without it the
+/// window, which is never elevated, cannot show what is held there.
+fn readable_by_users(path: &Path) -> io::Result<bool> {
+    let users = well_known(WinAuthenticatedUserSid);
+    let name = wide(path);
+    let mut dacl: *mut ACL = ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: out parameters; `dacl` points into `descriptor`, which is
+    // freed with `LocalFree` after its last use.
+    unsafe {
+        let code = GetNamedSecurityInfoW(
+            name.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        );
+        if code != 0 {
+            return Err(io::Error::from_raw_os_error(code as i32));
+        }
+        let mut readable = false;
+        if !dacl.is_null() {
+            for i in 0..u32::from((*dacl).AceCount) {
+                let mut ace: *mut core::ffi::c_void = ptr::null_mut();
+                if GetAce(dacl, i, &mut ace) == 0 {
+                    break;
+                }
+                let header = &*(ace as *const ACE_HEADER);
+                // Allowed and denied entries share their layout.
+                let entry = &*(ace as *const ACCESS_ALLOWED_ACE);
+                let sid = &entry.SidStart as *const u32 as PSID;
+                if EqualSid(sid, users.as_ptr() as PSID) == 0 || header.AceFlags & INHERIT_ONLY != 0
+                {
+                    continue;
+                }
+                match u32::from(header.AceType) {
+                    ACCESS_DENIED_ACE_TYPE if entry.Mask & READ_AND_LIST != 0 => break,
+                    ACCESS_ALLOWED_ACE_TYPE
+                        if entry.Mask & READ_AND_LIST == READ_AND_LIST
+                            && header.AceFlags & INHERITED_BY_ALL == INHERITED_BY_ALL =>
+                    {
+                        readable = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        LocalFree(descriptor as HLOCAL);
+        Ok(readable)
+    }
+}
+
+/// As Brokey makes a machine holding folder: [`is_admin_only`], and
+/// [`readable_by_users`].
+fn as_made(path: &Path) -> io::Result<bool> {
+    Ok(is_admin_only(path)? && readable_by_users(path)?)
 }
 
 fn apply_descriptor(path: &Path, descriptor: PSECURITY_DESCRIPTOR) -> io::Result<()> {
@@ -1885,6 +2014,88 @@ pub(crate) mod tests {
         assert!(!root.join("copy-1").exists(), "no half copy is left behind");
     }
 
+    /// Whether this process's token has the privilege switched on; `None`
+    /// when it does not hold it at all.
+    fn privilege_state(name: &str) -> Option<bool> {
+        use windows_sys::Win32::Foundation::LUID;
+        use windows_sys::Win32::Security::{GetTokenInformation, TokenPrivileges};
+        let name = wide(name);
+        // SAFETY: test-only; out parameters, a buffer of the size passed,
+        // and the token handle closed once.
+        unsafe {
+            let mut token: HANDLE = ptr::null_mut();
+            assert_ne!(
+                OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token),
+                0
+            );
+            let mut luid: LUID = std::mem::zeroed();
+            assert_ne!(
+                LookupPrivilegeValueW(ptr::null(), name.as_ptr(), &mut luid),
+                0
+            );
+            let mut buffer = vec![0u64; 512];
+            let mut length = 0u32;
+            assert_ne!(
+                GetTokenInformation(
+                    token,
+                    TokenPrivileges,
+                    buffer.as_mut_ptr().cast(),
+                    (buffer.len() * 8) as u32,
+                    &mut length,
+                ),
+                0
+            );
+            CloseHandle(token);
+            let list = &*(buffer.as_ptr() as *const TOKEN_PRIVILEGES);
+            let all =
+                std::slice::from_raw_parts(list.Privileges.as_ptr(), list.PrivilegeCount as usize);
+            all.iter()
+                .find(|p| p.Luid.LowPart == luid.LowPart && p.Luid.HighPart == luid.HighPart)
+                .map(|p| p.Attributes & SE_PRIVILEGE_ENABLED != 0)
+        }
+    }
+
+    /// A privilege enabled for one operation is disabled again when it
+    /// ends, however it ends. `SeUndockPrivilege` stands in for the two the
+    /// helper uses, since a token that is not elevated holds it, disabled,
+    /// and nothing else in these tests touches it.
+    #[test]
+    fn a_privilege_enabled_for_an_operation_is_disabled_again_after_it() {
+        const NAME: &str = "SeUndockPrivilege";
+        let Some(false) = privilege_state(NAME) else {
+            eprintln!("this token does not hold {NAME} disabled, so there is nothing to check");
+            return;
+        };
+        {
+            let _held = Privilege::enable(NAME);
+            assert_eq!(privilege_state(NAME), Some(true));
+        }
+        assert_eq!(privilege_state(NAME), Some(false), "disabled after use");
+
+        fn fails_part_way() -> Result<(), String> {
+            let _held = Privilege::enable(NAME);
+            assert_eq!(privilege_state(NAME), Some(true));
+            Err("refused".to_string())?;
+            Ok(())
+        }
+        assert!(fails_part_way().is_err());
+        assert_eq!(privilege_state(NAME), Some(false), "and after a failure");
+
+        let result = std::panic::catch_unwind(|| {
+            let _held = Privilege::enable(NAME);
+            panic!("part-way");
+        });
+        assert!(result.is_err());
+        assert_eq!(privilege_state(NAME), Some(false), "and after a panic");
+
+        // One enabled already stays enabled when a nested use ends.
+        let outer = Privilege::enable(NAME);
+        drop(Privilege::enable(NAME));
+        assert_eq!(privilege_state(NAME), Some(true));
+        drop(outer);
+        assert_eq!(privilege_state(NAME), Some(false));
+    }
+
     #[test]
     fn the_machine_root_is_made_for_administrators_only_or_not_at_all() {
         use windows_sys::Win32::Security::Authorization::{
@@ -1980,6 +2191,46 @@ pub(crate) mod tests {
             LocalFree(descriptor as HLOCAL);
             assert_eq!(code, 0);
         }
+    }
+
+    /// A root made before signed-in users were given read and list (or
+    /// changed since) is not as Brokey makes it: the window could not show
+    /// what it holds. Only an entry that reaches the folder itself and every
+    /// entry made in it counts.
+    #[test]
+    fn a_root_without_read_for_signed_in_users_is_not_as_made() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("Holding");
+        std::fs::create_dir(&dir).unwrap();
+        let cases = [
+            ("D:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)", false),
+            ("D:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FR;;;AU)", true),
+            // Only for what is made in it, not the folder itself.
+            (
+                "D:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICIIO;FR;;;AU)",
+                false,
+            ),
+            // The folder only: entries made in it would not have it.
+            ("D:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;;FR;;;AU)", false),
+            // Read the data but not list the folder.
+            (
+                "D:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1;;;AU)",
+                false,
+            ),
+            // Someone else, not signed-in users.
+            ("D:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FR;;;BU)", false),
+            // Denied first.
+            ("D:P(D;OICI;FR;;;AU)(A;OICI;FA;;;BA)(A;OICI;FR;;;AU)", false),
+        ];
+        for (sddl, want) in cases {
+            set_dacl(&dir, sddl);
+            assert_eq!(readable_by_users(&dir).ok(), Some(want), "{sddl}");
+        }
+        set_dacl(&dir, "D:P(A;OICI;FA;;;WD)");
+        assert!(
+            !as_made(&dir).unwrap(),
+            "owned by this user, so never as made"
+        );
     }
 
     #[test]
