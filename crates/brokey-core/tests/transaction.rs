@@ -117,6 +117,8 @@ fn shape(event: &Event) -> String {
                 if *ok { "ok" } else { "failed" }
             )
         }
+        Event::Leftovers { .. } => "leftovers".to_string(),
+        Event::Waiting { .. } => "waiting".to_string(),
     }
 }
 

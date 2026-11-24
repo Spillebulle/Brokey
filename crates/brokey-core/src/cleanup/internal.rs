@@ -123,6 +123,8 @@ const SESSION_ONLY: [&str; 4] = [AWAIT_GONE, SCAN, SHELL_OPEN, STEAM_UNINSTALL];
 /// to this module, and the only constructor, [`Refused::by`], is called only
 /// by [`SHELL_OPEN`]'s step with the closed list's answer in hand. So no
 /// other code in the workspace can ask the shell to open anything.
+// Only the Windows shell opens a refused uninstaller; elsewhere nothing reads it.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) struct Refused {
     program: PathBuf,
     args: Vec<String>,
@@ -141,10 +143,12 @@ impl Refused {
         }
     }
 
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn program(&self) -> &Path {
         &self.program
     }
 
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn args(&self) -> &[String] {
         &self.args
     }
@@ -1417,7 +1421,8 @@ pub(crate) trait Session {
     fn open_steam(&self, url: &str) -> Result<(), String>;
 }
 
-/// This machine.
+/// This machine. Only Windows runs Brokey's own cleanup steps, so only Windows makes one.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) struct LiveSession;
 
 impl Session for LiveSession {
