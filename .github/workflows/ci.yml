@@ -177,8 +177,18 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets
+      # The Windows runner's TEMP is the 8.3 short spelling C:\Users\RUNNER~1,
+      # and the leftover cleanup refuses any path that goes through a short
+      # name, because another spelling of a protected folder must not get
+      # past the guard. The tests that make real folders and keys need a temp
+      # folder whose name is its own, so they get the runner's long one.
       - name: Test
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            export TMP="$RUNNER_TEMP" TEMP="$RUNNER_TEMP"
+          fi
+          cargo test --workspace
 
   # The reference platform. An Arch container has real pacman databases once
   # `pacman -Sy` has run, so the pacman source's live tests run here against

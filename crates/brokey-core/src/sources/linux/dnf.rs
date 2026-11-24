@@ -542,6 +542,11 @@ impl Source for Dnf {
             )]),
             // The planner expands a setup through `Source::setup`.
             Op::Setup { .. } => Ok(Vec::new()),
+            // Leftover cleanup is planned by the transaction planner itself, never by a source.
+            Op::ClearLeftovers { .. }
+            | Op::Restore { .. }
+            | Op::EmptyHolding { .. }
+            | Op::ForceRemove { .. } => Ok(Vec::new()),
         }
     }
 }

@@ -1123,6 +1123,11 @@ impl Source for Pacman {
             }
             // The planner expands a setup through `Source::setup`.
             Op::Setup { .. } => return Ok(Vec::new()),
+            // Leftover cleanup is planned by the transaction planner itself, never by a source.
+            Op::ClearLeftovers { .. }
+            | Op::Restore { .. }
+            | Op::EmptyHolding { .. }
+            | Op::ForceRemove { .. } => return Ok(Vec::new()),
         };
         Ok(vec![step])
     }

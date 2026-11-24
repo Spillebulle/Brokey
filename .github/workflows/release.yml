@@ -49,8 +49,15 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
 
+      # The Windows runner's TEMP is the 8.3 short spelling C:\Users\RUNNER~1,
+      # which the leftover cleanup's tests refuse as another spelling of a
+      # folder; ci.yml explains. They get the runner's long temp folder.
       - name: Test
+        shell: bash
         run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            export TMP="$RUNNER_TEMP" TEMP="$RUNNER_TEMP"
+          fi
           npm run lint
           npm run build
           cargo test --workspace

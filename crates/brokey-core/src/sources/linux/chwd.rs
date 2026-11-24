@@ -564,6 +564,11 @@ impl Source for Chwd {
             Op::Update { .. } | Op::UpdateAll { .. } | Op::Refresh { .. } | Op::Setup { .. } => {
                 Ok(Vec::new())
             }
+            // Leftover cleanup is planned by the transaction planner itself, never by a source.
+            Op::ClearLeftovers { .. }
+            | Op::Restore { .. }
+            | Op::EmptyHolding { .. }
+            | Op::ForceRemove { .. } => Ok(Vec::new()),
         }
     }
 }
