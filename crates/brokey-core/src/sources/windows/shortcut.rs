@@ -404,7 +404,10 @@ fn windows_extension(path: &str) -> Option<String> {
 /// directory every second shortcut on the machine points into, and the
 /// first of those is not this application. So a drive's root, anything in
 /// the Windows directory, and the folders applications are installed
-/// *under* rather than *to* are refused.
+/// *under* rather than *to* are refused. So are the profile's Desktop,
+/// Documents and Downloads: an uninstaller run from one of them says the
+/// application was downloaded there, not that the folder is its own, and the
+/// leftover scan takes whatever this accepts as a folder it may offer.
 pub fn specific(dir: &str) -> bool {
     let dir = normalise(dir);
     let parts: Vec<&str> = dir.split('\\').filter(|p| !p.is_empty()).collect();
@@ -421,7 +424,11 @@ pub fn specific(dir: &str) -> bool {
             | ["program files" | "program files (x86)" | "programdata" | "users"]
             | ["programdata", "microsoft", ..]
             | ["users", _]
-            | ["users", _, "appdata"]
+            | [
+                "users",
+                _,
+                "appdata" | "desktop" | "documents" | "downloads"
+            ]
             | ["users", _, "appdata", "local" | "roaming" | "locallow"]
             | [
                 "users",
@@ -1044,6 +1051,9 @@ mod tests {
             r"C:\Users\me\AppData\Local",
             r"C:\Users\me\AppData\Local\Programs",
             r"C:\Users\me\AppData\Roaming",
+            r"C:\Users\me\Desktop",
+            r"C:\Users\me\Documents\",
+            r"C:\Users\me\Downloads",
             r"\\server\share\app",
             r"app",
         ] {
@@ -1056,6 +1066,8 @@ mod tests {
             r"C:\Users\me\AppData\Local\Programs\Microsoft VS Code",
             r"C:\Python314",
             r"D:\Games\Thing",
+            r"C:\Users\me\Downloads\tool",
+            r"C:\Users\me\Documents\Portable App",
         ] {
             assert!(specific(narrow), "{narrow}");
         }
