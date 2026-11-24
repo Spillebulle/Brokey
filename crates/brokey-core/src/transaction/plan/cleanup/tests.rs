@@ -963,7 +963,7 @@ fn the_confirm_says_an_entry_is_incomplete_before_it_is_deleted() {
     let said = machine.with(|p| holding_notices(&one("broken"), p));
     assert_eq!(said.len(), 1, "{said:?}");
     assert!(
-        said[0].contains("broken app") && said[0].contains("incomplete"),
+        said[0].contains("broken app") && said[0].contains("incomplete") && !said[0].contains("  "),
         "{said:?}"
     );
     assert!(

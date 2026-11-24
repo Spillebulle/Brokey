@@ -148,7 +148,9 @@ pub fn shell_open_notice(name: &str) -> String {
 /// is deleted for good.
 pub fn incomplete_notice(name: &str) -> String {
     format!(
-        "What was cleared from {name} is incomplete in the holding area: its record cannot be          read, or part of it is still where it was and this is the only whole copy. Deleting it          cannot be undone, and Brokey never empties it by itself."
+        "What was cleared from {name} is incomplete in the holding area: its record cannot be \
+         read, or part of it is still where it was and this is the only whole copy. Deleting it \
+         cannot be undone, and Brokey never empties it by itself."
     )
 }
 
