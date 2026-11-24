@@ -612,7 +612,14 @@ fn windows_keeps(drive: char, names: &[&str], view: &dyn SystemView) -> bool {
             path == dir || path.starts_with(&format!("{dir}\\"))
         })
     };
-    if under(Known::ProgramData, "microsoft")
+    // The all-users Start menu is under `ProgramData\Microsoft`, but what is
+    // inside its `Programs` folder is the applications'. The folder itself,
+    // and the Start menu above it, stay Windows's.
+    let in_machine_menu = view.known_folder(Known::StartMenuMachine).is_some_and(|f| {
+        let menu = shortcut::normalise(&f.to_string_lossy());
+        path.starts_with(&format!("{menu}\\"))
+    });
+    if (under(Known::ProgramData, "microsoft") && !in_machine_menu)
         || under(Known::ProgramFiles, "common files\\microsoft shared")
         || under(Known::ProgramFilesX86, "common files\\microsoft shared")
     {

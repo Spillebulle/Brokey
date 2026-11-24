@@ -1510,6 +1510,38 @@ fn common_files_microsoft_shared_is_refused() {
     );
 }
 
+/// The all-users Start menu lies under `ProgramData\Microsoft`, which is
+/// Windows's own, yet what is inside its `Programs` folder is the
+/// applications', and the scan offers dead shortcuts there as Certain.
+#[cfg(windows)]
+#[test]
+fn what_is_inside_the_machine_start_menu_may_be_cleared_and_the_menu_itself_not() {
+    let view = machine("");
+    let menu = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs";
+    for (kind, path) in [
+        (ItemKind::Shortcut, format!(r"{menu}\Acme Studio.lnk")),
+        (ItemKind::Folder, format!(r"{menu}\Acme")),
+        (ItemKind::Shortcut, format!(r"{menu}\Acme\Acme Studio.lnk")),
+    ] {
+        allowed_for(&hold("abc", vec![item(kind, &path)], true), &view);
+    }
+    for path in [
+        menu.to_string(),
+        r"C:\ProgramData\Microsoft\Windows\Start Menu".to_string(),
+        r"C:\ProgramData\Microsoft\Windows".to_string(),
+        r"C:\ProgramData\Microsoft\Crypto".to_string(),
+        r"C:\ProgramData\Microsoft\Crypto\RSA".to_string(),
+        r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs.lnk".to_string(),
+    ] {
+        refused_for(
+            &hold("abc", vec![item(ItemKind::Folder, &path)], true),
+            &view,
+            Part::Plain,
+            "never clears",
+        );
+    }
+}
+
 #[test]
 fn a_task_or_rule_brokey_cannot_place_is_refused() {
     let view = machine(

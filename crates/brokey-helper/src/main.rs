@@ -1155,6 +1155,52 @@ mod tests {
         assert!(events.contains("never clears"), "{events}");
     }
 
+    /// The all-users Start menu, and `ProgramData\Microsoft` around it, are
+    /// never held; what an application put inside `Programs` may be.
+    #[cfg(windows)]
+    #[test]
+    fn the_helper_holds_inside_the_machine_start_menu_and_never_the_menu() {
+        use brokey_core::cleanup::view::{Known, LiveView, SystemView};
+        use brokey_core::model::ItemKind;
+        let menu = LiveView::new()
+            .known_folder(Known::StartMenuMachine)
+            .expect("Windows says where the all-users Start menu is");
+        let data = std::env::var("ProgramData").expect("Windows says where ProgramData is");
+        for refused in [
+            menu.clone(),
+            menu.parent()
+                .expect("Programs is in the Start menu")
+                .to_path_buf(),
+            std::path::PathBuf::from(format!(r"{data}\Microsoft\Crypto")),
+        ] {
+            let events = refused_by_the_helper(hold_plan(&[(
+                ItemKind::Folder,
+                refused.to_string_lossy().into_owned(),
+            )]));
+            assert!(events.contains("never clears"), "{events}");
+        }
+        // Validated and never run: a shortcut that is there now, whichever
+        // it is, is not refused as a place Brokey never clears.
+        let Some(shortcut) = std::fs::read_dir(&menu).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk")))
+        }) else {
+            return;
+        };
+        let line = hold_plan(&[(ItemKind::Shortcut, shortcut.to_string_lossy().into_owned())]);
+        let plan: Plan = serde_json::from_str(line.trim()).expect("the plan reads back");
+        let verdict = brokey_core::transaction::allow::validate(&plan);
+        assert!(
+            verdict
+                .as_ref()
+                .err()
+                .is_none_or(|e| !e.contains("never clears")),
+            "{verdict:?}"
+        );
+    }
+
     /// Review focus 5, through the helper's own door: one folder of two was
     /// swapped for a junction after the scan. The whole plan is refused and
     /// the folder that was fine has not moved either.
