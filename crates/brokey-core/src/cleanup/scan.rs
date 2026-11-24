@@ -29,7 +29,7 @@ use crate::model::{Confidence, ItemKind, Scope};
 use crate::sources::windows::shortcut::{self, inside};
 use crate::sources::windows::winget::normalise;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// One thing that looks like a leftover, before the guard has seen it.
 #[derive(Clone, Debug, PartialEq)]
@@ -44,6 +44,10 @@ pub struct Candidate {
     pub scope: Scope,
     /// One sentence on why it matched.
     pub reason: String,
+    /// What it starts, for an item found because it points into the
+    /// application's folder: the guard checks it against what other
+    /// applications claim. `None` for a match by name or by place.
+    pub points_to: Option<PathBuf>,
 }
 
 /// What a scan found, and what it could not or would not offer.
@@ -173,7 +177,12 @@ struct Scan<'a> {
     windows: Option<String>,
     /// `%NAME%` to what it stands for, from the well-known folders.
     env: HashMap<String, String>,
-    listed: HashMap<String, Option<Vec<Entry>>>,
+    /// Each folder listed so far: its entries and how many more could not
+    /// be read.
+    listed: HashMap<String, Option<(Vec<Entry>, u32)>>,
+    /// Folders that hold one folder per application, from the well-known
+    /// folders; see [`Scan::shared_root`] for the ones known by their shape.
+    shared: Vec<String>,
     seen: HashMap<String, usize>,
     clouded: HashSet<String>,
     out: Scanned,
@@ -229,6 +238,39 @@ fn rank(confidence: Confidence) -> u8 {
     }
 }
 
+/// The program a command line starts, without its arguments. A quoted
+/// program ends at its closing quote; an unquoted one at the first word that
+/// ends in a program's extension, or else where the first switch begins. It
+/// is read from the text alone, never by asking the disk which reading exists.
+fn program_of(command: &str) -> String {
+    let command = command.trim();
+    let (quoted, rest) = match command.strip_prefix('"') {
+        Some(rest) => (true, rest),
+        None => (false, command),
+    };
+    let rest = rest.strip_prefix(r"\??\").unwrap_or(rest);
+    if quoted {
+        return rest.split('"').next().unwrap_or(rest).trim().to_string();
+    }
+    let mut start = 0;
+    for word in rest.split(' ') {
+        let end = start + word.len();
+        let lower = word.to_lowercase();
+        if [".exe", ".dll", ".com", ".bat", ".cmd", ".lnk"]
+            .iter()
+            .any(|e| lower.ends_with(e))
+        {
+            return rest[..end].trim().to_string();
+        }
+        start = end + 1;
+    }
+    let switch = [rest.find(" /"), rest.find(" -")]
+        .into_iter()
+        .flatten()
+        .min();
+    rest[..switch.unwrap_or(rest.len())].trim().to_string()
+}
+
 fn text_of(path: &Option<std::path::PathBuf>) -> Option<String> {
     path.as_ref()
         .map(|p| p.to_string_lossy().trim().to_string())
@@ -254,6 +296,10 @@ impl<'a> Scan<'a> {
             Known::StartMenuMachine,
             Known::StartMenuUser,
             Known::Desktop,
+            Known::Downloads,
+            Known::Pictures,
+            Known::Music,
+            Known::Videos,
             Known::Windows,
             Known::Profile,
         ]);
@@ -266,7 +312,24 @@ impl<'a> Scan<'a> {
             Known::SavedGames,
             Known::StartMenuUser,
             Known::Desktop,
+            Known::Downloads,
+            Known::Pictures,
+            Known::Music,
+            Known::Videos,
         ]);
+        let shared = [
+            (Known::ProgramFiles, "Common Files"),
+            (Known::ProgramFiles, "WindowsApps"),
+            (Known::ProgramFilesX86, "Common Files"),
+            (Known::ProgramData, "Package Cache"),
+            (Known::ProgramData, r"chocolatey\lib"),
+            (Known::ProgramData, r"scoop\apps"),
+            (Known::LocalAppData, "Packages"),
+            (Known::Profile, r"scoop\apps"),
+        ]
+        .into_iter()
+        .filter_map(|(k, tail)| folder(k).map(|f| join(&f, tail)))
+        .collect();
         let data_roots = of(&[Known::Documents, Known::SavedGames]);
         let env = [
             ("LOCALAPPDATA", Known::LocalAppData),
@@ -299,6 +362,7 @@ impl<'a> Scan<'a> {
             windows: folder(Known::Windows),
             env,
             listed: HashMap::new(),
+            shared,
             seen: HashMap::new(),
             clouded: HashSet::new(),
             out: Scanned::default(),
@@ -341,7 +405,35 @@ impl<'a> Scan<'a> {
     fn narrow(&self, dir: &str) -> bool {
         shortcut::specific(dir)
             && !self.holds_known(dir)
+            && !self.shared_root(dir)
             && !self.windows.as_deref().is_some_and(|w| within(dir, w))
+    }
+
+    /// A folder `shortcut::specific` accepts that still holds one folder
+    /// per application, or is the user's own: as an install folder it would
+    /// make everything of every application in it `Certain`. Kept here and
+    /// not in `specific`, so the launcher keeps its own rule.
+    fn shared_root(&self, dir: &str) -> bool {
+        let normal = shortcut::normalise(dir);
+        let parts: Vec<&str> = normal.split('\\').collect();
+        let last_two = parts.len().checked_sub(2).map(|from| &parts[from..]);
+        let by_shape = matches!(
+            last_two,
+            Some(
+                [
+                    "program files" | "program files (x86)",
+                    "common files" | "windowsapps"
+                ] | ["programdata", "package cache"]
+                    | ["steamapps", "common"]
+                    | ["scoop", "apps"]
+                    | ["chocolatey", "lib"]
+            )
+        ) || parts.last() == Some(&"steamapps")
+            || matches!(
+                parts.as_slice(),
+                [_, "users", _, "pictures" | "music" | "videos"]
+            );
+        by_shape || self.shared.iter().any(|s| same(s, dir))
     }
 
     /// Whether a path is, or holds, a well-known folder.
@@ -383,6 +475,19 @@ impl<'a> Scan<'a> {
 
     /// A folder's entries, read once however often they are asked for.
     fn list(&mut self, dir: &str) -> Option<Vec<Entry>> {
+        self.list_counted(dir).map(|(entries, _)| entries)
+    }
+
+    /// A folder's entries only when every one of them could be read: what
+    /// decides that a folder holds nothing but the application's must not
+    /// pass over what it could not see.
+    fn list_whole(&mut self, dir: &str) -> Option<Vec<Entry>> {
+        self.list_counted(dir)
+            .filter(|(_, unreadable)| *unreadable == 0)
+            .map(|(entries, _)| entries)
+    }
+
+    fn list_counted(&mut self, dir: &str) -> Option<(Vec<Entry>, u32)> {
         let key = shortcut::normalise(dir);
         if let Some(found) = self.listed.get(&key) {
             return found.clone();
@@ -390,7 +495,7 @@ impl<'a> Scan<'a> {
         let found = match self.view.list(Path::new(dir)) {
             Ok(listed) => {
                 self.out.unreadable += listed.unreadable;
-                Some(listed.items)
+                Some((listed.items, listed.unreadable))
             }
             Err(e) => {
                 self.count(&e);
@@ -437,18 +542,20 @@ impl<'a> Scan<'a> {
         if cloud { Reach::Cloud } else { Reach::Plain }
     }
 
-    /// Whether a command line, or a path, starts something in a home.
-    fn points_into(&self, command: &str) -> bool {
+    /// What a command line, or a path, starts, when that lies in a home.
+    fn target(&self, command: &str) -> Option<PathBuf> {
         if self.homes.is_empty() {
-            return false;
+            return None;
         }
         let command = command.trim();
         let expanded =
             shortcut::expand_with(command, &|name| self.env.get(&name.to_uppercase()).cloned())
                 .unwrap_or_else(|| command.to_string());
-        let path = expanded.trim_start_matches('"');
-        let path = path.strip_prefix(r"\??\").unwrap_or(path);
-        self.homes.iter().any(|home| inside(path, home))
+        let program = program_of(&expanded);
+        self.homes
+            .iter()
+            .any(|home| inside(&program, home))
+            .then(|| PathBuf::from(program))
     }
 
     fn push(&mut self, candidate: Candidate) {
@@ -516,10 +623,18 @@ impl<'a> Scan<'a> {
             confidence,
             scope,
             reason,
+            points_to: None,
         });
     }
 
-    fn offer_key(&mut self, hive: Hive, path: &str, confidence: Confidence, reason: String) {
+    fn offer_key(
+        &mut self,
+        hive: Hive,
+        path: &str,
+        confidence: Confidence,
+        reason: String,
+        points_to: Option<PathBuf>,
+    ) {
         self.push(Candidate {
             kind: ItemKind::RegistryKey,
             location: format!(r"{}\{path}", hive_word(hive)),
@@ -531,10 +646,19 @@ impl<'a> Scan<'a> {
                 Scope::Machine
             },
             reason,
+            points_to,
         });
     }
 
-    fn offer_value(&mut self, hive: Hive, key: &str, value: &str, reason: String) {
+    /// A value is offered only for what it points at, so always `Certain`.
+    fn offer_value(
+        &mut self,
+        hive: Hive,
+        key: &str,
+        value: &str,
+        reason: String,
+        points_to: PathBuf,
+    ) {
         self.push(Candidate {
             kind: ItemKind::RegistryValue,
             location: format!(r"{}\{key} | {value}", hive_word(hive)),
@@ -546,10 +670,17 @@ impl<'a> Scan<'a> {
                 Scope::Machine
             },
             reason,
+            points_to: Some(points_to),
         });
     }
 
-    fn offer_system(&mut self, kind: ItemKind, location: String, reason: String) {
+    fn offer_system(
+        &mut self,
+        kind: ItemKind,
+        location: String,
+        reason: String,
+        points_to: PathBuf,
+    ) {
         self.push(Candidate {
             kind,
             location,
@@ -557,6 +688,7 @@ impl<'a> Scan<'a> {
             confidence: Confidence::Certain,
             scope: Scope::Machine,
             reason,
+            points_to: Some(points_to),
         });
     }
 
@@ -581,7 +713,7 @@ impl<'a> Scan<'a> {
         if !self.narrow(&parent) || !self.is_publisher(&parent_leaf) {
             return;
         }
-        if let Some(entries) = self.list(&parent)
+        if let Some(entries) = self.list_whole(&parent)
             && entries.iter().all(|e| e.name.eq_ignore_ascii_case(&leaf))
         {
             let publisher = self.publisher_name();
@@ -689,10 +821,11 @@ impl<'a> Scan<'a> {
     /// Whether everything in a Start menu folder is a dead shortcut of the
     /// application's, and what in it is.
     fn menu_folder(&mut self, dir: &str, depth: u8) -> (bool, Vec<MenuPart>) {
-        let Some(entries) = self.list(dir) else {
+        let Some((entries, unreadable)) = self.list_counted(dir) else {
             return (false, Vec::new());
         };
-        let mut whole = !entries.is_empty();
+        // Something that could not be read may be anyone's.
+        let mut whole = !entries.is_empty() && unreadable == 0;
         let mut parts = Vec::new();
         for entry in &entries {
             let path = join(dir, &entry.name);
@@ -785,18 +918,31 @@ impl<'a> Scan<'a> {
     fn registry(&mut self) {
         let app = self.app();
         if let Some((hive, key)) = &self.hints.uninstall_key {
+            // A key name is one name. An empty one, or one that walks up or
+            // down, would name the `Uninstall` key itself or someone else's.
+            let key = key.trim();
+            let one_name =
+                !key.is_empty() && key != "." && key != ".." && !key.contains(['\\', '/']);
             let path = format!(r"{UNINSTALL}\{key}");
-            if self.values(*hive, &path).is_some() {
+            if one_name && self.values(*hive, &path).is_some() {
                 self.offer_key(
                     *hive,
                     &path,
                     Confidence::Certain,
                     format!("It is the uninstall entry {app} was listed under."),
+                    None,
                 );
             }
         }
         for hive in [Hive::Hklm, Hive::Hklm32, Hive::Hkcu] {
             self.software(hive);
+        }
+        // Without a home nothing can point into one, and these are thousands
+        // of registry reads.
+        if self.homes.is_empty() {
+            return;
+        }
+        for hive in [Hive::Hklm, Hive::Hklm32, Hive::Hkcu] {
             self.app_paths(hive);
             self.run(hive);
         }
@@ -824,6 +970,7 @@ impl<'a> Scan<'a> {
                     &path,
                     Confidence::Likely,
                     format!("Its name matches {app}."),
+                    None,
                 );
             } else if self.is_publisher(&key) {
                 let Some(children) = self.subkeys(hive, &path) else {
@@ -836,6 +983,7 @@ impl<'a> Scan<'a> {
                         &format!(r"{path}\{child}"),
                         Confidence::Likely,
                         format!("Its name matches {app}, under {publisher}."),
+                        None,
                     );
                 }
                 if mine.len() == children.len() {
@@ -843,7 +991,10 @@ impl<'a> Scan<'a> {
                         hive,
                         &path,
                         Confidence::Possible,
-                        format!("It is named for {publisher}, who published {app}, and holds nothing else."),
+                        format!(
+                            "It is named for {publisher}, who published {app}, and holds nothing else."
+                        ),
+                        None,
                     );
                 }
             }
@@ -854,14 +1005,18 @@ impl<'a> Scan<'a> {
         let app = self.app();
         for exe in self.subkeys(hive, APP_PATHS).unwrap_or_default() {
             let path = format!(r"{APP_PATHS}\{exe}");
-            if let Some(values) = self.values(hive, &path)
-                && values.iter().any(|(_, data)| self.points_into(data))
-            {
+            let target = self
+                .values(hive, &path)
+                .unwrap_or_default()
+                .iter()
+                .find_map(|(_, data)| self.target(data));
+            if let Some(target) = target {
                 self.offer_key(
                     hive,
                     &path,
                     Confidence::Certain,
                     format!("It tells Windows where a program of {app}'s is."),
+                    Some(target),
                 );
             }
         }
@@ -871,12 +1026,13 @@ impl<'a> Scan<'a> {
         let app = self.app();
         for key in RUN_KEYS {
             for (name, data) in self.values(hive, key).unwrap_or_default() {
-                if self.points_into(&data) {
+                if let Some(target) = self.target(&data) {
                     self.offer_value(
                         hive,
                         key,
                         &name,
                         format!("It starts a program from the folder {app} was installed in."),
+                        target,
                     );
                 }
             }
@@ -890,32 +1046,34 @@ impl<'a> Scan<'a> {
             return;
         };
         let app = self.app();
-        let mut gone: Vec<String> = Vec::new();
+        let mut gone: Vec<(String, PathBuf)> = Vec::new();
         for key in &keys {
             if key.starts_with('.') || SHELL_CLASSES.contains(&key.to_lowercase().as_str()) {
                 continue;
             }
             let path = format!(r"{CLASSES}\{key}");
-            if self.opens_only_from_home(hive, &path) {
+            if let Some(target) = self.opens_only_from_home(hive, &path) {
                 self.offer_key(
                     hive,
                     &path,
                     Confidence::Certain,
                     format!("It opens files or links with {app}, which is gone."),
+                    Some(target.clone()),
                 );
-                gone.push(key.clone());
+                gone.push((key.clone(), target));
             }
         }
         if keys.iter().any(|k| k.eq_ignore_ascii_case("Applications")) {
             let applications = format!(r"{CLASSES}\Applications");
             for exe in self.subkeys(hive, &applications).unwrap_or_default() {
                 let path = format!(r"{applications}\{exe}");
-                if self.opens_only_from_home(hive, &path) {
+                if let Some(target) = self.opens_only_from_home(hive, &path) {
                     self.offer_key(
                         hive,
                         &path,
                         Confidence::Certain,
                         format!("It tells Windows how to open files with {app}, which is gone."),
+                        Some(target),
                     );
                 }
             }
@@ -928,35 +1086,36 @@ impl<'a> Scan<'a> {
         }
     }
 
-    /// Whether a class has verbs and every one of them runs something in a
-    /// home. One verb that runs anything else means the class is in use.
-    fn opens_only_from_home(&mut self, hive: Hive, class: &str) -> bool {
+    /// What a class runs, when it has verbs and every one of them runs
+    /// something in a home. One verb that runs anything else means the
+    /// class is in use. The first verb's program is the answer.
+    fn opens_only_from_home(&mut self, hive: Hive, class: &str) -> Option<PathBuf> {
         let shell = format!(r"{class}\shell");
-        let Some(verbs) = self.subkeys(hive, &shell) else {
-            return false;
-        };
-        if verbs.is_empty() {
-            return false;
-        }
+        let verbs = self.subkeys(hive, &shell)?;
+        let mut first = None;
         for verb in verbs {
             let command = format!(r"{shell}\{verb}\command");
-            let ours = self.values(hive, &command).is_some_and(|values| {
-                values
-                    .iter()
-                    .any(|(name, data)| name.is_empty() && self.points_into(data))
-            });
-            if !ours {
-                return false;
-            }
+            let target = self
+                .values(hive, &command)
+                .unwrap_or_default()
+                .iter()
+                .find(|(name, _)| name.is_empty())
+                .and_then(|(_, data)| self.target(data))?;
+            first.get_or_insert(target);
         }
-        true
+        first
     }
 
     /// An extension that refers only to ProgIDs being cleared goes with
     /// them; one that refers to others too loses only those references.
-    fn extension(&mut self, hive: Hive, extension: &str, gone: &[String]) {
+    fn extension(&mut self, hive: Hive, extension: &str, gone: &[(String, PathBuf)]) {
         let path = format!(r"{CLASSES}\{extension}");
-        let is_gone = |progid: &str| gone.iter().any(|g| g.eq_ignore_ascii_case(progid));
+        let gone_to = |progid: &str| {
+            gone.iter()
+                .find(|(g, _)| g.eq_ignore_ascii_case(progid))
+                .map(|(_, target)| target.clone())
+        };
+        let is_gone = |progid: &str| gone_to(progid).is_some();
         let Some(values) = self.values(hive, &path) else {
             return;
         };
@@ -978,13 +1137,14 @@ impl<'a> Scan<'a> {
         } else {
             (Vec::new(), true)
         };
-        let refers = values
+        let referred: Option<PathBuf> = values
             .iter()
-            .any(|(name, data)| name.is_empty() && is_gone(data))
-            || open_with_values.iter().any(|(name, _)| is_gone(name));
-        if !refers {
+            .filter(|(name, _)| name.is_empty())
+            .find_map(|(_, data)| gone_to(data))
+            .or_else(|| open_with_values.iter().find_map(|(name, _)| gone_to(name)));
+        let Some(referred) = referred else {
             return;
-        }
+        };
         let only_ours = values
             .iter()
             .all(|(name, data)| name.is_empty() && is_gone(data))
@@ -1000,53 +1160,67 @@ impl<'a> Scan<'a> {
                 &path,
                 Confidence::Certain,
                 format!("It opened these files only with {app}, which is gone."),
+                Some(referred),
             );
             return;
         }
-        for (name, _) in open_with_values.iter().filter(|(name, _)| is_gone(name)) {
-            self.offer_value(
-                hive,
-                &open_with,
-                name,
-                format!("It offers {app}, which is gone, to open these files."),
-            );
+        for (name, _) in &open_with_values {
+            if let Some(target) = gone_to(name) {
+                self.offer_value(
+                    hive,
+                    &open_with,
+                    name,
+                    format!("It offers {app}, which is gone, to open these files."),
+                    target,
+                );
+            }
         }
     }
 
     /// Services, scheduled tasks and firewall rules that run something in a
     /// home.
     fn system(&mut self) {
+        // Without a home nothing can point into one.
+        if self.homes.is_empty() {
+            return;
+        }
         let app = self.app();
         let services = self.view.services();
         self.out.unreadable += services.unreadable;
         for service in services.items {
-            if self.points_into(&service.image_path) {
+            if let Some(target) = self.target(&service.image_path) {
                 self.offer_system(
                     ItemKind::Service,
                     format!("service:{}", service.name),
                     format!("It runs a program of {app}'s as a service."),
+                    target,
                 );
             }
         }
         let tasks = self.view.tasks();
         self.out.unreadable += tasks.unreadable;
         for task in tasks.items {
-            if task.actions.iter().any(|a| self.points_into(a)) {
+            // Every action, or the task does something else as well.
+            let targets: Option<Vec<PathBuf>> =
+                task.actions.iter().map(|a| self.target(a)).collect();
+            if let Some(target) = targets.and_then(|t| t.into_iter().next()) {
                 self.offer_system(
                     ItemKind::Task,
                     format!("task:{}", task.path),
                     format!("It runs a program of {app}'s on a schedule."),
+                    target,
                 );
             }
         }
         let rules = self.view.firewall_rules();
         self.out.unreadable += rules.unreadable;
         for rule in rules.items {
-            if self.points_into(&rule.program) {
+            if let Some(target) = self.target(&rule.program) {
                 self.offer_system(
                     ItemKind::FirewallRule,
                     format!("firewall:{}", rule.name),
                     format!("It lets a program of {app}'s through Windows Firewall."),
+                    target,
                 );
             }
         }
@@ -1257,6 +1431,24 @@ mod tests {
             r"C:\Users\you\Desktop",
             r"C:\Users\you",
             r"C:\",
+            // Shared roots that `shortcut::specific` accepts: each holds one
+            // folder per application, and the fixture has a firewall rule
+            // into a folder under each, which a home here would make Certain.
+            r"C:\Program Files\Common Files",
+            r"C:\Program Files (x86)\Common Files",
+            r"C:\Program Files\WindowsApps",
+            r"C:\ProgramData\Package Cache",
+            r"C:\Users\you\AppData\Local\Packages",
+            r"C:\Program Files (x86)\Steam\steamapps\common",
+            r"D:\SteamLibrary\steamapps\common",
+            r"C:\Users\you\scoop\apps",
+            r"C:\ProgramData\scoop\apps",
+            r"C:\ProgramData\chocolatey\lib",
+            // Downloads moved to another drive, known only as a known folder.
+            r"D:\Downloads",
+            r"C:\Users\you\Pictures",
+            r"C:\Users\you\Music",
+            r"C:\Users\you\Videos",
         ];
         for dir in broad {
             for h in [
@@ -1275,6 +1467,137 @@ mod tests {
                 assert_eq!(offered, vec![format!(r"{ROAMING}\Widget Maker")], "{dir}");
             }
         }
+    }
+
+    #[test]
+    fn a_broad_install_location_above_the_uninstaller_leaves_the_uninstaller_folder() {
+        let s = scan(
+            &hints(
+                "Widget Maker",
+                Some("Widget Co"),
+                Some(r"C:\Program Files\Widget"),
+                Some(r"C:\Program Files"),
+            ),
+            &machine("broad-install-dir"),
+        );
+        assert_eq!(
+            confidence(&s, r"C:\Program Files\Widget"),
+            Some(Confidence::Certain)
+        );
+        let run = at(&s, &format!(r"HKCU\{RUN} | Widget")).expect("the Run value");
+        assert_eq!(run.confidence, Confidence::Certain);
+        assert_eq!(
+            run.points_to,
+            Some(PathBuf::from(r"C:\Program Files\Widget\widget.exe"))
+        );
+        assert!(at(&s, r"C:\Program Files").is_none());
+        assert!(at(&s, &format!(r"HKCU\{RUN} | Other")).is_none());
+        assert!(at(&s, "firewall:Other").is_none());
+    }
+
+    const UNREADABLE_SIBLINGS: &str = r#"{
+      "folders": {
+        "ProgramFiles": "C:\\Program Files",
+        "StartMenuUser": "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+        "Profile": "C:\\Users\\you"
+      },
+      "dirs": {
+        "C:\\Program Files": [{ "name": "Acme", "is_dir": true }],
+        "C:\\Program Files\\Acme": [{ "name": "Acme Studio", "is_dir": true }],
+        "C:\\Program Files\\Acme\\Acme Studio": [{ "name": "a.ini", "size": 1 }],
+        "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs": [
+          { "name": "Acme", "is_dir": true }
+        ],
+        "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Acme": [
+          { "name": "Acme Studio.lnk", "size": 1 }
+        ]
+      },
+      "unreadable_entries": {
+        "C:\\Program Files\\Acme": 1,
+        "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Acme": 1
+      },
+      "shortcuts": {
+        "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Acme\\Acme Studio.lnk": "C:\\Program Files\\Acme\\Acme Studio\\gone.exe"
+      }
+    }"#;
+
+    #[test]
+    fn a_folder_with_something_unreadable_in_it_is_not_taken_as_only_ours() {
+        let s = scan(
+            &hints("Acme Studio", Some("Acme Corp"), Some(STUDIO), None),
+            &FixtureView::from_json(UNREADABLE_SIBLINGS),
+        );
+        assert_eq!(confidence(&s, STUDIO), Some(Confidence::Certain));
+        assert!(at(&s, r"C:\Program Files\Acme").is_none());
+        assert!(at(&s, &format!(r"{USER_MENU}\Acme")).is_none());
+        assert_eq!(
+            confidence(&s, &format!(r"{USER_MENU}\Acme\Acme Studio.lnk")),
+            Some(Confidence::Certain)
+        );
+        assert_eq!(s.unreadable, 2);
+    }
+
+    #[test]
+    fn a_task_with_any_action_elsewhere_is_not_offered() {
+        let s = acme(STUDIO);
+        assert!(at(&s, r"task:\Acme\Studio Update").is_some());
+        assert!(at(&s, r"task:\Acme\Mixed").is_none());
+    }
+
+    #[test]
+    fn an_empty_uninstall_key_name_never_offers_the_uninstall_key_itself() {
+        for key in ["", "  ", r"\", r"Other\.."] {
+            let mut h = hints("Acme Studio", Some("Acme Corp"), Some(STUDIO), None);
+            h.uninstall_key = Some((Hive::Hklm, key.to_string()));
+            let s = scan(&h, &machine("vendor"));
+            assert!(
+                s.candidates
+                    .iter()
+                    .all(|c| !c.location.to_lowercase().contains(r"\uninstall")),
+                "{key:?}: {:?}",
+                locations(&s)
+            );
+        }
+    }
+
+    #[test]
+    fn without_a_home_nothing_is_looked_for_by_what_it_points_at() {
+        // Only the unreadable `Local\Acme Studio`: services and tasks, which
+        // can match nothing without a home, are not read at all.
+        let s = scan(
+            &hints("Acme Studio", Some("Acme Corp"), None, None),
+            &machine("vendor"),
+        );
+        assert_eq!(s.unreadable, 1);
+        assert!(s.candidates.iter().all(|c| c.points_to.is_none()));
+    }
+
+    #[test]
+    fn what_points_into_a_home_says_what_it_points_at() {
+        let s = acme(STUDIO);
+        let target = |location: &str| at(&s, location).and_then(|c| c.points_to.clone());
+        let studio = |file: &str| Some(PathBuf::from(format!(r"{STUDIO}\{file}")));
+        assert_eq!(
+            target(&format!(r"HKLM32\{RUN} | AcmeTray")),
+            studio("tray.exe")
+        );
+        assert_eq!(target("service:AcmeStudioSvc"), studio("svc.exe"));
+        assert_eq!(target(r"task:\Acme\Studio Update"), studio("update.exe"));
+        assert_eq!(target("firewall:Acme Studio"), studio("acmestudio.exe"));
+        assert_eq!(
+            target(r"HKLM\Software\Microsoft\Windows\CurrentVersion\App Paths\acmestudio.exe"),
+            studio("acmestudio.exe")
+        );
+        // A match by name or by place points at nothing.
+        assert_eq!(target(STUDIO), None);
+        assert_eq!(target(r"HKCU\Software\Acme\Acme Studio"), None);
+
+        let s = discord();
+        let update = Some(PathBuf::from(format!(r"{LOCAL}\Discord\Update.exe")));
+        let target = |location: &str| at(&s, location).and_then(|c| c.points_to.clone());
+        assert_eq!(target(&format!(r"HKCU\{RUN} | Discord")), update);
+        assert_eq!(target(r"HKCU\Software\Classes\discord"), update);
+        assert_eq!(target(r"HKCU\Software\Classes\.dtheme"), update);
     }
 
     #[test]

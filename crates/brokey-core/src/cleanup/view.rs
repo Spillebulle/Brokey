@@ -98,6 +98,13 @@ pub enum Known {
     StartMenuMachine,
     StartMenuUser,
     Desktop,
+    /// The user's own folders, wherever they have been moved to. Nothing
+    /// is looked for in them; they are known so that none of them is ever
+    /// taken for an application's folder.
+    Downloads,
+    Pictures,
+    Music,
+    Videos,
     Windows,
     Profile,
 }

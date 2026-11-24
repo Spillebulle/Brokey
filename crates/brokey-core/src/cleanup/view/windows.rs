@@ -238,6 +238,18 @@ impl SystemView for LiveView {
             Known::Desktop => directories::UserDirs::new()
                 .and_then(|d| d.desktop_dir().map(Path::to_path_buf))
                 .or_else(|| in_profile("Desktop")),
+            Known::Downloads => directories::UserDirs::new()
+                .and_then(|d| d.download_dir().map(Path::to_path_buf))
+                .or_else(|| in_profile("Downloads")),
+            Known::Pictures => directories::UserDirs::new()
+                .and_then(|d| d.picture_dir().map(Path::to_path_buf))
+                .or_else(|| in_profile("Pictures")),
+            Known::Music => directories::UserDirs::new()
+                .and_then(|d| d.audio_dir().map(Path::to_path_buf))
+                .or_else(|| in_profile("Music")),
+            Known::Videos => directories::UserDirs::new()
+                .and_then(|d| d.video_dir().map(Path::to_path_buf))
+                .or_else(|| in_profile("Videos")),
             Known::Windows => Self::env("SystemRoot"),
             Known::Profile => profile,
         }

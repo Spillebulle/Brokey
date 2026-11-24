@@ -12,31 +12,267 @@
     "StartMenuUser": "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
     "Desktop": "C:\\Users\\you\\Desktop",
     "Windows": "C:\\Windows",
-    "Profile": "C:\\Users\\you"
+    "Profile": "C:\\Users\\you",
+    "Downloads": "D:\\Downloads"
   },
   "dirs": {
     "C:\\": [
-      { "name": "Program Files", "is_dir": true },
-      { "name": "Users", "is_dir": true },
-      { "name": "Windows", "is_dir": true }
+      {
+        "name": "Program Files",
+        "is_dir": true
+      },
+      {
+        "name": "Users",
+        "is_dir": true
+      },
+      {
+        "name": "Windows",
+        "is_dir": true
+      }
     ],
-    "C:\\Program Files": [{ "name": "Other", "is_dir": true }],
-    "C:\\Program Files\\Other": [{ "name": "other.exe", "size": 100 }],
+    "C:\\Program Files": [
+      {
+        "name": "Other",
+        "is_dir": true
+      },
+      {
+        "name": "Widget",
+        "is_dir": true
+      }
+    ],
+    "C:\\Program Files\\Other": [
+      {
+        "name": "other.exe",
+        "size": 100
+      }
+    ],
     "C:\\Users\\you": [
-      { "name": "Desktop", "is_dir": true },
-      { "name": "Downloads", "is_dir": true }
+      {
+        "name": "Desktop",
+        "is_dir": true
+      },
+      {
+        "name": "Downloads",
+        "is_dir": true
+      }
     ],
     "C:\\Users\\you\\Downloads": [
-      { "name": "setup.exe", "size": 100 },
-      { "name": "tool", "is_dir": true }
+      {
+        "name": "setup.exe",
+        "size": 100
+      },
+      {
+        "name": "tool",
+        "is_dir": true
+      }
     ],
-    "C:\\Users\\you\\Downloads\\tool": [{ "name": "tool.exe", "size": 100 }],
-    "C:\\Users\\you\\AppData\\Roaming": [{ "name": "Widget Maker", "is_dir": true }],
-    "C:\\Users\\you\\AppData\\Roaming\\Widget Maker": [{ "name": "prefs.json", "size": 10 }],
-    "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs": [{ "name": "Other.lnk", "size": 1000 }],
+    "C:\\Users\\you\\Downloads\\tool": [
+      {
+        "name": "tool.exe",
+        "size": 100
+      }
+    ],
+    "C:\\Users\\you\\AppData\\Roaming": [
+      {
+        "name": "Widget Maker",
+        "is_dir": true
+      }
+    ],
+    "C:\\Users\\you\\AppData\\Roaming\\Widget Maker": [
+      {
+        "name": "prefs.json",
+        "size": 10
+      }
+    ],
+    "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs": [
+      {
+        "name": "Other.lnk",
+        "size": 1000
+      }
+    ],
     "C:\\Users\\you\\Desktop": [
-      { "name": "Gone.lnk", "size": 1000 },
-      { "name": "Other.lnk", "size": 1000 }
+      {
+        "name": "Gone.lnk",
+        "size": 1000
+      },
+      {
+        "name": "Other.lnk",
+        "size": 1000
+      }
+    ],
+    "C:\\Program Files\\Common Files": [
+      {
+        "name": "Thing",
+        "is_dir": true
+      }
+    ],
+    "C:\\Program Files\\Common Files\\Thing": [
+      {
+        "name": "thing.exe",
+        "size": 10
+      }
+    ],
+    "C:\\Program Files (x86)\\Common Files": [
+      {
+        "name": "Thing",
+        "is_dir": true
+      }
+    ],
+    "C:\\Program Files (x86)\\Common Files\\Thing": [
+      {
+        "name": "thing.exe",
+        "size": 10
+      }
+    ],
+    "C:\\Program Files\\WindowsApps": [
+      {
+        "name": "Thing",
+        "is_dir": true
+      }
+    ],
+    "C:\\Program Files\\WindowsApps\\Thing": [
+      {
+        "name": "thing.exe",
+        "size": 10
+      }
+    ],
+    "C:\\ProgramData\\Package Cache": [
+      {
+        "name": "Thing",
+        "is_dir": true
+      }
+    ],
+    "C:\\ProgramData\\Package Cache\\Thing": [
+      {
+        "name": "thing.exe",
+        "size": 10
+      }
+    ],
+    "C:\\Users\\you\\AppData\\Local\\Packages": [
+      {
+        "name": "Thing",
+        "is_dir": true
+      }
+    ],
+    "C:\\Users\\you\\AppData\\Local\\Packages\\Thing": [
+      {
+        "name": "thing.exe",
+        "size": 10
+      }
+    ],
+    "C:\\Program Files (x86)\\Steam\\steamapps\\common": [
+      {
+        "name": "Thing",
+        "is_dir": true
+      }
+    ],
+    "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Thing": [
+      {
+        "name": "thing.exe",
+        "size": 10
+      }
+    ],
+    "D:\\SteamLibrary\\steamapps\\common": [
+      {
+        "name": "Thing",
+        "is_dir": true
+      }
+    ],
+    "D:\\SteamLibrary\\steamapps\\common\\Thing": [
+      {
+        "name": "thing.exe",
+        "size": 10
+      }
+    ],
+    "C:\\Users\\you\\scoop\\apps": [
+      {
+        "name": "Thing",
+        "is_dir": true
+      }
+    ],
+    "C:\\Users\\you\\scoop\\apps\\Thing": [
+      {
+        "name": "thing.exe",
+        "size": 10
+      }
+    ],
+    "C:\\ProgramData\\scoop\\apps": [
+      {
+        "name": "Thing",
+        "is_dir": true
+      }
+    ],
+    "C:\\ProgramData\\scoop\\apps\\Thing": [
+      {
+        "name": "thing.exe",
+        "size": 10
+      }
+    ],
+    "C:\\ProgramData\\chocolatey\\lib": [
+      {
+        "name": "Thing",
+        "is_dir": true
+      }
+    ],
+    "C:\\ProgramData\\chocolatey\\lib\\Thing": [
+      {
+        "name": "thing.exe",
+        "size": 10
+      }
+    ],
+    "D:\\Downloads": [
+      {
+        "name": "Thing",
+        "is_dir": true
+      }
+    ],
+    "D:\\Downloads\\Thing": [
+      {
+        "name": "thing.exe",
+        "size": 10
+      }
+    ],
+    "C:\\Users\\you\\Pictures": [
+      {
+        "name": "Thing",
+        "is_dir": true
+      }
+    ],
+    "C:\\Users\\you\\Pictures\\Thing": [
+      {
+        "name": "thing.exe",
+        "size": 10
+      }
+    ],
+    "C:\\Users\\you\\Music": [
+      {
+        "name": "Thing",
+        "is_dir": true
+      }
+    ],
+    "C:\\Users\\you\\Music\\Thing": [
+      {
+        "name": "thing.exe",
+        "size": 10
+      }
+    ],
+    "C:\\Users\\you\\Videos": [
+      {
+        "name": "Thing",
+        "is_dir": true
+      }
+    ],
+    "C:\\Users\\you\\Videos\\Thing": [
+      {
+        "name": "thing.exe",
+        "size": 10
+      }
+    ],
+    "C:\\Program Files\\Widget": [
+      {
+        "name": "widget.ini",
+        "size": 10
+      }
     ]
   },
   "shortcuts": {
@@ -48,22 +284,115 @@
     "Hkcu": {
       "Software\\Microsoft\\Windows\\CurrentVersion\\Run": {
         "values": [
-          ["Tool", "C:\\Users\\you\\Downloads\\tool\\tool.exe"],
-          ["Other", "\"C:\\Program Files\\Other\\other.exe\""]
+          [
+            "Tool",
+            "C:\\Users\\you\\Downloads\\tool\\tool.exe"
+          ],
+          [
+            "Other",
+            "\"C:\\Program Files\\Other\\other.exe\""
+          ],
+          [
+            "Widget",
+            "C:\\Program Files\\Widget\\widget.exe /tray"
+          ]
         ]
       }
     },
     "Hklm": {
-      "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths": { "subkeys": ["other.exe"] },
+      "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths": {
+        "subkeys": [
+          "other.exe"
+        ]
+      },
       "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\other.exe": {
-        "values": [["", "C:\\Program Files\\Other\\other.exe"]]
+        "values": [
+          [
+            "",
+            "C:\\Program Files\\Other\\other.exe"
+          ]
+        ]
       }
     }
   },
-  "services": [{ "name": "OtherSvc", "image_path": "\"C:\\Program Files\\Other\\other.exe\" --service" }],
-  "tasks": [{ "path": "\\Other Update", "actions": ["C:\\Program Files\\Other\\other.exe"] }],
+  "services": [
+    {
+      "name": "OtherSvc",
+      "image_path": "\"C:\\Program Files\\Other\\other.exe\" --service"
+    }
+  ],
+  "tasks": [
+    {
+      "path": "\\Other Update",
+      "actions": [
+        "C:\\Program Files\\Other\\other.exe"
+      ]
+    }
+  ],
   "firewall": [
-    { "name": "Other", "program": "C:\\Program Files\\Other\\other.exe" },
-    { "name": "Tool", "program": "C:\\Users\\you\\Downloads\\tool\\tool.exe" }
+    {
+      "name": "Other",
+      "program": "C:\\Program Files\\Other\\other.exe"
+    },
+    {
+      "name": "Tool",
+      "program": "C:\\Users\\you\\Downloads\\tool\\tool.exe"
+    },
+    {
+      "name": "Thing in C:\\Program Files\\Common Files",
+      "program": "C:\\Program Files\\Common Files\\Thing\\thing.exe"
+    },
+    {
+      "name": "Thing in C:\\Program Files (x86)\\Common Files",
+      "program": "C:\\Program Files (x86)\\Common Files\\Thing\\thing.exe"
+    },
+    {
+      "name": "Thing in C:\\Program Files\\WindowsApps",
+      "program": "C:\\Program Files\\WindowsApps\\Thing\\thing.exe"
+    },
+    {
+      "name": "Thing in C:\\ProgramData\\Package Cache",
+      "program": "C:\\ProgramData\\Package Cache\\Thing\\thing.exe"
+    },
+    {
+      "name": "Thing in C:\\Users\\you\\AppData\\Local\\Packages",
+      "program": "C:\\Users\\you\\AppData\\Local\\Packages\\Thing\\thing.exe"
+    },
+    {
+      "name": "Thing in C:\\Program Files (x86)\\Steam\\steamapps\\common",
+      "program": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Thing\\thing.exe"
+    },
+    {
+      "name": "Thing in D:\\SteamLibrary\\steamapps\\common",
+      "program": "D:\\SteamLibrary\\steamapps\\common\\Thing\\thing.exe"
+    },
+    {
+      "name": "Thing in C:\\Users\\you\\scoop\\apps",
+      "program": "C:\\Users\\you\\scoop\\apps\\Thing\\thing.exe"
+    },
+    {
+      "name": "Thing in C:\\ProgramData\\scoop\\apps",
+      "program": "C:\\ProgramData\\scoop\\apps\\Thing\\thing.exe"
+    },
+    {
+      "name": "Thing in C:\\ProgramData\\chocolatey\\lib",
+      "program": "C:\\ProgramData\\chocolatey\\lib\\Thing\\thing.exe"
+    },
+    {
+      "name": "Thing in D:\\Downloads",
+      "program": "D:\\Downloads\\Thing\\thing.exe"
+    },
+    {
+      "name": "Thing in C:\\Users\\you\\Pictures",
+      "program": "C:\\Users\\you\\Pictures\\Thing\\thing.exe"
+    },
+    {
+      "name": "Thing in C:\\Users\\you\\Music",
+      "program": "C:\\Users\\you\\Music\\Thing\\thing.exe"
+    },
+    {
+      "name": "Thing in C:\\Users\\you\\Videos",
+      "program": "C:\\Users\\you\\Videos\\Thing\\thing.exe"
+    }
   ]
 }
