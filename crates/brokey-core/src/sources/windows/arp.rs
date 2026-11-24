@@ -251,7 +251,7 @@ fn windows_file_name(path: &str) -> &str {
 /// answers that same directory rather than its parent, which no caller here
 /// wants and none asks for: the only input is an executable path out of
 /// [`split_command_line`].
-fn windows_parent(path: &str) -> Option<String> {
+pub(crate) fn windows_parent(path: &str) -> Option<String> {
     let cut = path.rfind(['\\', '/'])?;
     Some(windows_dir(&path[..cut]))
 }
@@ -444,7 +444,7 @@ pub enum Removal {
 /// GUID. The shape alone proves nothing, because plenty of things are keyed
 /// by a GUID without being MSI products; `removal` asks for the
 /// `WindowsInstaller` flag as well.
-fn product_code(key_name: &str) -> Option<&str> {
+pub fn product_code(key_name: &str) -> Option<&str> {
     let inner = key_name.strip_prefix('{')?.strip_suffix('}')?;
     let groups: Vec<&str> = inner.split('-').collect();
     let expected = [8, 4, 4, 4, 12];
@@ -607,7 +607,7 @@ impl Arp {
     /// icon extraction writes into a temporary directory instead of the
     /// user's real cache.
     #[cfg(test)]
-    fn with_cache(entries: Vec<RawEntry>, cache: PathBuf) -> Arp {
+    pub(crate) fn with_cache(entries: Vec<RawEntry>, cache: PathBuf) -> Arp {
         Arp { entries, cache }
     }
 
@@ -682,6 +682,10 @@ impl Source for Arp {
     fn launcher(&self, id: &str) -> Option<crate::launch::Launch> {
         let entry = self.find(id)?;
         super::shortcut::launch_for_entries(&[entry], &super::shortcut::start_menu())
+    }
+
+    fn add_remove_entry(&self, package_id: &str) -> Option<RawEntry> {
+        self.find(package_id).cloned()
     }
 
     /// Removal is the only operation this source has. Any other kind is

@@ -179,6 +179,22 @@ pub trait Source: Send + Sync {
         None
     }
 
+    /// The Add/Remove Programs entry whose package id (`HKLM\key`, see
+    /// `arp::package_id`) this is. Only that source answers; the leftover
+    /// hints of a package manager's package are taken from the entry it was
+    /// joined to.
+    fn add_remove_entry(&self, _package_id: &str) -> Option<sources::windows::arp::RawEntry> {
+        None
+    }
+
+    /// The folders this source itself put an installed package in, which
+    /// are not in Add/Remove Programs: a Chocolatey package's `lib`
+    /// directory, a Scoop app's directory, a portable GitHub download.
+    /// Only folders that exist are named. Reads the disk, never changes it.
+    fn own_folders(&self, _id: &str) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+
     /// A sentence when this source's applications are installed but the
     /// running desktop session cannot list them (Flatpak or snapd set up
     /// after the session started). `None` when there is nothing to say,
@@ -232,6 +248,12 @@ impl Store {
         let catalogue = appstream::Catalogue::load_system(&system);
         let sources = sources::all(&system, client, catalogue, preferences);
         Store { system, sources }
+    }
+
+    /// What a leftover scan searches by, for an installed package; see
+    /// [`cleanup::hints`].
+    pub fn leftover_hints(&self, package: &PackageRef) -> Option<cleanup::hints::Hints> {
+        cleanup::hints::for_package(self, package, &cleanup::hints::start_menu())
     }
 
     /// How to open an installed package, asked of its own source.

@@ -930,6 +930,16 @@ impl Source for Scoop {
     /// The shortcut Scoop made in the Start Menu (it points into
     /// `apps\<name>`), else the shim of a windowed program; see
     /// [`launcher_in`].
+    fn own_folders(&self, id: &str) -> Vec<PathBuf> {
+        read_installed(&self.apps_dir())
+            .into_iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(id))
+            .map(|(name, _)| self.apps_dir().join(name))
+            .filter(|dir| dir.is_dir())
+            .into_iter()
+            .collect()
+    }
+
     fn launcher(&self, id: &str) -> Option<crate::launch::Launch> {
         launcher_in(&self.root, id, &super::shortcut::start_menu())
     }

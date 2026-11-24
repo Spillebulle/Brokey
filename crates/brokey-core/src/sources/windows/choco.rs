@@ -913,6 +913,16 @@ impl Source for Choco {
     /// A Start Menu shortcut into the package's own directory under `lib`
     /// or into the install directory of an uninstall key its installer
     /// added; see [`homes`].
+    fn own_folders(&self, id: &str) -> Vec<PathBuf> {
+        read_installed(&self.lib_dir)
+            .into_iter()
+            .find(|n| n.id.eq_ignore_ascii_case(id))
+            .map(|n| self.lib_dir.join(&n.id))
+            .filter(|dir| dir.is_dir())
+            .into_iter()
+            .collect()
+    }
+
     fn launcher(&self, id: &str) -> Option<crate::launch::Launch> {
         let n = read_installed(&self.lib_dir)
             .into_iter()

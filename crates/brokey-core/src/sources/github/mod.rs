@@ -933,6 +933,17 @@ impl Source for Github {
         Ok(p)
     }
 
+    fn own_folders(&self, id: &str) -> Vec<PathBuf> {
+        self.records()
+            .into_iter()
+            .find(|r| r.repo == id)
+            .and_then(|r| r.path)
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_dir())
+            .into_iter()
+            .collect()
+    }
+
     /// Only an AppImage this source placed is opened from here: a package
     /// it installed through pacman, apt or dnf belongs to that source's
     /// record, under a name the release does not state.
