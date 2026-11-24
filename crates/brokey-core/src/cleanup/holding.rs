@@ -62,6 +62,10 @@ pub enum HeldState {
     /// Inside a folder or key held earlier in the same entry, and so moved
     /// with it and put back with it, never on its own.
     Covered,
+    /// Moved in part: some of it is still where it was and the holding area
+    /// has a whole copy. Restore puts back what is missing beside what is
+    /// there, and an entry holding one is never emptied automatically.
+    Partial,
 }
 
 /// An item in an entry: where it was, where it went, and how far it got.
@@ -113,6 +117,10 @@ pub enum Failure {
     Missing,
     /// Anything else, as a sentence that names what went wrong and what to do.
     Failed(String),
+    /// It was moved in part and could not be put back together where it
+    /// was: some of it is still there and a whole copy is at the
+    /// destination. The sentence says so.
+    Partial(String),
 }
 
 pub type Done<T> = Result<T, Failure>;
@@ -133,36 +141,60 @@ pub struct KeyNode {
     pub subkeys: Vec<(String, KeyNode)>,
 }
 
-/// Everything that changes the machine. Each restore refuses with
-/// [`Failure::Occupied`] when something is already where it would go.
+/// Everything that changes the machine.
+///
+/// Each restore takes `merge`. Without it, it refuses with
+/// [`Failure::Occupied`] when anything is already where it would go: the
+/// item was wholly removed, so what is there now is new. With it, it puts
+/// back only what is missing and never replaces what is there: for an item
+/// that was removed in part, or that a crash interrupted.
 pub trait Mutate {
     /// Make a holding root if it is not there. The machine's is made so that
-    /// only Administrators and SYSTEM can open it.
+    /// only Administrators and SYSTEM can change it.
     fn make_root(&mut self, root: &Path) -> Done<()>;
+    /// Refuse an entry folder under `root` that something other than
+    /// Brokey could have written: one in the machine's root not owned by
+    /// Administrators or SYSTEM.
+    fn trust_entry(&mut self, root: &Path, dir: &Path) -> Done<()>;
     /// Move a file or a folder to `to`, which must not exist; its parent is
     /// made. See [`move_file_or_folder`].
     fn move_path(&mut self, from: &Path, to: &Path) -> Done<()>;
+    /// Put back from `from` what is missing at `to`, never replacing what is
+    /// there. See [`merge_file_or_folder`].
+    fn merge_path(&mut self, from: &Path, to: &Path) -> Done<()>;
     fn export_key(&mut self, hive: Hive, path: &str) -> Done<KeyNode>;
     fn delete_key(&mut self, hive: Hive, path: &str) -> Done<()>;
-    fn restore_key(&mut self, hive: Hive, path: &str, key: &KeyNode) -> Done<()>;
+    fn restore_key(&mut self, hive: Hive, path: &str, key: &KeyNode, merge: bool) -> Done<()>;
     fn export_value(&mut self, hive: Hive, key: &str, name: &str) -> Done<RegValue>;
     fn delete_value(&mut self, hive: Hive, key: &str, name: &str) -> Done<()>;
-    fn restore_value(&mut self, hive: Hive, key: &str, name: &str, value: &RegValue) -> Done<()>;
+    fn restore_value(
+        &mut self,
+        hive: Hive,
+        key: &str,
+        name: &str,
+        value: &RegValue,
+        merge: bool,
+    ) -> Done<()>;
     /// The service's key under `HKLM\SYSTEM\CurrentControlSet\Services`.
     fn export_service(&mut self, name: &str) -> Done<KeyNode>;
     /// Stop it and delete it.
     fn delete_service(&mut self, name: &str) -> Done<()>;
-    fn restore_service(&mut self, name: &str, key: &KeyNode) -> Done<()>;
+    fn restore_service(&mut self, name: &str, key: &KeyNode, merge: bool) -> Done<()>;
     /// The task's XML definition.
     fn export_task(&mut self, path: &str) -> Done<String>;
     /// Stop it and delete it.
     fn delete_task(&mut self, path: &str) -> Done<()>;
-    fn restore_task(&mut self, path: &str, xml: &str) -> Done<()>;
+    fn restore_task(&mut self, path: &str, xml: &str, merge: bool) -> Done<()>;
     /// Every stored rule with this name: its id and its rule text.
     fn export_firewall_rule(&mut self, name: &str) -> Done<Vec<(String, String)>>;
     /// Delete exactly the rules `export_firewall_rule` returned.
     fn delete_firewall_rule(&mut self, name: &str, rules: &[(String, String)]) -> Done<()>;
-    fn restore_firewall_rule(&mut self, name: &str, rules: &[(String, String)]) -> Done<()>;
+    fn restore_firewall_rule(
+        &mut self,
+        name: &str,
+        rules: &[(String, String)],
+        merge: bool,
+    ) -> Done<()>;
 }
 
 /// A holding id: what the helper accepts, and so all this makes or opens.
@@ -345,7 +377,7 @@ fn sentence_for(location: &str, f: Failure) -> String {
             "The holding area already has something in the place kept for {location}, so it \
              was left where it is. Empty the holding area and try again."
         ),
-        Failure::Failed(s) => s,
+        Failure::Failed(s) | Failure::Partial(s) => s,
     }
 }
 
@@ -360,7 +392,9 @@ fn sentence_for(location: &str, f: Failure) -> String {
 /// looked through first: a link or a cloud placeholder anywhere in it refuses
 /// the whole item, since copying would follow the one and download the other.
 /// A failed copy is removed again and a failed removal is undone from the
-/// copy, so the item is either wholly moved or left where it was.
+/// copy, so the item is either wholly moved or left where it was; when even
+/// that undoing fails, the answer is [`Failure::Partial`] and the copy is
+/// kept whole.
 pub fn move_file_or_folder(from: &Path, to: &Path, force_copy: bool) -> Done<()> {
     let shown = from.display().to_string();
     match fs::symlink_metadata(from) {
@@ -509,6 +543,9 @@ fn copy_then_remove(from: &Path, to: &Path) -> Done<()> {
         Ok(())
     })();
     if let Err(f) = copied {
+        // Nothing was removed from `from`; what was copied is not needed.
+        // Should it not all go, it is still never taken for a whole copy:
+        // the answer stays `Failed`, which keeps no record of it.
         discard(to);
         return Err(f);
     }
@@ -537,12 +574,71 @@ fn copy_then_remove(from: &Path, to: &Path) -> Done<()> {
             discard(to);
             return Err(Failure::Failed(io_sentence(&shown, &e)));
         }
-        return Err(Failure::Failed(format!(
-            "{shown} could only be moved in part ({e}). A whole copy is in the holding area; \
-             close any program using it and restore it from Settings."
+        return Err(Failure::Partial(format!(
+            "{shown} could only be moved in part ({e}): some of it is still where it was and a \
+             whole copy is kept. Close any program using it, then restore it from Settings to \
+             put it back together."
         )));
     }
     Ok(())
+}
+
+/// Put back from `from` whatever is missing at `to`, never replacing what is
+/// there, and let go of each part of `from` once `to` has it. Used for an
+/// item that was moved in part or that a crash interrupted, where some of
+/// it is still in its place. A link at `to`, or inside it on the way, is
+/// refused, never followed; so is a file where a folder was, or the other
+/// way round. What could not be put back stays in `from`.
+pub fn merge_file_or_folder(from: &Path, to: &Path, force_copy: bool) -> Done<()> {
+    let shown = to.display().to_string();
+    let from_meta = match fs::symlink_metadata(from) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(Failure::Missing),
+        Err(e) => return Err(Failure::Failed(io_sentence(&shown, &e))),
+        Ok(m) => m,
+    };
+    let to_meta = match fs::symlink_metadata(to) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return move_file_or_folder(from, to, force_copy);
+        }
+        Err(e) => return Err(Failure::Failed(io_sentence(&shown, &e))),
+        Ok(m) => m,
+    };
+    if to_meta.file_type().is_symlink() {
+        return Err(Failure::Failed(format!(
+            "{shown} is now a link to another place, so nothing was put back through it. \
+             Remove the link and restore again."
+        )));
+    }
+    match (from_meta.is_dir(), to_meta.is_dir()) {
+        // The one in its place was never moved: it stays, and the copy goes.
+        (false, false) => {
+            discard(from);
+            Ok(())
+        }
+        (true, true) => {
+            let entries =
+                fs::read_dir(from).map_err(|e| Failure::Failed(io_sentence(&shown, &e)))?;
+            let mut first = None;
+            for entry in entries {
+                let entry = entry.map_err(|e| Failure::Failed(io_sentence(&shown, &e)))?;
+                let inside = to.join(entry.file_name());
+                if let Err(f) = merge_file_or_folder(&entry.path(), &inside, force_copy) {
+                    first.get_or_insert(f);
+                }
+            }
+            match first {
+                None => {
+                    let _ = fs::remove_dir(from);
+                    Ok(())
+                }
+                Some(f) => Err(f),
+            }
+        }
+        _ => Err(Failure::Failed(format!(
+            "Something else is now at {shown}, so the copy in the holding area was kept. Move it \
+             out of the way and restore again."
+        ))),
+    }
 }
 
 fn discard(path: &Path) {
@@ -597,11 +693,6 @@ pub fn read_manifest(dir: &Path) -> io::Result<Option<Manifest>> {
     }
 }
 
-fn write_export<T: Serialize>(path: &Path, value: &T, location: &str) -> Done<u64> {
-    let text = serde_json::to_vec_pretty(value).map_err(|e| Failure::Failed(e.to_string()))?;
-    write_export_bytes(path, &text, location)
-}
-
 fn write_export_bytes(path: &Path, bytes: &[u8], location: &str) -> Done<u64> {
     write_synced(path, bytes).map_err(|e| {
         Failure::Failed(format!(
@@ -620,10 +711,6 @@ fn read_export(path: &Path, location: &str) -> Done<Vec<u8>> {
             unreadable(location)
         }
     })
-}
-
-fn read_export_json<T: for<'de> Deserialize<'de>>(path: &Path, location: &str) -> Done<T> {
-    serde_json::from_slice(&read_export(path, location)?).map_err(|_| unreadable(location))
 }
 
 fn unreadable(location: &str) -> Failure {
@@ -694,7 +781,7 @@ pub fn hold(
     }
     if let Err(f) = m.make_root(root) {
         let sentence = match f {
-            Failure::Failed(s) => s,
+            Failure::Failed(s) | Failure::Partial(s) => s,
             _ => format!(
                 "Brokey could not make the holding area at {}, so nothing was moved. Try again.",
                 root.display()
@@ -704,6 +791,12 @@ pub fn hold(
         return report;
     }
     let dir = root.join(id);
+    if fs::symlink_metadata(&dir).is_ok()
+        && let Err(f) = m.trust_entry(root, &dir)
+    {
+        refuse_all(&mut report, sentence_for(id, f));
+        return report;
+    }
     let opened = fs::create_dir_all(dir.join(ITEMS)).and_then(|()| read_manifest(&dir));
     let mut manifest = match opened {
         Ok(Some(manifest)) => manifest,
@@ -804,99 +897,199 @@ fn hold_one(
 
     let target = stored_path(dir, &stored);
     let last = manifest.items.len() - 1;
-    match take(&place, &target, location, m) {
+    let result = match take(&place, &target, location, m) {
         Ok(size) => {
             manifest.items[last].state = HeldState::Held;
             manifest.items[last].size = size;
-            // Should this write fail the record still says moving, which
-            // `restore` reads as held whenever the stored copy is there.
-            let _ = save(dir, manifest);
             Ok(())
         }
+        Err(Failure::Partial(sentence)) => {
+            // Some of it is still in its place and the holding area has the
+            // whole of it: the only whole copy, so it is kept and recorded.
+            manifest.items[last].state = HeldState::Partial;
+            manifest.items[last].size = size_of(&target);
+            Err(sentence)
+        }
         Err(f) => {
-            let is_path = matches!(place, Place::Path(_));
-            if is_path && matches!(f, Failure::Failed(_)) && fs::symlink_metadata(&target).is_ok() {
-                // A copy across drives whose removal could not be undone:
-                // the copy is whole, so it is kept and recorded.
-                manifest.items[last].state = HeldState::Held;
-                manifest.items[last].size = size_of(&target);
-            } else {
-                manifest.items.pop();
-                if !is_path {
-                    discard(&target);
-                }
-            }
-            let _ = save(dir, manifest);
+            // Everything is still in its place (`take` has made sure of it),
+            // so whatever reached the holding area is not needed.
+            manifest.items.pop();
+            discard(&target);
             Err(sentence_for(location, f))
+        }
+    };
+    // Should this write fail the record still says moving, which `restore`
+    // puts back by merging whenever the stored copy is there.
+    let _ = save(dir, manifest);
+    result
+}
+
+/// What an item that is not a file or a folder is kept as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Export {
+    Key(KeyNode),
+    Value(RegValue),
+    Service(KeyNode),
+    Task(String),
+    Firewall(Vec<(String, String)>),
+}
+
+fn sorted_node(node: &KeyNode) -> KeyNode {
+    let mut values = node.values.clone();
+    values.sort_by_key(|(n, _)| n.to_lowercase());
+    let mut subkeys: Vec<(String, KeyNode)> = node
+        .subkeys
+        .iter()
+        .map(|(n, k)| (n.clone(), sorted_node(k)))
+        .collect();
+    subkeys.sort_by_key(|(n, _)| n.to_lowercase());
+    KeyNode { values, subkeys }
+}
+
+impl Export {
+    /// Read the item as it is now. A file or folder is moved rather than
+    /// exported, so it has none.
+    fn of(place: &Place, m: &mut dyn Mutate) -> Done<Export> {
+        match place {
+            Place::Path(_) => Err(Failure::Failed(
+                "Brokey mixed up what it was holding, so nothing was changed.".into(),
+            )),
+            Place::Key(hive, path) => m.export_key(*hive, path).map(Export::Key),
+            Place::Value(hive, key, name) => m.export_value(*hive, key, name).map(Export::Value),
+            Place::Service(name) => m.export_service(name).map(Export::Service),
+            Place::Task(path) => m.export_task(path).map(Export::Task),
+            Place::Firewall(name) => m.export_firewall_rule(name).map(Export::Firewall),
+        }
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        let json = match self {
+            Export::Key(k) | Export::Service(k) => serde_json::to_vec_pretty(k),
+            Export::Value(v) => serde_json::to_vec_pretty(v),
+            Export::Firewall(r) => serde_json::to_vec_pretty(r),
+            Export::Task(xml) => return xml.as_bytes().to_vec(),
+        };
+        // Plain data with string keys, which always serialises.
+        json.unwrap_or_default()
+    }
+
+    fn read(place: &Place, stored: &Path, location: &str) -> Done<Export> {
+        let bytes = read_export(stored, location)?;
+        let bad = |_| unreadable(location);
+        match place {
+            Place::Path(_) => Err(unreadable(location)),
+            Place::Key(..) => serde_json::from_slice(&bytes).map(Export::Key).map_err(bad),
+            Place::Value(..) => serde_json::from_slice(&bytes)
+                .map(Export::Value)
+                .map_err(bad),
+            Place::Service(_) => serde_json::from_slice(&bytes)
+                .map(Export::Service)
+                .map_err(bad),
+            Place::Task(_) => String::from_utf8(bytes)
+                .map(Export::Task)
+                .map_err(|_| unreadable(location)),
+            Place::Firewall(_) => serde_json::from_slice(&bytes)
+                .map(Export::Firewall)
+                .map_err(bad),
+        }
+    }
+
+    fn delete(&self, place: &Place, m: &mut dyn Mutate) -> Done<()> {
+        match (place, self) {
+            (Place::Key(hive, path), _) => m.delete_key(*hive, path),
+            (Place::Value(hive, key, name), _) => m.delete_value(*hive, key, name),
+            (Place::Service(name), _) => m.delete_service(name),
+            (Place::Task(path), _) => m.delete_task(path),
+            (Place::Firewall(name), Export::Firewall(rules)) => m.delete_firewall_rule(name, rules),
+            _ => Err(Failure::Failed(
+                "Brokey mixed up what it was holding, so nothing was changed.".into(),
+            )),
+        }
+    }
+
+    fn restore(&self, place: &Place, merge: bool, m: &mut dyn Mutate) -> Done<()> {
+        match (place, self) {
+            (Place::Key(hive, path), Export::Key(k)) => m.restore_key(*hive, path, k, merge),
+            (Place::Value(hive, key, name), Export::Value(v)) => {
+                m.restore_value(*hive, key, name, v, merge)
+            }
+            (Place::Service(name), Export::Service(k)) => m.restore_service(name, k, merge),
+            (Place::Task(path), Export::Task(xml)) => m.restore_task(path, xml, merge),
+            (Place::Firewall(name), Export::Firewall(r)) => m.restore_firewall_rule(name, r, merge),
+            _ => Err(Failure::Failed(
+                "Brokey mixed up what it was holding, so nothing was put back.".into(),
+            )),
+        }
+    }
+
+    /// The same content in one order, for comparing two exports.
+    fn normalised(&self) -> Export {
+        match self {
+            Export::Key(k) => Export::Key(sorted_node(k)),
+            Export::Service(k) => Export::Service(sorted_node(k)),
+            Export::Firewall(r) => {
+                let mut r = r.clone();
+                r.sort();
+                Export::Firewall(r)
+            }
+            other => other.clone(),
         }
     }
 }
 
 /// Move or export-and-delete one item into `target`; its size there.
+///
+/// Every failure but [`Failure::Partial`] leaves the item wholly in its
+/// place: a delete that fails part-way (a key with a subkey it may not
+/// remove, two firewall rules of which the second will not go) is looked at
+/// again, and what went is put back from the export, never replacing what
+/// is there. Only when that cannot be done is the answer `Partial`, and the
+/// export is then the one whole copy.
 fn take(place: &Place, target: &Path, location: &str, m: &mut dyn Mutate) -> Done<u64> {
-    match place {
-        Place::Path(path) => {
-            m.move_path(path, target)?;
-            Ok(size_of(target))
-        }
-        Place::Key(hive, path) => {
-            let key = m.export_key(*hive, path)?;
-            let size = write_export(target, &key, location)?;
-            m.delete_key(*hive, path)?;
-            Ok(size)
-        }
-        Place::Value(hive, key, name) => {
-            let value = m.export_value(*hive, key, name)?;
-            let size = write_export(target, &value, location)?;
-            m.delete_value(*hive, key, name)?;
-            Ok(size)
-        }
-        Place::Service(name) => {
-            let key = m.export_service(name)?;
-            let size = write_export(target, &key, location)?;
-            m.delete_service(name)?;
-            Ok(size)
-        }
-        Place::Task(path) => {
-            let xml = m.export_task(path)?;
-            let size = write_export_bytes(target, xml.as_bytes(), location)?;
-            m.delete_task(path)?;
-            Ok(size)
-        }
-        Place::Firewall(name) => {
-            let rules = m.export_firewall_rule(name)?;
-            let size = write_export(target, &rules, location)?;
-            m.delete_firewall_rule(name, &rules)?;
-            Ok(size)
-        }
+    if let Place::Path(path) = place {
+        m.move_path(path, target)?;
+        return Ok(size_of(target));
+    }
+    let export = Export::of(place, m)?;
+    let size = write_export_bytes(target, &export.bytes(), location)?;
+    let Err(failure) = export.delete(place, m) else {
+        return Ok(size);
+    };
+    match Export::of(place, m) {
+        // Nothing went.
+        Ok(now) if now.normalised() == export.normalised() => Err(failure),
+        // All of it went after all.
+        Err(Failure::Missing) => Ok(size),
+        // Some of it went: put that back, beside what is still there.
+        Ok(_) => match export.restore(place, true, m) {
+            Ok(()) => Err(failure),
+            Err(_) => Err(Failure::Partial(format!(
+                "{location} could only be removed in part: some of it is still there and a \
+                 whole copy is kept in the holding area. Restore it from Settings to put it \
+                 back together."
+            ))),
+        },
+        // It cannot be told what went, so the export is kept.
+        Err(_) => Err(Failure::Partial(format!(
+            "{location} could not be checked after its removal failed, so the copy in the \
+             holding area is kept. Restore it from Settings to put back anything that went."
+        ))),
     }
 }
 
-/// Put one item back from `stored`.
-fn put_back(place: &Place, stored: &Path, location: &str, m: &mut dyn Mutate) -> Done<()> {
+/// Put one item back from `stored`. With `merge`, only what is missing is
+/// put back and nothing there is replaced.
+fn put_back(
+    place: &Place,
+    stored: &Path,
+    location: &str,
+    merge: bool,
+    m: &mut dyn Mutate,
+) -> Done<()> {
     match place {
+        Place::Path(path) if merge => m.merge_path(stored, path),
         Place::Path(path) => m.move_path(stored, path),
-        Place::Key(hive, path) => {
-            let key: KeyNode = read_export_json(stored, location)?;
-            m.restore_key(*hive, path, &key)
-        }
-        Place::Value(hive, key, name) => {
-            let value: RegValue = read_export_json(stored, location)?;
-            m.restore_value(*hive, key, name, &value)
-        }
-        Place::Service(name) => {
-            let key: KeyNode = read_export_json(stored, location)?;
-            m.restore_service(name, &key)
-        }
-        Place::Task(path) => {
-            let xml = String::from_utf8(read_export(stored, location)?)
-                .map_err(|_| unreadable(location))?;
-            m.restore_task(path, &xml)
-        }
-        Place::Firewall(name) => {
-            let rules: Vec<(String, String)> = read_export_json(stored, location)?;
-            m.restore_firewall_rule(name, &rules)
-        }
+        _ => Export::read(place, stored, location)?.restore(place, merge, m),
     }
 }
 
@@ -909,13 +1102,15 @@ fn restore_sentence(location: &str, f: Failure) -> String {
         Failure::Missing => format!(
             "The copy of {location} is no longer in the holding area, so it could not be put back."
         ),
-        Failure::Failed(s) => s,
+        Failure::Failed(s) | Failure::Partial(s) => s,
     }
 }
 
 /// Put back everything in entry `id`, newest first, and remove the entry
 /// once all of it is back. Where something new now occupies a place, that
-/// item is refused with a sentence and stays in the holding area.
+/// item is refused with a sentence and stays in the holding area. An item
+/// moved in part, or one a crash left recorded as moving, is merged back:
+/// what is missing is put beside what is still there.
 pub fn restore(root: &Path, id: &str, m: &mut dyn Mutate) -> HoldReport {
     let mut report = HoldReport::default();
     if !valid_id(id) {
@@ -925,6 +1120,12 @@ pub fn restore(root: &Path, id: &str, m: &mut dyn Mutate) -> HoldReport {
         return report;
     }
     let dir = root.join(id);
+    if fs::symlink_metadata(&dir).is_ok()
+        && let Err(f) = m.trust_entry(root, &dir)
+    {
+        report.failed.push((id.to_string(), sentence_for(id, f)));
+        return report;
+    }
     let mut manifest = match read_manifest(&dir) {
         Ok(Some(manifest)) => manifest,
         Ok(None) => {
@@ -971,7 +1172,8 @@ pub fn restore(root: &Path, id: &str, m: &mut dyn Mutate) -> HoldReport {
             // Recorded and then never moved: it is still where it was.
             manifest.items.remove(i);
         } else {
-            match put_back(&place, &stored, &location, m) {
+            let merge = held.state != HeldState::Held;
+            match put_back(&place, &stored, &location, merge, m) {
                 Ok(()) => {
                     if !matches!(place, Place::Path(_)) {
                         discard(&stored);
@@ -980,6 +1182,12 @@ pub fn restore(root: &Path, id: &str, m: &mut dyn Mutate) -> HoldReport {
                     report.held += 1;
                 }
                 Err(f) => {
+                    if matches!(f, Failure::Partial(_)) {
+                        // Now the place has it whole and the holding area in
+                        // part: the next restore merges what is left.
+                        manifest.items[i].state = HeldState::Partial;
+                        let _ = save(&dir, &manifest);
+                    }
                     report
                         .failed
                         .push((location.clone(), restore_sentence(&location, f)));
@@ -1023,10 +1231,13 @@ pub fn restore(root: &Path, id: &str, m: &mut dyn Mutate) -> HoldReport {
     report
 }
 
-/// Ids of the entries under a root, links left out.
-fn entry_ids(root: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(root) else {
-        return Vec::new();
+/// Ids of the entries under a root, links left out. A root that is not
+/// there has none; one that cannot be read is an error, never "none".
+fn entry_ids(root: &Path) -> io::Result<Vec<String>> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
     let mut ids: Vec<String> = entries
         .flatten()
@@ -1037,7 +1248,7 @@ fn entry_ids(root: &Path) -> Vec<String> {
         .filter(|id| valid_id(id))
         .collect();
     ids.sort();
-    ids
+    Ok(ids)
 }
 
 fn modified(path: &Path) -> Option<i64> {
@@ -1047,16 +1258,26 @@ fn modified(path: &Path) -> Option<i64> {
 }
 
 /// When an entry was made: its manifest's word, or failing that its folder's.
-fn entry_created(dir: &Path) -> Option<i64> {
-    read_manifest(dir)
-        .ok()
-        .flatten()
+fn entry_created(dir: &Path, manifest: Option<&Manifest>) -> Option<i64> {
+    manifest
         .and_then(|m| created_seconds(&m.created))
         .or_else(|| modified(dir))
 }
 
+/// An entry holding the only whole copy of something that is partly still
+/// in its place: moved in part, or a move a crash interrupted. It is never
+/// emptied automatically, since that would lose what it holds.
+fn holds_only_copy(dir: &Path, manifest: &Manifest) -> bool {
+    manifest.items.iter().any(|h| match h.state {
+        HeldState::Partial => true,
+        HeldState::Moving => fs::symlink_metadata(stored_path(dir, &h.stored)).is_ok(),
+        HeldState::Held | HeldState::Covered => false,
+    })
+}
+
 /// Delete entries for good: the one named, or every one; with
-/// `older_than_days`, only those older than that.
+/// `older_than_days`, only those older than that, and never one holding the
+/// only whole copy of something moved in part (see [`HeldState::Partial`]).
 pub fn empty(root: &Path, id: Option<&str>, older_than_days: Option<u32>) -> HoldReport {
     let mut report = HoldReport::default();
     let ids = match id {
@@ -1067,13 +1288,31 @@ pub fn empty(root: &Path, id: Option<&str>, older_than_days: Option<u32>) -> Hol
             return report;
         }
         Some(id) => vec![id.to_string()],
-        None => entry_ids(root),
+        None => match entry_ids(root) {
+            Ok(ids) => ids,
+            Err(e) => {
+                report.failed.push((
+                    root.display().to_string(),
+                    format!(
+                        "Brokey could not look in the holding area {} ({e}), so nothing was \
+                         emptied.",
+                        root.display()
+                    ),
+                ));
+                return report;
+            }
+        },
     };
     let now = now();
     for id in ids {
         let dir = root.join(&id);
         if let Some(days) = older_than_days {
-            let old = entry_created(&dir).is_some_and(|c| now - c > i64::from(days) * DAY);
+            let manifest = read_manifest(&dir).ok().flatten();
+            if manifest.as_ref().is_some_and(|m| holds_only_copy(&dir, m)) {
+                continue;
+            }
+            let old = entry_created(&dir, manifest.as_ref())
+                .is_some_and(|c| now - c > i64::from(days) * DAY);
             if !old {
                 continue;
             }
@@ -1096,22 +1335,40 @@ pub fn empty(root: &Path, id: Option<&str>, older_than_days: Option<u32>) -> Hol
     report
 }
 
-/// Every entry in both roots, newest first. A machine entry past
-/// [`AUTO_EMPTY_DAYS`] is `waiting`: it is emptied by the next plan that
-/// asks for Administrator anyway.
-pub fn list(user_root: &Path, machine_root: &Path) -> Vec<HoldingEntry> {
+/// What [`list`] found.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Listing {
+    /// Newest first.
+    pub entries: Vec<HoldingEntry>,
+    /// Roots that are there and could not be read, so the page can say so
+    /// rather than show an empty holding area.
+    pub unreadable: Vec<String>,
+}
+
+/// Every entry in both roots. A machine entry past [`AUTO_EMPTY_DAYS`] is
+/// `waiting`: it is emptied by the next plan that asks for Administrator
+/// anyway; one holding the only copy of something moved in part never is.
+pub fn list(user_root: &Path, machine_root: &Path) -> Listing {
     let now = now();
-    let mut out = Vec::new();
+    let mut out = Listing::default();
     for (root, machine) in [(user_root, false), (machine_root, true)] {
-        for id in entry_ids(root) {
+        let ids = match entry_ids(root) {
+            Ok(ids) => ids,
+            Err(_) => {
+                out.unreadable.push(root.display().to_string());
+                continue;
+            }
+        };
+        for id in ids {
             let dir = root.join(&id);
             let manifest = read_manifest(&dir).ok().flatten();
-            let seconds = entry_created(&dir).unwrap_or(now);
+            let seconds = entry_created(&dir, manifest.as_ref()).unwrap_or(now);
             let created = manifest
                 .as_ref()
                 .map(|m| m.created.clone())
                 .filter(|c| created_seconds(c).is_some())
                 .unwrap_or_else(|| rfc3339(seconds));
+            let keep = manifest.as_ref().is_some_and(|m| holds_only_copy(&dir, m));
             let (name, size, items) = match manifest {
                 Some(m) => (
                     m.name,
@@ -1122,18 +1379,18 @@ pub fn list(user_root: &Path, machine_root: &Path) -> Vec<HoldingEntry> {
                 // can be emptied.
                 None => (id.clone(), size_of(&dir), 0),
             };
-            out.push(HoldingEntry {
+            out.entries.push(HoldingEntry {
                 id,
                 name,
                 created,
                 size,
                 items,
                 scope_machine: machine,
-                waiting: machine && now - seconds > i64::from(AUTO_EMPTY_DAYS) * DAY,
+                waiting: machine && !keep && now - seconds > i64::from(AUTO_EMPTY_DAYS) * DAY,
             });
         }
     }
-    out.sort_by(|a, b| b.created.cmp(&a.created));
+    out.entries.sort_by(|a, b| b.created.cmp(&a.created));
     out
 }
 
@@ -1174,7 +1431,17 @@ mod tests {
         firewall: BTreeMap<String, String>,
         /// Paths whose move fails as a file another program has open does.
         locked: Vec<PathBuf>,
+        /// Paths whose move leaves a half copy at the destination and fails,
+        /// as a copy across drives whose clean-up also failed would.
+        half_copied: Vec<PathBuf>,
         force_copy: bool,
+        /// `delete_key` removes its deepest subkey and then fails, as
+        /// `RegDeleteTreeW` does on a subkey it may not delete.
+        delete_key_fails_part_way: bool,
+        /// `delete_firewall_rule` removes the first rule and then fails.
+        delete_firewall_fails_part_way: bool,
+        /// Every merging restore fails.
+        merge_fails: bool,
     }
 
     type Keys = BTreeMap<String, (String, Vec<(String, RegValue)>)>;
@@ -1231,14 +1498,27 @@ mod tests {
             node
         }
 
-        fn insert(&mut self, hive: Hive, path: &str, node: &KeyNode) {
-            self.keys.insert(
-                Fake::id(hive, path),
-                (path.to_string(), node.values.clone()),
-            );
-            for (leaf, sub) in &node.subkeys {
-                self.insert(hive, &format!("{path}\\{leaf}"), sub);
+        /// Write a key tree; with `merge`, only what is missing.
+        fn insert(&mut self, hive: Hive, path: &str, node: &KeyNode, merge: bool) {
+            let entry = self
+                .keys
+                .entry(Fake::id(hive, path))
+                .or_insert_with(|| (path.to_string(), Vec::new()));
+            for (name, value) in &node.values {
+                if !(merge && entry.1.iter().any(|(n, _)| n == name)) {
+                    entry.1.push((name.clone(), value.clone()));
+                }
             }
+            for (leaf, sub) in &node.subkeys {
+                self.insert(hive, &format!("{path}\\{leaf}"), sub, merge);
+            }
+        }
+
+        fn merge_refused(&self, merge: bool) -> Done<()> {
+            if merge && self.merge_fails {
+                return Err(Failure::Failed("The merge failed.".into()));
+            }
+            Ok(())
         }
     }
 
@@ -1246,11 +1526,23 @@ mod tests {
         fn make_root(&mut self, root: &Path) -> Done<()> {
             fs::create_dir_all(root).map_err(|e| Failure::Failed(e.to_string()))
         }
+        fn trust_entry(&mut self, _: &Path, _: &Path) -> Done<()> {
+            Ok(())
+        }
         fn move_path(&mut self, from: &Path, to: &Path) -> Done<()> {
             if self.locked.iter().any(|l| l == from) {
                 return Err(Failure::Failed(in_use(&from.display().to_string())));
             }
+            if self.half_copied.iter().any(|l| l == from) {
+                fs::create_dir_all(to).unwrap();
+                fs::write(to.join("half"), "half").unwrap();
+                return Err(Failure::Failed(in_use(&from.display().to_string())));
+            }
             move_file_or_folder(from, to, self.force_copy)
+        }
+        fn merge_path(&mut self, from: &Path, to: &Path) -> Done<()> {
+            self.merge_refused(true)?;
+            merge_file_or_folder(from, to, self.force_copy)
         }
         fn export_key(&mut self, hive: Hive, path: &str) -> Done<KeyNode> {
             let id = Fake::id(hive, path);
@@ -1262,14 +1554,27 @@ mod tests {
         fn delete_key(&mut self, hive: Hive, path: &str) -> Done<()> {
             let id = Fake::id(hive, path);
             let prefix = format!("{id}\\");
+            if self.delete_key_fails_part_way {
+                let deepest = self
+                    .keys
+                    .keys()
+                    .filter(|k| k.starts_with(&prefix))
+                    .max_by_key(|k| k.matches('\\').count())
+                    .cloned();
+                if let Some(deepest) = deepest {
+                    self.keys.remove(&deepest);
+                }
+                return Err(Failure::Failed("Access is denied.".into()));
+            }
             self.keys.retain(|k, _| *k != id && !k.starts_with(&prefix));
             Ok(())
         }
-        fn restore_key(&mut self, hive: Hive, path: &str, key: &KeyNode) -> Done<()> {
-            if self.keys.contains_key(&Fake::id(hive, path)) {
+        fn restore_key(&mut self, hive: Hive, path: &str, key: &KeyNode, merge: bool) -> Done<()> {
+            self.merge_refused(merge)?;
+            if !merge && self.keys.contains_key(&Fake::id(hive, path)) {
                 return Err(Failure::Occupied);
             }
-            self.insert(hive, path, key);
+            self.insert(hive, path, key, merge);
             Ok(())
         }
         fn export_value(&mut self, hive: Hive, key: &str, name: &str) -> Done<RegValue> {
@@ -1290,13 +1595,19 @@ mod tests {
             key: &str,
             name: &str,
             value: &RegValue,
+            merge: bool,
         ) -> Done<()> {
+            self.merge_refused(merge)?;
             let entry = self
                 .keys
                 .entry(Fake::id(hive, key))
                 .or_insert_with(|| (key.to_string(), Vec::new()));
             if entry.1.iter().any(|(n, _)| n == name) {
-                return Err(Failure::Occupied);
+                return if merge {
+                    Ok(())
+                } else {
+                    Err(Failure::Occupied)
+                };
             }
             entry.1.push((name.to_string(), value.clone()));
             Ok(())
@@ -1310,9 +1621,14 @@ mod tests {
                 .map(|_| ())
                 .ok_or(Failure::Missing)
         }
-        fn restore_service(&mut self, name: &str, key: &KeyNode) -> Done<()> {
+        fn restore_service(&mut self, name: &str, key: &KeyNode, merge: bool) -> Done<()> {
+            self.merge_refused(merge)?;
             if self.services.contains_key(name) {
-                return Err(Failure::Occupied);
+                return if merge {
+                    Ok(())
+                } else {
+                    Err(Failure::Occupied)
+                };
             }
             self.services.insert(name.to_string(), key.clone());
             Ok(())
@@ -1323,9 +1639,14 @@ mod tests {
         fn delete_task(&mut self, path: &str) -> Done<()> {
             self.tasks.remove(path).map(|_| ()).ok_or(Failure::Missing)
         }
-        fn restore_task(&mut self, path: &str, xml: &str) -> Done<()> {
+        fn restore_task(&mut self, path: &str, xml: &str, merge: bool) -> Done<()> {
+            self.merge_refused(merge)?;
             if self.tasks.contains_key(path) {
-                return Err(Failure::Occupied);
+                return if merge {
+                    Ok(())
+                } else {
+                    Err(Failure::Occupied)
+                };
             }
             self.tasks.insert(path.to_string(), xml.to_string());
             Ok(())
@@ -1345,15 +1666,26 @@ mod tests {
         fn delete_firewall_rule(&mut self, _: &str, rules: &[(String, String)]) -> Done<()> {
             for (id, _) in rules {
                 self.firewall.remove(id);
+                if self.delete_firewall_fails_part_way {
+                    return Err(Failure::Failed("Access is denied.".into()));
+                }
             }
             Ok(())
         }
-        fn restore_firewall_rule(&mut self, _: &str, rules: &[(String, String)]) -> Done<()> {
-            if rules.iter().any(|(id, _)| self.firewall.contains_key(id)) {
+        fn restore_firewall_rule(
+            &mut self,
+            _: &str,
+            rules: &[(String, String)],
+            merge: bool,
+        ) -> Done<()> {
+            self.merge_refused(merge)?;
+            if !merge && rules.iter().any(|(id, _)| self.firewall.contains_key(id)) {
                 return Err(Failure::Occupied);
             }
             for (id, rule) in rules {
-                self.firewall.insert(id.clone(), rule.clone());
+                self.firewall
+                    .entry(id.clone())
+                    .or_insert_with(|| rule.clone());
             }
             Ok(())
         }
@@ -1726,7 +2058,7 @@ mod tests {
         set_created(&machine_root, "machine-old", now() - 31 * DAY);
         set_created(&machine_root, "machine-new", now() - 2 * DAY);
 
-        let entries = list(&mc.root, &machine_root);
+        let entries = list(&mc.root, &machine_root).entries;
         let shown: Vec<_> = entries
             .iter()
             .map(|e| (e.id.as_str(), e.scope_machine, e.waiting, e.size, e.items))
@@ -1977,6 +2309,241 @@ mod tests {
             created_seconds(&rfc3339(1_795_523_445)),
             Some(1_795_523_445)
         );
+    }
+
+    fn acme_key(m: &mut Fake) {
+        m.put_key(Hive::Hkcu, r"Software\Acme", every_type());
+        m.put_key(
+            Hive::Hkcu,
+            r"Software\Acme\Sub",
+            vec![("x", value(REG_SZ, &wide("y")))],
+        );
+        m.put_key(
+            Hive::Hkcu,
+            r"Software\Acme\Sub\Deeper",
+            vec![("z", value(REG_DWORD, &[1, 0, 0, 0]))],
+        );
+    }
+
+    #[test]
+    fn a_key_deleted_in_part_is_put_back_whole_and_named() {
+        let mc = machine();
+        let mut m = Fake {
+            delete_key_fails_part_way: true,
+            ..Fake::default()
+        };
+        acme_key(&mut m);
+        let before = m.state();
+        let items = vec![item(ItemKind::RegistryKey, r"HKCU\Software\Acme")];
+        let report = hold(&mc.root, "acme-1", "Acme", &items, &mut m);
+        assert_eq!(report.held, 0);
+        assert_eq!(report.failed.len(), 1, "{report:?}");
+        assert_eq!(
+            m.state(),
+            before,
+            "what went is back, and nothing else changed"
+        );
+        assert!(
+            !mc.root.join("acme-1").exists(),
+            "nothing is recorded as held"
+        );
+    }
+
+    #[test]
+    fn a_firewall_rule_deleted_in_part_is_put_back() {
+        let mc = machine();
+        let mut m = Fake {
+            delete_firewall_fails_part_way: true,
+            ..Fake::default()
+        };
+        m.firewall
+            .insert("{1}".into(), "v2.30|Action=Allow|Name=Acme|".into());
+        m.firewall
+            .insert("{2}".into(), "v2.30|Action=Block|Name=Acme|".into());
+        let before = m.state();
+        let items = vec![item(ItemKind::FirewallRule, "firewall:Acme")];
+        let report = hold(&mc.root, "acme-1", "Acme", &items, &mut m);
+        assert_eq!(report.held, 0);
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(m.state(), before);
+        assert!(!mc.root.join("acme-1").exists());
+    }
+
+    #[test]
+    fn a_delete_in_part_that_cannot_be_put_back_keeps_the_copy_as_moved_in_part() {
+        let mc = machine();
+        let mut m = Fake {
+            delete_key_fails_part_way: true,
+            merge_fails: true,
+            ..Fake::default()
+        };
+        acme_key(&mut m);
+        let before = m.state();
+        let items = vec![item(ItemKind::RegistryKey, r"HKCU\Software\Acme")];
+        let report = hold(&mc.root, "acme-1", "Acme", &items, &mut m);
+        assert_eq!(report.held, 0);
+        let (location, sentence) = &report.failed[0];
+        assert_eq!(location, r"HKCU\Software\Acme");
+        assert!(
+            sentence.contains("in part") && sentence.contains("Restore"),
+            "{sentence}"
+        );
+        assert_ne!(m.state(), before, "the deepest subkey is gone");
+
+        let dir = mc.root.join("acme-1");
+        let manifest = read_manifest(&dir).unwrap().unwrap();
+        assert_eq!(manifest.items.len(), 1);
+        assert_eq!(manifest.items[0].state, HeldState::Partial);
+        assert!(stored_path(&dir, &manifest.items[0].stored).exists());
+
+        // Never emptied automatically, however old: it is the only copy.
+        set_created(&mc.root, "acme-1", now() - 90 * DAY);
+        assert_eq!(empty(&mc.root, None, Some(30)).held, 0);
+        assert!(dir.exists());
+        let listed = list(&mc.disk, &mc.root);
+        assert!(!listed.entries[0].waiting, "{listed:?}");
+
+        // What the sentence says works: restore puts it back together.
+        m.merge_fails = false;
+        m.delete_key_fails_part_way = false;
+        let report = restore(&mc.root, "acme-1", &mut m);
+        assert_eq!(
+            report,
+            HoldReport {
+                held: 1,
+                failed: vec![]
+            }
+        );
+        assert_eq!(m.state(), before);
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_crash_between_export_and_delete_is_recovered_by_merging() {
+        let mc = machine();
+        let mut m = Fake::default();
+        acme_key(&mut m);
+        let before = m.state();
+        let whole = m.export_key(Hive::Hkcu, r"Software\Acme").unwrap();
+        // The export was written and the delete had removed one subkey
+        // when the helper stopped.
+        let dir = mc.root.join("acme-1");
+        fs::create_dir_all(dir.join(ITEMS)).unwrap();
+        fs::write(
+            dir.join(ITEMS).join("1.json"),
+            serde_json::to_vec(&whole).unwrap(),
+        )
+        .unwrap();
+        m.keys
+            .remove(&Fake::id(Hive::Hkcu, r"Software\Acme\Sub\Deeper"));
+        let manifest = Manifest {
+            id: "acme-1".into(),
+            name: "Acme".into(),
+            created: rfc3339(now()),
+            items: vec![Held {
+                item: item(ItemKind::RegistryKey, r"HKCU\Software\Acme"),
+                stored: "items/1.json".into(),
+                state: HeldState::Moving,
+                covered_by: None,
+                size: 0,
+            }],
+            next: 2,
+        };
+        save(&dir, &manifest).unwrap();
+        let report = restore(&mc.root, "acme-1", &mut m);
+        assert_eq!(
+            report,
+            HoldReport {
+                held: 1,
+                failed: vec![]
+            }
+        );
+        assert_eq!(m.state(), before);
+    }
+
+    #[test]
+    fn a_folder_moved_in_part_is_put_back_together_and_nothing_there_is_replaced() {
+        let mc = machine();
+        let app = mc.disk.join("App");
+        let dir = mc.root.join("acme-1");
+        // The holding area has the whole folder; in its place, a.dat is still
+        // there (and changed since) and sub\b.dat is gone.
+        fs::create_dir_all(dir.join(ITEMS)).unwrap();
+        copy_tree(&app, &dir.join(ITEMS).join("1"));
+        fs::write(app.join("a.dat"), "changed").unwrap();
+        fs::remove_file(app.join("sub").join("b.dat")).unwrap();
+        let manifest = Manifest {
+            id: "acme-1".into(),
+            name: "Acme".into(),
+            created: rfc3339(now()),
+            items: vec![Held {
+                item: item(ItemKind::Folder, loc(&app)),
+                stored: "items/1".into(),
+                state: HeldState::Partial,
+                covered_by: None,
+                size: 3,
+            }],
+            next: 2,
+        };
+        save(&dir, &manifest).unwrap();
+        let report = restore(&mc.root, "acme-1", &mut Fake::default());
+        assert_eq!(
+            report,
+            HoldReport {
+                held: 1,
+                failed: vec![]
+            }
+        );
+        assert_eq!(text(&app.join("a.dat")), "changed");
+        assert_eq!(text(&app.join("sub").join("b.dat")), "bb");
+        assert!(!dir.exists());
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap().flatten() {
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_half_copy_left_by_a_failed_move_is_never_recorded() {
+        let mc = machine();
+        let app = mc.disk.join("App");
+        let mut m = Fake {
+            half_copied: vec![app.clone()],
+            ..Fake::default()
+        };
+        let items = vec![item(ItemKind::Folder, loc(&app))];
+        let report = hold(&mc.root, "acme-1", "Acme", &items, &mut m);
+        assert_eq!(report.held, 0);
+        assert_eq!(report.failed.len(), 1);
+        assert!(
+            !mc.root.join("acme-1").exists(),
+            "no record, and no half copy"
+        );
+        assert_eq!(text(&app.join("a.dat")), "a");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_holding_root_that_cannot_be_read_is_reported_not_shown_empty() {
+        let mc = machine();
+        let notes = vec![item(ItemKind::File, loc(&mc.disk.join("notes.txt")))];
+        hold(&mc.root, "acme-1", "Acme", &notes, &mut Fake::default());
+        windows::tests::set_dacl(&mc.root, "D:P");
+        let listed = list(&mc.disk.join("nothing"), &mc.root);
+        let emptied = empty(&mc.root, None, Some(30));
+        windows::tests::set_dacl(&mc.root, "D:P(A;OICI;FA;;;WD)");
+        assert!(listed.entries.is_empty());
+        assert_eq!(listed.unreadable, vec![loc(&mc.root)]);
+        assert_eq!(emptied.held, 0);
+        assert_eq!(emptied.failed.len(), 1, "{emptied:?}");
     }
 
     #[test]

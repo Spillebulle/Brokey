@@ -9,7 +9,7 @@
 
 use super::{
     Done, Failure, KeyNode, Mutate, REG_DWORD, REG_EXPAND_SZ, REG_MULTI_SZ, REG_SZ, RegValue,
-    firewall_rule_name, move_file_or_folder, path_text,
+    firewall_rule_name, merge_file_or_folder, move_file_or_folder, path_text,
 };
 use crate::cleanup::view::Hive;
 use crate::cleanup::view::windows::{long_path, wow6432};
@@ -18,15 +18,18 @@ use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr;
-use windows_sys::Win32::Foundation::{GetLastError, HLOCAL, LocalFree};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HLOCAL, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
-    SetNamedSecurityInfoW,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, SDDL_REVISION_1,
+    SE_FILE_OBJECT, SetNamedSecurityInfoW,
 };
 use windows_sys::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, AdjustTokenPrivileges, CreateWellKnownSid,
+    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetSecurityDescriptorDacl,
+    GetSecurityDescriptorOwner, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW,
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-    SECURITY_ATTRIBUTES,
+    SE_PRIVILEGE_ENABLED, SECURITY_ATTRIBUTES, SECURITY_MAX_SID_SIZE, TOKEN_ADJUST_PRIVILEGES,
+    TOKEN_PRIVILEGES, WELL_KNOWN_SID_TYPE, WinBuiltinAdministratorsSid, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, DELETE, MoveFileExW};
 use windows_sys::Win32::System::Com::CoTaskMemFree;
@@ -35,6 +38,8 @@ use windows_sys::Win32::System::Services::{
     OpenServiceW, QueryServiceStatus, SC_HANDLE, SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE,
     SERVICE_CONTROL_STOP, SERVICE_QUERY_STATUS, SERVICE_STATUS, SERVICE_STOP, SERVICE_STOPPED,
 };
+use windows_sys::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Shell::{
     FOLDERID_LocalAppData, FOLDERID_ProgramData, FOLDERID_System, SHGetKnownFolderPath,
 };
@@ -42,9 +47,10 @@ use windows_sys::Win32::UI::Shell::{
 const SERVICES: &str = r"SYSTEM\CurrentControlSet\Services";
 const FIREWALL_RULES: &str =
     r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules";
-/// Owned by Administrators; only Administrators and SYSTEM may open it, and
-/// the parent's permissions are not inherited.
-pub const ADMIN_ONLY_SDDL: &str = "O:BAD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)";
+/// Owned by Administrators; full control for Administrators and SYSTEM,
+/// read and list for signed-in users (so the window can show what is held),
+/// and the parent's permissions are not inherited.
+pub const ADMIN_ONLY_SDDL: &str = "O:BAD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FR;;;AU)";
 /// `ERROR_FILE_NOT_FOUND` and `ERROR_PATH_NOT_FOUND` as HRESULTs.
 const NOT_FOUND: [i32; 2] = [0x8007_0002_u32 as i32, 0x8007_0003_u32 as i32];
 const ERROR_SERVICE_DOES_NOT_EXIST: u32 = 1060;
@@ -92,63 +98,225 @@ pub(crate) fn program_data() -> Option<PathBuf> {
     known_folder(&FOLDERID_ProgramData)
 }
 
-/// Make `path` a folder that only Administrators and SYSTEM can open, owned
-/// by Administrators. A folder already there has those permissions put on
-/// it, and a link there is refused rather than followed. Not being an
-/// Administrator makes this fail; it never makes a weaker folder.
-pub fn create_admin_only_dir(path: &Path) -> Done<()> {
-    let shown = path.display();
+/// Make the machine's holding root `path`, and the `ancestors` folders above
+/// it that are Brokey's own (`%ProgramData%\Brokey`), folders that only
+/// Administrators and SYSTEM can change: owned by Administrators, full
+/// control for them and SYSTEM, read and list for signed-in users so that
+/// the window, which is never elevated, can show what is held.
+///
+/// Each folder that is missing is made with those permissions. Each that is
+/// there is checked: a link or a file is refused, and one that is owned by
+/// someone else or that anyone else may write to (a standard user can make
+/// `%ProgramData%\Brokey` before Brokey does) is taken back, ownership and
+/// permissions, when this runs as Administrator, and refused otherwise.
+/// It never leaves a folder weaker than that and never follows a link.
+pub fn create_admin_only_dir(path: &Path, ancestors: usize) -> Done<()> {
+    let mut chain: Vec<&Path> = path.ancestors().take(ancestors + 1).collect();
+    chain.reverse();
+    let descriptor = Descriptor::admin_only().map_err(|e| {
+        Failure::Failed(format!(
+            "Brokey could not prepare the holding area's permissions ({e}), so nothing was \
+             moved. Try again."
+        ))
+    })?;
+    for dir in chain {
+        secure_dir(dir, &descriptor)?;
+    }
+    Ok(())
+}
+
+/// The admin-only descriptor, freed when it goes.
+struct Descriptor(PSECURITY_DESCRIPTOR);
+
+impl Descriptor {
+    fn admin_only() -> io::Result<Descriptor> {
+        let sddl = wide(ADMIN_ONLY_SDDL);
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: `sddl` is NUL-terminated and `descriptor` an out
+        // parameter, freed with `LocalFree` in `drop`.
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Descriptor(descriptor))
+    }
+}
+
+impl Drop for Descriptor {
+    fn drop(&mut self) {
+        // SAFETY: allocated by the conversion in `admin_only`, freed once.
+        unsafe { LocalFree(self.0 as HLOCAL) };
+    }
+}
+
+fn secure_dir(dir: &Path, descriptor: &Descriptor) -> Done<()> {
+    let shown = dir.display();
     let failed = |e: io::Error| {
         Failure::Failed(format!(
-            "Brokey could not make the holding area {shown} for Administrators only ({e}), so \
+            "Brokey could not make {shown} a folder only Administrators can change ({e}), so \
              nothing was moved. Try again."
         ))
     };
-    let sddl = wide(ADMIN_ONLY_SDDL);
-    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
-    // SAFETY: `sddl` is NUL-terminated and `descriptor` an out parameter,
-    // freed with `LocalFree` below.
-    if unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            SDDL_REVISION_1,
-            &mut descriptor,
-            ptr::null_mut(),
-        )
-    } == 0
-    {
-        return Err(failed(io::Error::last_os_error()));
-    }
-    let result = match std::fs::symlink_metadata(path) {
+    match std::fs::symlink_metadata(dir) {
         Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
             Err(Failure::Failed(format!(
                 "{shown} is not a plain folder, so Brokey will not keep things there. Remove it \
                  and try again."
             )))
         }
-        Ok(_) => apply_descriptor(path, descriptor).map_err(failed),
-        Err(_) => {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+        Ok(_) => {
+            if is_admin_only(dir).map_err(failed)? {
+                return Ok(());
             }
+            enable_privilege("SeTakeOwnershipPrivilege");
+            enable_privilege("SeRestorePrivilege");
+            let taken = apply_descriptor(dir, descriptor.0).and_then(|()| is_admin_only(dir));
+            match taken {
+                Ok(true) => Ok(()),
+                _ => Err(Failure::Failed(format!(
+                    "{shown} could be changed by someone other than an Administrator, and Brokey \
+                     could not take it back, so nothing was moved there. Remove the folder, or \
+                     let Brokey ask for Administrator, and try again."
+                ))),
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
             let attributes = SECURITY_ATTRIBUTES {
                 nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-                lpSecurityDescriptor: descriptor,
+                lpSecurityDescriptor: descriptor.0,
                 bInheritHandle: 0,
             };
-            let name = wide(long_path(path));
+            let name = wide(long_path(dir));
             // SAFETY: `name` is NUL-terminated; `attributes` and the
             // descriptor it points to outlive the call.
             if unsafe { CreateDirectoryW(name.as_ptr(), &attributes) } == 0 {
-                Err(failed(io::Error::last_os_error()))
-            } else {
-                Ok(())
+                return Err(failed(io::Error::last_os_error()));
             }
+            Ok(())
+        }
+        Err(e) => Err(failed(e)),
+    }
+}
+
+/// Enable a privilege this process's token holds, if it holds it. A token
+/// that does not (a process that is not elevated) is left as it is, and
+/// what needed the privilege then fails on its own.
+fn enable_privilege(name: &str) {
+    let name = wide(name);
+    // SAFETY: plain out parameters; the token handle is closed once.
+    unsafe {
+        let mut token: HANDLE = ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &mut token) == 0 {
+            return;
+        }
+        let mut privileges = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: std::mem::zeroed(),
+                Attributes: SE_PRIVILEGE_ENABLED,
+            }],
+        };
+        if LookupPrivilegeValueW(
+            ptr::null(),
+            name.as_ptr(),
+            &mut privileges.Privileges[0].Luid,
+        ) != 0
+        {
+            AdjustTokenPrivileges(token, 0, &privileges, 0, ptr::null_mut(), ptr::null_mut());
+        }
+        CloseHandle(token);
+    }
+}
+
+/// Rights that let a holder change a folder or what is in it.
+const WRITE_RIGHTS: u32 = 0x0002 // FILE_WRITE_DATA / FILE_ADD_FILE
+    | 0x0004 // FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
+    | 0x0010 // FILE_WRITE_EA
+    | 0x0040 // FILE_DELETE_CHILD
+    | 0x0100 // FILE_WRITE_ATTRIBUTES
+    | 0x0001_0000 // DELETE
+    | 0x0004_0000 // WRITE_DAC
+    | 0x0008_0000 // WRITE_OWNER
+    | 0x1000_0000 // GENERIC_ALL
+    | 0x4000_0000; // GENERIC_WRITE
+
+/// A well-known SID in a buffer of its own.
+fn well_known(kind: WELL_KNOWN_SID_TYPE) -> [u8; SECURITY_MAX_SID_SIZE as usize] {
+    let mut sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
+    let mut size = SECURITY_MAX_SID_SIZE;
+    // SAFETY: `sid` has room for any SID and `size` says so.
+    unsafe { CreateWellKnownSid(kind, ptr::null_mut(), sid.as_mut_ptr() as PSID, &mut size) };
+    sid
+}
+
+/// Owned by Administrators or SYSTEM, and nobody else may write to it or
+/// delete from it: a folder only an Administrator could have filled.
+pub fn is_admin_only(path: &Path) -> io::Result<bool> {
+    let admins = well_known(WinBuiltinAdministratorsSid);
+    let system = well_known(WinLocalSystemSid);
+    let trusted = |sid: PSID| {
+        // SAFETY: all three point to valid SIDs that outlive the call;
+        // `EqualSid` only reads them.
+        unsafe {
+            EqualSid(sid, admins.as_ptr() as PSID) != 0
+                || EqualSid(sid, system.as_ptr() as PSID) != 0
         }
     };
-    // SAFETY: allocated by the conversion above, freed once.
-    unsafe { LocalFree(descriptor as HLOCAL) };
-    result
+
+    let name = wide(path);
+    let mut owner: PSID = ptr::null_mut();
+    let mut dacl: *mut ACL = ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: out parameters; `owner` and `dacl` point into `descriptor`,
+    // which is freed with `LocalFree` after the last use of either.
+    unsafe {
+        let code = GetNamedSecurityInfoW(
+            name.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        );
+        if code != 0 {
+            return Err(io::Error::from_raw_os_error(code as i32));
+        }
+        // A missing DACL lets everyone do everything.
+        let mut ok = !owner.is_null() && trusted(owner) && !dacl.is_null();
+        if ok {
+            for i in 0..u32::from((*dacl).AceCount) {
+                let mut ace: *mut core::ffi::c_void = ptr::null_mut();
+                if GetAce(dacl, i, &mut ace) == 0 {
+                    ok = false;
+                    break;
+                }
+                let header = &*(ace as *const ACE_HEADER);
+                match u32::from(header.AceType) {
+                    ACCESS_DENIED_ACE_TYPE => {}
+                    ACCESS_ALLOWED_ACE_TYPE => {
+                        let allowed = &*(ace as *const ACCESS_ALLOWED_ACE);
+                        let sid = &allowed.SidStart as *const u32 as PSID;
+                        if allowed.Mask & WRITE_RIGHTS != 0 && !trusted(sid) {
+                            ok = false;
+                        }
+                    }
+                    // Anything else is not something Brokey writes.
+                    _ => ok = false,
+                }
+            }
+        }
+        LocalFree(descriptor as HLOCAL);
+        Ok(ok)
+    }
 }
 
 fn apply_descriptor(path: &Path, descriptor: PSECURITY_DESCRIPTOR) -> io::Result<()> {
@@ -244,12 +412,21 @@ fn read_node(key: &windows_registry::Key) -> windows_registry::Result<KeyNode> {
     Ok(node)
 }
 
-fn write_node(key: &windows_registry::Key, node: &KeyNode) -> windows_registry::Result<()> {
+/// Write a key's values and subkeys. With `merge`, a value already there is
+/// left as it is: only what is missing is written.
+fn write_node(
+    key: &windows_registry::Key,
+    node: &KeyNode,
+    merge: bool,
+) -> windows_registry::Result<()> {
     for (name, value) in &node.values {
+        if merge && key.get_type(name).is_ok() {
+            continue;
+        }
         key.set_bytes(name, value.ty.into(), &value.data)?;
     }
     for (name, sub) in &node.subkeys {
-        write_node(&key.create(name)?, sub)?;
+        write_node(&key.create(name)?, sub, merge)?;
     }
     Ok(())
 }
@@ -266,17 +443,28 @@ fn delete_key(hive: Hive, path: &str) -> Done<()> {
         .map_err(|e| registry_failure(&format!(r"{}\{path}", hive_word(hive)), e))
 }
 
-fn restore_key(hive: Hive, path: &str, node: &KeyNode) -> Done<()> {
+fn restore_key(hive: Hive, path: &str, node: &KeyNode, merge: bool) -> Done<()> {
     let location = format!(r"{}\{path}", hive_word(hive));
-    match open(hive, path, false) {
-        Ok(_) => return Err(Failure::Occupied),
+    let (root, sub) = root_of(hive, path);
+    // Opened for writing only when merging, which is the one case that
+    // writes into a key already there.
+    match open(hive, path, merge) {
+        Ok(_) if !merge => return Err(Failure::Occupied),
+
+        Ok(key) => {
+            // Some of it is still there: put back what is missing beside it,
+            // and take nothing away whatever happens.
+            return write_node(&key, node, true).map_err(|e| registry_failure(&location, e));
+        }
         Err(Failure::Missing) => {}
         Err(f) => return Err(f),
     }
-    let (root, sub) = root_of(hive, path);
-    let written = root.create(&sub).and_then(|key| write_node(&key, node));
+    let written = root
+        .create(&sub)
+        .and_then(|key| write_node(&key, node, false));
     written.map_err(|e| {
-        // Half a key is worse than none: take back what was written.
+        // Half a key that was not there before is worse than none: take
+        // back what was written.
         let _ = root.remove_tree(&sub);
         registry_failure(&location, e)
     })
@@ -472,12 +660,18 @@ fn delete_service(name: &str) -> Done<()> {
     Ok(())
 }
 
-fn restore_service(name: &str, key: &KeyNode) -> Done<()> {
+fn restore_service(name: &str, key: &KeyNode, merge: bool) -> Done<()> {
     let path = service_key(name)?;
     let config = ServiceConfig::from_key(name, key).map_err(Failure::Failed)?;
     let manager = scm(SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE, name)?;
     if open_service(&manager, name, SERVICE_QUERY_STATUS).is_ok() {
-        return Err(Failure::Occupied);
+        // A service is deleted whole or not at all: when merging, one that
+        // is there was never removed.
+        return if merge {
+            Ok(())
+        } else {
+            Err(Failure::Occupied)
+        };
     }
     if !needs_no_password(config.account.as_deref()) {
         return Err(Failure::Failed(format!(
@@ -536,7 +730,7 @@ fn restore_service(name: &str, key: &KeyNode) -> Done<()> {
     // The rest of its settings (its description, its parameters) as they were.
     let written = windows_registry::LOCAL_MACHINE
         .create(&path)
-        .and_then(|k| write_node(&k, key));
+        .and_then(|k| write_node(&k, key, false));
     written.map_err(|e| {
         let e: io::Error = e.into();
         Failure::Failed(format!(
@@ -703,10 +897,15 @@ fn delete_task(path: &str) -> Done<()> {
     com::delete(&folder, &name).map_err(|e| task_failure(path, &e))
 }
 
-fn restore_task(path: &str, xml: &str) -> Done<()> {
+fn restore_task(path: &str, xml: &str, merge: bool) -> Done<()> {
     task_parts(path).ok_or_else(|| bad_task(path))?;
     if com::exists(path).map_err(|e| task_failure(path, &e))? {
-        return Err(Failure::Occupied);
+        // Deleted whole or not at all, as a service is.
+        return if merge {
+            Ok(())
+        } else {
+            Err(Failure::Occupied)
+        };
     }
     com::register(path, xml).map_err(|e| task_failure(path, &e))
 }
@@ -738,13 +937,18 @@ fn delete_firewall_rule(name: &str, rules: &[(String, String)]) -> Done<()> {
     Ok(())
 }
 
-fn restore_firewall_rule(name: &str, rules: &[(String, String)]) -> Done<()> {
+fn restore_firewall_rule(name: &str, rules: &[(String, String)], merge: bool) -> Done<()> {
     let location = format!("firewall:{name}");
     let key = open(Hive::Hklm, FIREWALL_RULES, true)?;
-    if rules.iter().any(|(id, _)| key.get_type(id).is_ok()) {
+    let there = |id: &String| key.get_type(id).is_ok();
+    if !merge && rules.iter().any(|(id, _)| there(id)) {
         return Err(Failure::Occupied);
     }
     for (id, rule) in rules {
+        if merge && there(id) {
+            continue;
+        }
+
         key.set_string(id, rule)
             .map_err(|e| registry_failure(&location, e))?;
     }
@@ -761,6 +965,12 @@ pub struct LiveMutate {
     pub force_copy: bool,
 }
 
+impl LiveMutate {
+    fn is_machine_root(&self, root: &Path) -> bool {
+        path_text(root) == path_text(&self.machine_root)
+    }
+}
+
 impl Default for LiveMutate {
     fn default() -> Self {
         LiveMutate {
@@ -772,8 +982,9 @@ impl Default for LiveMutate {
 
 impl Mutate for LiveMutate {
     fn make_root(&mut self, root: &Path) -> Done<()> {
-        if path_text(root) == path_text(&self.machine_root) {
-            return create_admin_only_dir(root);
+        if self.is_machine_root(root) {
+            // `%ProgramData%\Brokey` is Brokey's too, and secured with it.
+            return create_admin_only_dir(root, 1);
         }
         std::fs::create_dir_all(root).map_err(|e| {
             Failure::Failed(format!(
@@ -783,8 +994,26 @@ impl Mutate for LiveMutate {
         })
     }
 
+    fn trust_entry(&mut self, root: &Path, dir: &Path) -> Done<()> {
+        if !self.is_machine_root(root) {
+            return Ok(());
+        }
+        match is_admin_only(dir) {
+            Ok(true) => Ok(()),
+            _ => Err(Failure::Failed(format!(
+                "{} was not made by Brokey as an Administrator, so nothing was moved into it or \
+                 taken from it. Delete it and try again.",
+                dir.display()
+            ))),
+        }
+    }
+
     fn move_path(&mut self, from: &Path, to: &Path) -> Done<()> {
         move_file_or_folder(from, to, self.force_copy)
+    }
+
+    fn merge_path(&mut self, from: &Path, to: &Path) -> Done<()> {
+        merge_file_or_folder(from, to, self.force_copy)
     }
 
     fn export_key(&mut self, hive: Hive, path: &str) -> Done<KeyNode> {
@@ -795,8 +1024,8 @@ impl Mutate for LiveMutate {
         delete_key(hive, path)
     }
 
-    fn restore_key(&mut self, hive: Hive, path: &str, key: &KeyNode) -> Done<()> {
-        restore_key(hive, path, key)
+    fn restore_key(&mut self, hive: Hive, path: &str, key: &KeyNode, merge: bool) -> Done<()> {
+        restore_key(hive, path, key, merge)
     }
 
     fn export_value(&mut self, hive: Hive, key: &str, name: &str) -> Done<RegValue> {
@@ -817,14 +1046,26 @@ impl Mutate for LiveMutate {
             .map_err(|e| registry_failure(&location, e))
     }
 
-    fn restore_value(&mut self, hive: Hive, key: &str, name: &str, value: &RegValue) -> Done<()> {
+    fn restore_value(
+        &mut self,
+        hive: Hive,
+        key: &str,
+        name: &str,
+        value: &RegValue,
+        merge: bool,
+    ) -> Done<()> {
         let location = format!(r"{}\{key} | {name}", hive_word(hive));
         let (root, sub) = root_of(hive, key);
         let opened = root
             .create(&sub)
             .map_err(|e| registry_failure(&location, e))?;
         if opened.get_type(name).is_ok() {
-            return Err(Failure::Occupied);
+            // When merging, one that is there was never removed.
+            return if merge {
+                Ok(())
+            } else {
+                Err(Failure::Occupied)
+            };
         }
         opened
             .set_bytes(name, value.ty.into(), &value.data)
@@ -840,8 +1081,8 @@ impl Mutate for LiveMutate {
         delete_service(name)
     }
 
-    fn restore_service(&mut self, name: &str, key: &KeyNode) -> Done<()> {
-        restore_service(name, key)
+    fn restore_service(&mut self, name: &str, key: &KeyNode, merge: bool) -> Done<()> {
+        restore_service(name, key, merge)
     }
 
     fn export_task(&mut self, path: &str) -> Done<String> {
@@ -852,8 +1093,8 @@ impl Mutate for LiveMutate {
         delete_task(path)
     }
 
-    fn restore_task(&mut self, path: &str, xml: &str) -> Done<()> {
-        restore_task(path, xml)
+    fn restore_task(&mut self, path: &str, xml: &str, merge: bool) -> Done<()> {
+        restore_task(path, xml, merge)
     }
 
     fn export_firewall_rule(&mut self, name: &str) -> Done<Vec<(String, String)>> {
@@ -864,13 +1105,18 @@ impl Mutate for LiveMutate {
         delete_firewall_rule(name, rules)
     }
 
-    fn restore_firewall_rule(&mut self, name: &str, rules: &[(String, String)]) -> Done<()> {
-        restore_firewall_rule(name, rules)
+    fn restore_firewall_rule(
+        &mut self,
+        name: &str,
+        rules: &[(String, String)],
+        merge: bool,
+    ) -> Done<()> {
+        restore_firewall_rule(name, rules, merge)
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::{HoldItem, HoldReport, REG_BINARY, REG_NONE, REG_QWORD, hold, restore};
     use super::*;
     use crate::model::ItemKind;
@@ -952,9 +1198,9 @@ mod tests {
             )],
         };
         let mut m = LiveMutate::default();
-        assert_eq!(m.restore_key(Hive::Hkcu, &key.0, &node), Ok(()));
+        assert_eq!(m.restore_key(Hive::Hkcu, &key.0, &node, false), Ok(()));
         assert_eq!(
-            m.restore_key(Hive::Hkcu, &key.0, &node),
+            m.restore_key(Hive::Hkcu, &key.0, &node, false),
             Err(Failure::Occupied)
         );
 
@@ -962,7 +1208,7 @@ mod tests {
         assert_eq!(sorted(exported.clone()), sorted(node.clone()));
         assert_eq!(m.delete_key(Hive::Hkcu, &key.0), Ok(()));
         assert_eq!(m.export_key(Hive::Hkcu, &key.0), Err(Failure::Missing));
-        assert_eq!(m.restore_key(Hive::Hkcu, &key.0, &exported), Ok(()));
+        assert_eq!(m.restore_key(Hive::Hkcu, &key.0, &exported, false), Ok(()));
         let again = m.export_key(Hive::Hkcu, &key.0).unwrap();
         assert_eq!(sorted(again), sorted(node));
 
@@ -973,9 +1219,12 @@ mod tests {
             m.export_value(Hive::Hkcu, &key.0, "Multi"),
             Err(Failure::Missing)
         );
-        assert_eq!(m.restore_value(Hive::Hkcu, &key.0, "Multi", &held), Ok(()));
         assert_eq!(
-            m.restore_value(Hive::Hkcu, &key.0, "Multi", &held),
+            m.restore_value(Hive::Hkcu, &key.0, "Multi", &held, false),
+            Ok(())
+        );
+        assert_eq!(
+            m.restore_value(Hive::Hkcu, &key.0, "Multi", &held, false),
             Err(Failure::Occupied)
         );
     }
@@ -1095,12 +1344,15 @@ mod tests {
         };
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("Brokey").join("Holding");
-        match create_admin_only_dir(&root) {
+        match create_admin_only_dir(&root, 1) {
             // Not elevated: Administrators cannot be made the owner, and
             // no folder is left behind with weaker permissions.
             Err(Failure::Failed(sentence)) => {
-                assert!(!root.exists(), "{sentence}");
-                assert!(sentence.contains("Administrators only"), "{sentence}");
+                assert!(!root.parent().unwrap().exists(), "{sentence}");
+                assert!(
+                    sentence.contains("only Administrators can change"),
+                    "{sentence}"
+                );
             }
             Err(other) => panic!("{other:?}"),
             Ok(()) => {
@@ -1143,9 +1395,129 @@ mod tests {
                 assert!(sddl.contains("D:P"), "{sddl}");
                 assert!(sddl.contains("(A;OICI;FA;;;BA)"), "{sddl}");
                 assert!(sddl.contains("(A;OICI;FA;;;SY)"), "{sddl}");
-                assert_eq!(sddl.matches("(A;").count(), 2, "{sddl}");
+                assert!(sddl.contains("(A;OICI;FR;;;AU)"), "{sddl}");
+                assert_eq!(sddl.matches("(A;").count(), 3, "{sddl}");
             }
         }
+    }
+
+    /// Put a DACL from SDDL on a folder this user owns.
+    pub(crate) fn set_dacl(path: &Path, sddl: &str) {
+        let sddl = wide(sddl);
+        let name = wide(path);
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        let mut dacl: *mut ACL = ptr::null_mut();
+        let (mut present, mut defaulted) = (0, 0);
+        // SAFETY: out parameters; the descriptor is freed once at the end.
+        unsafe {
+            assert_ne!(
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    ptr::null_mut(),
+                ),
+                0
+            );
+            GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted);
+            let code = SetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                dacl,
+                ptr::null(),
+            );
+            LocalFree(descriptor as HLOCAL);
+            assert_eq!(code, 0);
+        }
+    }
+
+    #[test]
+    fn a_brokey_folder_someone_else_made_is_taken_back_or_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let brokey = temp.path().join("Brokey");
+        // Made first by this user, as a standard user can make
+        // `%ProgramData%\Brokey` before Brokey ever runs.
+        std::fs::create_dir_all(&brokey).unwrap();
+        let root = brokey.join("Holding");
+        match create_admin_only_dir(&root, 1) {
+            Ok(()) => {
+                // Elevated: both were taken back.
+                assert!(is_admin_only(&brokey).unwrap());
+                assert!(is_admin_only(&root).unwrap());
+            }
+            Err(Failure::Failed(sentence)) => {
+                assert!(
+                    sentence.contains(&brokey.display().to_string()),
+                    "{sentence}"
+                );
+                assert!(!root.exists(), "nothing is made inside it");
+            }
+            Err(other) => panic!("{other:?}"),
+        }
+        assert!(
+            !is_admin_only(temp.path()).unwrap_or(false),
+            "a folder this user owns is not admin-only"
+        );
+    }
+
+    #[test]
+    fn an_entry_in_the_machine_root_that_someone_else_made_is_not_trusted() {
+        let temp = tempfile::tempdir().unwrap();
+        let machine = temp.path().join("machine");
+        let entry = machine.join("acme-1");
+        std::fs::create_dir_all(&entry).unwrap();
+        let mut m = LiveMutate {
+            machine_root: machine.clone(),
+            force_copy: false,
+        };
+        let refused = m.trust_entry(&machine, &entry);
+        assert!(
+            matches!(&refused, Err(Failure::Failed(s)) if s.contains("not made by Brokey")),
+            "{refused:?}"
+        );
+        // The user's own root has no such rule.
+        assert_eq!(m.trust_entry(temp.path(), &entry), Ok(()));
+        // And neither hold nor restore will use it.
+        let report = super::super::restore(&machine, "acme-1", &mut m);
+        assert_eq!(report.held, 0);
+        assert!(
+            report.failed[0].1.contains("not made by Brokey"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn a_key_left_in_part_is_merged_back_without_replacing_what_is_there() {
+        let key = TestKey::new("merge");
+        let node = KeyNode {
+            values: vec![
+                ("Kept".into(), value(REG_SZ, &utf16("old"))),
+                ("Gone".into(), value(REG_DWORD, &1u32.to_le_bytes())),
+            ],
+            subkeys: vec![(
+                "Sub".into(),
+                KeyNode {
+                    values: vec![("x".into(), value(REG_SZ, &utf16("y")))],
+                    subkeys: vec![],
+                },
+            )],
+        };
+        // What is left after a delete that failed part-way, with one value
+        // changed since by someone else.
+        let left = windows_registry::CURRENT_USER.create(&key.0).unwrap();
+        left.set_string("Kept", "new").unwrap();
+        let mut m = LiveMutate::default();
+        assert_eq!(
+            m.restore_key(Hive::Hkcu, &key.0, &node, false),
+            Err(Failure::Occupied)
+        );
+        assert_eq!(m.restore_key(Hive::Hkcu, &key.0, &node, true), Ok(()));
+        assert_eq!(left.get_string("Kept").unwrap(), "new");
+        assert_eq!(left.get_u32("Gone").unwrap(), 1);
+        assert_eq!(left.open("Sub").unwrap().get_string("x").unwrap(), "y");
     }
 
     #[test]
@@ -1162,7 +1534,7 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        let result = create_admin_only_dir(&link);
+        let result = create_admin_only_dir(&link, 0);
         assert!(
             matches!(&result, Err(Failure::Failed(s)) if s.contains("not a plain folder")),
             "{result:?}"
