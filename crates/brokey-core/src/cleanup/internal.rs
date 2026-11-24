@@ -1111,10 +1111,19 @@ fn check_system(item: &HoldItem, mode: Mode, view: &dyn SystemView) -> Result<()
             }
             // Only the rule with this id goes; another application's rule
             // by the same name is not asked about and does not go.
+            // The listing holds only rules with a program (`App=`); a port or
+            // service rule, Windows's own among them, is not in it and is
+            // never held. One that has truly gone is the export's Missing.
             match rules.items.iter().find(|r| r.id.eq_ignore_ascii_case(id)) {
                 Some(r) if r.shown_name() != name => Err(not_one()),
                 Some(r) if runs_windows(&r.program, view) => Err(windows("firewall rule")),
-                _ => Ok(()),
+                Some(_) => Ok(()),
+                None if mode == Mode::Hold => Err(refuse(
+                    location,
+                    mode,
+                    "it is not a firewall rule that lets a program through",
+                )),
+                None => Ok(()),
             }
         }
     }

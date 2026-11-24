@@ -1585,7 +1585,39 @@ fn a_task_or_rule_brokey_cannot_place_is_refused() {
     );
     let unreadable_rules = machine(r#""unreadable_firewall": 2"#);
     refused_for(&rule, &unreadable_rules, Part::Plain, "could not be read");
-    allowed_for(&rule, &machine(""));
+    // An id not among the rules that let a program through (a port or a
+    // service rule, Windows's own among them) is never held.
+    refused_for(
+        &rule,
+        &machine(""),
+        Part::Plain,
+        "not a firewall rule that lets a program through",
+    );
+    allowed_for(
+        &rule,
+        &machine(
+            r#""firewall": [{ "id": "{a}", "name": "Acme", "program": "C:\\Program Files\\Acme\\acme.exe" }]"#,
+        ),
+    );
+}
+
+/// A rule being put back is not there, which is no reason to refuse it.
+#[cfg(windows)]
+#[test]
+fn a_firewall_rule_being_put_back_need_not_be_listed() {
+    let temp = tempfile::tempdir().unwrap();
+    let both = temp.path().join("holding");
+    let roots = Roots {
+        user: both.clone(),
+        machine: both,
+    };
+    manifest_with(
+        &roots,
+        "acme",
+        vec![item(ItemKind::FirewallRule, "firewall:Acme | {a}")],
+    );
+    let back = step(RESTORE, vec!["acme".into()], true);
+    assert_eq!(check_with(&back, &machine(""), &roots, &PLAIN), Ok(()));
 }
 
 #[cfg(windows)]

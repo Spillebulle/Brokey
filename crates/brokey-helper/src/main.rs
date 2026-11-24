@@ -1201,6 +1201,19 @@ mod tests {
         );
     }
 
+    /// A firewall id the helper's listing of program rules does not have (a
+    /// port or service rule, Windows's own among them, or one made up) is
+    /// refused before anything is exported.
+    #[cfg(windows)]
+    #[test]
+    fn the_helper_refuses_a_firewall_id_that_lets_no_program_through() {
+        let events = refused_by_the_helper(hold_plan(&[(
+            brokey_core::model::ItemKind::FirewallRule,
+            "firewall:Core Networking | {brokey-test-not-a-program-rule}".to_string(),
+        )]));
+        assert!(events.contains("lets a program through"), "{events}");
+    }
+
     /// Review focus 5, through the helper's own door: one folder of two was
     /// swapped for a junction after the scan. The whole plan is refused and
     /// the folder that was fine has not moved either.
