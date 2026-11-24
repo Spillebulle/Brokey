@@ -638,6 +638,30 @@ impl<'a> Scan<'a> {
         reason: String,
         must_be_narrow: bool,
     ) {
+        self.offer_path_to(
+            path,
+            kind,
+            file_size,
+            confidence,
+            reason,
+            must_be_narrow,
+            None,
+        );
+    }
+
+    /// [`Scan::offer_path`] for a shortcut, with what it starts, so that the
+    /// guard can ask who else uses that.
+    #[allow(clippy::too_many_arguments)]
+    fn offer_path_to(
+        &mut self,
+        path: &str,
+        kind: ItemKind,
+        file_size: Option<u64>,
+        confidence: Confidence,
+        reason: String,
+        must_be_narrow: bool,
+        points_to: Option<PathBuf>,
+    ) {
         let path = &tidy(path);
         if self.holds_known(path) || (must_be_narrow && !self.narrow(path)) {
             return;
@@ -678,7 +702,7 @@ impl<'a> Scan<'a> {
             confidence,
             scope,
             reason,
-            points_to: None,
+            points_to,
             holds_only: None,
         });
     }
@@ -869,14 +893,18 @@ impl<'a> Scan<'a> {
                         format!("It holds only shortcuts to {app}, which is gone."),
                         false,
                     ),
-                    MenuPart::Link(path, size) => self.offer_path(
-                        &path,
-                        ItemKind::Shortcut,
-                        Some(size),
-                        Confidence::Certain,
-                        format!("It is a shortcut to {app}, which is gone."),
-                        false,
-                    ),
+                    MenuPart::Link(path, size) => {
+                        let target = self.view.shortcut_target(Path::new(&path));
+                        self.offer_path_to(
+                            &path,
+                            ItemKind::Shortcut,
+                            Some(size),
+                            Confidence::Certain,
+                            format!("It is a shortcut to {app}, which is gone."),
+                            false,
+                            target,
+                        )
+                    }
                 }
             }
         }
@@ -902,12 +930,15 @@ impl<'a> Scan<'a> {
                 }
                 let (all, inner) = self.menu_folder(&path, depth + 1);
                 // `Startup` is Windows' own folder, however empty it would be.
+                // What is in a whole folder is offered as well: should the
+                // guard keep the folder, because another application's
+                // shortcut is in it, the rest can still go one by one.
                 if all && !entry.name.eq_ignore_ascii_case("Startup") {
                     parts.push(MenuPart::Folder(path));
                 } else {
                     whole = false;
-                    parts.extend(inner);
                 }
+                parts.extend(inner);
             } else if self.dead_shortcut(&path) {
                 parts.push(MenuPart::Link(path, entry.size));
             } else {
@@ -941,13 +972,15 @@ impl<'a> Scan<'a> {
             let path = join(&root, &entry.name);
             if !entry.is_dir && entry.reparse != Reparse::NameSurrogate && self.dead_shortcut(&path)
             {
-                self.offer_path(
+                let target = self.view.shortcut_target(Path::new(&path));
+                self.offer_path_to(
                     &path,
                     ItemKind::Shortcut,
                     Some(entry.size),
                     Confidence::Certain,
                     format!("It is a shortcut to {app}, which is gone."),
                     false,
+                    target,
                 );
             }
         }
@@ -1400,8 +1433,23 @@ mod tests {
         let menu = at(&s, &format!(r"{USER_MENU}\Discord Inc")).expect("the Start menu folder");
         assert_eq!(menu.confidence, Confidence::Certain);
         assert_eq!(menu.kind, ItemKind::Shortcut);
-        // Only the folder is offered, not the shortcut inside it as well.
-        assert!(at(&s, &format!(r"{USER_MENU}\Discord Inc\Discord.lnk")).is_none());
+        // The shortcut inside is a candidate too, in case the guard keeps
+        // the folder; when it does not, the folder takes it along and the
+        // list has one row.
+        let inner = format!(r"{USER_MENU}\Discord Inc\Discord.lnk");
+        assert!(at(&s, &inner).is_some());
+        let view = machine("discord");
+        let (offered, _) = crate::cleanup::guard::guard(
+            s.candidates.clone(),
+            &crate::cleanup::guard::claims(&view, &[], None),
+            &view,
+        );
+        assert!(offered.iter().any(|c| c.location == menu.location));
+        assert!(
+            !offered
+                .iter()
+                .any(|c| c.location.eq_ignore_ascii_case(&inner))
+        );
 
         // A folder that holds other shortcuts too gives up only the dead one.
         assert_eq!(

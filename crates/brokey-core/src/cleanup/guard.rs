@@ -639,7 +639,24 @@ impl<'a> Gather<'a> {
                 continue;
             };
             let target = target.to_string_lossy().into_owned();
-            if self.in_home(&target) || !self.view.exists(Path::new(&target)) {
+            if self.in_home(&target) {
+                // Into the application's own folder, unless another
+                // application installed inside that folder owns where it
+                // leads: then the shortcut itself is that one's, and so is
+                // the Start menu folder it is in.
+                let at = shortcut::normalise(&target);
+                let owner = self
+                    .out
+                    .claims
+                    .iter()
+                    .find(|c| at == c.at || strictly_inside(&at, &c.at))
+                    .map(|c| c.used_by.clone());
+                if let Some(owner) = owner {
+                    self.path(&path, &owner);
+                }
+                continue;
+            }
+            if !self.view.exists(Path::new(&target)) {
                 continue;
             }
             let name = entry.name[..entry.name.len() - 4].to_string();
@@ -1320,6 +1337,87 @@ mod tests {
         kept.iter()
             .find(|k| k.location.eq_ignore_ascii_case(location))
             .map(|k| k.used_by.as_str())
+    }
+
+    /// Acme Updater is installed on its own inside Acme Studio's folder, and
+    /// its shortcut sits in Acme's Start menu folder beside Acme Studio's.
+    const SIBLING_IN_HOME: &str = r#"{
+        "folders": {
+            "ProgramFiles": "C:\\Program Files",
+            "ProgramFilesX86": "C:\\Program Files (x86)",
+            "ProgramData": "C:\\ProgramData",
+            "AppData": "C:\\Users\\you\\AppData\\Roaming",
+            "LocalAppData": "C:\\Users\\you\\AppData\\Local",
+            "LocalLow": "C:\\Users\\you\\AppData\\LocalLow",
+            "StartMenuMachine": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+            "StartMenuUser": "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+            "Windows": "C:\\Windows",
+            "Profile": "C:\\Users\\you"
+        },
+        "dirs": {
+            "C:\\Program Files\\Acme Studio": [
+                { "name": "studio.exe", "size": 1 },
+                { "name": "help.exe", "size": 1 },
+                { "name": "Updater", "is_dir": true }
+            ],
+            "C:\\Program Files\\Acme Studio\\Updater": [{ "name": "updater.exe", "size": 1 }],
+            "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs": [
+                { "name": "Acme Studio.lnk", "size": 1 },
+                { "name": "Acme", "is_dir": true },
+                { "name": "Acme Tools", "is_dir": true }
+            ],
+            "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Acme": [
+                { "name": "Acme Updater.lnk", "size": 1 },
+                { "name": "Acme Help.lnk", "size": 1 }
+            ],
+            "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Acme Tools": [
+                { "name": "Acme Help.lnk", "size": 1 }
+            ]
+        },
+        "shortcuts": {
+            "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Acme Studio.lnk": "C:\\Program Files\\Acme Studio\\studio.exe",
+            "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Acme\\Acme Updater.lnk": "C:\\Program Files\\Acme Studio\\Updater\\updater.exe",
+            "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Acme\\Acme Help.lnk": "C:\\Program Files\\Acme Studio\\help.exe",
+            "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Acme Tools\\Acme Help.lnk": "C:\\Program Files\\Acme Studio\\help.exe"
+        },
+        "registry": {
+            "Hklm": {
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall": { "subkeys": ["Acme Updater"] },
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Acme Updater": {
+                    "values": [
+                        ["DisplayName", "Acme Updater"],
+                        ["InstallLocation", "C:\\Program Files\\Acme Studio\\Updater"]
+                    ]
+                }
+            }
+        }
+    }"#;
+
+    /// A forced scan takes every shortcut into the application's folder for
+    /// dead, so a sibling installed inside that folder must keep its own,
+    /// and a Start menu folder holding one is never offered whole; what is
+    /// only the application's is still offered.
+    #[test]
+    fn a_forced_removal_never_offers_a_siblings_shortcut_inside_its_folder() {
+        let view = FixtureView::from_json(SIBLING_IN_HOME);
+        let mut hints = blank_hints("Acme Studio", Some("Acme"));
+        hints.install_dir = Some(PathBuf::from(r"C:\Program Files\Acme Studio"));
+        let scanned = crate::cleanup::scan::scan_with(&hints, &view, true);
+        let (offered, kept) = guard(scanned.candidates, &claims(&view, &[], Some(&hints)), &view);
+        let updater = format!(r"{USER_MENU}\Acme\Acme Updater.lnk");
+        assert!(!is_offered(&offered, &updater), "{offered:?}");
+        assert!(
+            !is_offered(&offered, &format!(r"{USER_MENU}\Acme")),
+            "{offered:?}"
+        );
+        assert_eq!(used_by(&kept, &updater), Some("Acme Updater"));
+        for still in [
+            format!(r"{USER_MENU}\Acme Studio.lnk"),
+            format!(r"{USER_MENU}\Acme\Acme Help.lnk"),
+            format!(r"{USER_MENU}\Acme Tools"),
+        ] {
+            assert!(is_offered(&offered, &still), "{still}: {offered:?}");
+        }
     }
 
     #[test]
