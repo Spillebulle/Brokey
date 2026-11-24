@@ -1310,6 +1310,15 @@ pub fn summary(ops: &[Op]) -> String {
 }
 
 /// [`summary`], with the scans a clear names its application from.
+/// A scan id's place in time: `scan-<millis>-<counter>`, compared as
+/// numbers. An id of another shape comes first.
+fn scan_order(id: &str) -> (u128, u32) {
+    let mut parts = id.strip_prefix("scan-").unwrap_or_default().splitn(2, '-');
+    let millis = parts.next().and_then(|m| m.parse().ok()).unwrap_or(0);
+    let counter = parts.next().and_then(|c| c.parse().ok()).unwrap_or(0);
+    (millis, counter)
+}
+
 pub fn summary_with(ops: &[Op], scans: &Scans) -> String {
     if ops.is_empty() {
         return "Finished.".to_string();
@@ -1330,7 +1339,27 @@ pub fn summary_with(ops: &[Op], scans: &Scans) -> String {
             Op::Restore { .. } => return "Restored the cleared items.".to_string(),
             Op::EmptyHolding { .. } => return "Emptied the holding area.".to_string(),
             Op::ForceRemove { package } => {
-                return format!("Forced removal of {}.", package.id);
+                // A forced removal removes nothing itself: its scan lists
+                // what is left, and the user chooses from that list.
+                let scans = scans.lock().unwrap_or_else(|p| p.into_inner());
+                let latest = scans
+                    .values()
+                    .filter(|r| r.forced && r.findings.package == *package)
+                    .max_by_key(|r| scan_order(&r.findings.scan));
+                return match latest {
+                    Some(r) if r.findings.items.is_empty() => {
+                        format!("Brokey found nothing {} left behind.", r.findings.name)
+                    }
+                    Some(r) => {
+                        let n = r.findings.items.len();
+                        let word = if n == 1 { "leftover" } else { "leftovers" };
+                        format!(
+                            "Brokey found {n} {word} of {}. Choose what to clear from the list.",
+                            r.findings.name
+                        )
+                    }
+                    None => "Brokey looked for what the application left behind.".to_string(),
+                };
             }
             _ => {}
         }
@@ -1466,7 +1495,74 @@ mod tests {
                     id: "Valve.Steam".into()
                 }
             }),
-            "Forced removal of Valve.Steam."
+            "Brokey looked for what the application left behind."
+        );
+    }
+
+    /// A forced removal removes nothing itself: it finds what is left and
+    /// lists it. The sentence names the application, never its raw id.
+    #[test]
+    fn a_forced_removal_names_the_application_and_says_the_list_waits() {
+        use crate::cleanup::internal::ScanRecord;
+        let package = PackageRef {
+            source: SourceKind::Arp,
+            id: r"HKLM\{12345678-9ABC-DEF0-1234-56789ABCDEF0}".into(),
+        };
+        let scans = Scans::default();
+        let record = |scan: &str, items: usize| ScanRecord {
+            hints: crate::cleanup::hints::Hints {
+                package: package.clone(),
+                name: "Acme Studio".into(),
+                publisher: None,
+                uninstall_key: None,
+                product_code: None,
+                install_dir: None,
+                install_location: None,
+                icon_dir: None,
+                shortcuts: Vec::new(),
+                extra_dirs: Vec::new(),
+            },
+            findings: Findings {
+                scan: scan.into(),
+                package: package.clone(),
+                name: "Acme Studio".into(),
+                items: (0..items)
+                    .map(|i| LeftoverItem {
+                        id: format!("item-{i}"),
+                        kind: ItemKind::Folder,
+                        location: format!(r"C:\Acme\{i}"),
+                        size: None,
+                        confidence: Confidence::Certain,
+                        scope: Scope::User,
+                        ticked: true,
+                        reason: "It is Acme Studio's.".into(),
+                    })
+                    .collect(),
+                kept: Vec::new(),
+                not_offered_cloud: 0,
+                unreadable: 0,
+            },
+            forced: true,
+        };
+        let forced = [Op::ForceRemove {
+            package: package.clone(),
+        }];
+        scans
+            .lock()
+            .unwrap()
+            .insert("scan-1-0".into(), record("scan-1-0", 3));
+        assert_eq!(
+            summary_with(&forced, &scans),
+            "Brokey found 3 leftovers of Acme Studio. Choose what to clear from the list."
+        );
+        // A later scan of the same application is the one that counts.
+        scans
+            .lock()
+            .unwrap()
+            .insert("scan-2-1".into(), record("scan-2-1", 0));
+        assert_eq!(
+            summary_with(&forced, &scans),
+            "Brokey found nothing Acme Studio left behind."
         );
     }
 
