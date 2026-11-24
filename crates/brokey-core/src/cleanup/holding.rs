@@ -2802,9 +2802,48 @@ mod tests {
         assert_eq!(text(&app.join("a.dat")), "a");
     }
 
+    /// Whether this test process runs elevated. An elevated token carries
+    /// the backup privilege, which reads a folder whatever its DACL says, so
+    /// a test of what an unelevated window cannot read means nothing there
+    /// (a CI runner is elevated).
+    #[cfg(windows)]
+    fn elevated() -> bool {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: the pseudo handle of this process, and a writable local for
+        // the token handle, which is closed below.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut written = 0u32;
+        // SAFETY: an open token with TOKEN_QUERY, one initialised
+        // TOKEN_ELEVATION with its own size, and a writable length.
+        let read = unsafe {
+            GetTokenInformation(
+                token,
+                TokenElevation,
+                std::ptr::from_mut(&mut elevation).cast(),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut written,
+            )
+        };
+        // SAFETY: the token handle opened above, closed once.
+        unsafe { CloseHandle(token) };
+        read != 0 && elevation.TokenIsElevated != 0
+    }
+
     #[cfg(windows)]
     #[test]
     fn a_holding_root_that_cannot_be_read_is_reported_not_shown_empty() {
+        if elevated() {
+            eprintln!("skipped: an elevated process reads the root whatever its DACL says");
+            return;
+        }
         let mc = machine();
         let notes = vec![item(ItemKind::File, loc(&mc.disk.join("notes.txt")))];
         hold(&mc.root, "acme-1", "Acme", &notes, &mut Fake::default());
