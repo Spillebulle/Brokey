@@ -45,7 +45,8 @@ use windows_sys::Win32::System::Registry::{
 use windows_sys::Win32::System::Services::{
     CloseServiceHandle, ControlService, CreateServiceW, DeleteService, OpenSCManagerW,
     OpenServiceW, QueryServiceStatus, SC_HANDLE, SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE,
-    SERVICE_CONTROL_STOP, SERVICE_QUERY_STATUS, SERVICE_STATUS, SERVICE_STOP, SERVICE_STOPPED,
+    SERVICE_CONTROL_STOP, SERVICE_QUERY_STATUS, SERVICE_START, SERVICE_STATUS, SERVICE_STOP,
+    SERVICE_STOPPED, StartServiceW,
 };
 use windows_sys::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -1091,9 +1092,106 @@ fn service_key(name: &str) -> Done<String> {
     Ok(format!(r"{SERVICES}\{name}"))
 }
 
+/// What removing a service asks of the Service Control Manager, so that
+/// what is done when it fails part-way is tested without one.
+trait ServiceControl {
+    /// Whether it is running now, before anything is done to it.
+    fn running(&self) -> bool;
+    /// Ask it to stop and wait; whether it stopped in time.
+    fn stop(&self) -> bool;
+    fn delete(&self) -> io::Result<()>;
+    fn start(&self) -> io::Result<()>;
+}
+
+/// Stop a service and delete it. A service that stops and then cannot be
+/// deleted is never left stopped in silence: one that was running is
+/// started again, and when even that fails the sentence says it is stopped
+/// and not removed, and what to do.
+fn remove_service(name: &str, service: &dyn ServiceControl) -> Done<()> {
+    let was_running = service.running();
+    if !service.stop() {
+        return Err(Failure::Failed(format!(
+            "Service {name} did not stop within 30 seconds, so it was left as it is. Stop it \
+             in Services and clear it again."
+        )));
+    }
+    let Err(e) = service.delete() else {
+        return Ok(());
+    };
+    if !was_running {
+        return Err(Failure::Failed(format!(
+            "Brokey could not delete service {name} ({e}). It was not running, and it is as it \
+             was. Try again."
+        )));
+    }
+    Err(Failure::Failed(match service.start() {
+        Ok(()) => format!(
+            "Brokey could not delete service {name} ({e}), so it was started again and is as it \
+             was. Try again."
+        ),
+        Err(again) => format!(
+            "Service {name} was stopped to be deleted, but could not be deleted ({e}) nor \
+             started again ({again}), so it is stopped and not removed. Start it in Services, \
+             then clear it again."
+        ),
+    }))
+}
+
+/// A service open with what removing it needs.
+struct LiveService(ServiceHandle);
+
+impl ServiceControl for LiveService {
+    fn running(&self) -> bool {
+        // SAFETY: an open service handle and a plain out parameter.
+        unsafe {
+            let mut status: SERVICE_STATUS = std::mem::zeroed();
+            QueryServiceStatus(self.0.0, &mut status) != 0
+                && status.dwCurrentState != SERVICE_STOPPED
+        }
+    }
+
+    fn stop(&self) -> bool {
+        // SAFETY: an open service handle with SERVICE_STOP and
+        // SERVICE_QUERY_STATUS, and a plain out parameter.
+        unsafe {
+            let mut status: SERVICE_STATUS = std::mem::zeroed();
+            // Fails harmlessly for a service that is not running.
+            ControlService(self.0.0, SERVICE_CONTROL_STOP, &mut status);
+            for _ in 0..120 {
+                if QueryServiceStatus(self.0.0, &mut status) != 0
+                    && status.dwCurrentState == SERVICE_STOPPED
+                {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        }
+        false
+    }
+
+    fn delete(&self) -> io::Result<()> {
+        // SAFETY: an open service handle with DELETE access.
+        unsafe {
+            if DeleteService(self.0.0) == 0 && GetLastError() != ERROR_SERVICE_MARKED_FOR_DELETE {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    fn start(&self) -> io::Result<()> {
+        // SAFETY: an open service handle with SERVICE_START; no arguments.
+        if unsafe { StartServiceW(self.0.0, 0, ptr::null()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
 fn delete_service(name: &str) -> Done<()> {
     let manager = scm(SC_MANAGER_CONNECT, name)?;
-    let service = match open_service(&manager, name, SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE) {
+    let access = SERVICE_STOP | SERVICE_START | SERVICE_QUERY_STATUS | DELETE;
+    let service = match open_service(&manager, name, access) {
         Ok(s) => s,
         Err(ERROR_SERVICE_DOES_NOT_EXIST) => return Err(Failure::Missing),
         Err(code) => {
@@ -1103,36 +1201,7 @@ fn delete_service(name: &str) -> Done<()> {
             )));
         }
     };
-    // SAFETY: `service` is open with SERVICE_STOP and SERVICE_QUERY_STATUS,
-    // and `status` is a plain out parameter.
-    unsafe {
-        let mut status: SERVICE_STATUS = std::mem::zeroed();
-        // Fails harmlessly for a service that is not running.
-        ControlService(service.0, SERVICE_CONTROL_STOP, &mut status);
-        let mut stopped = false;
-        for _ in 0..120 {
-            if QueryServiceStatus(service.0, &mut status) != 0
-                && status.dwCurrentState == SERVICE_STOPPED
-            {
-                stopped = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-        if !stopped {
-            return Err(Failure::Failed(format!(
-                "Service {name} did not stop within 30 seconds, so it was left as it is. Stop it \
-                 in Services and clear it again."
-            )));
-        }
-        if DeleteService(service.0) == 0 && GetLastError() != ERROR_SERVICE_MARKED_FOR_DELETE {
-            return Err(Failure::Failed(format!(
-                "Brokey could not delete service {name} ({}). Try again.",
-                io::Error::last_os_error()
-            )));
-        }
-    }
-    Ok(())
+    remove_service(name, &LiveService(service))
 }
 
 fn restore_service(name: &str, key: &KeyNode, merge: bool) -> Done<()> {
@@ -2660,6 +2729,107 @@ pub(crate) mod tests {
         assert!(needs_no_password(Some(r"NT AUTHORITY\LocalService")));
         assert!(needs_no_password(Some(r"NT SERVICE\AcmeSvc")));
         assert!(!needs_no_password(Some(r".\acme-user")));
+    }
+
+    /// A service as far as removing it goes, from a table.
+    #[derive(Default)]
+    struct FakeService {
+        running: bool,
+        stops: bool,
+        delete_fails: bool,
+        start_fails: bool,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl ServiceControl for FakeService {
+        fn running(&self) -> bool {
+            self.calls.borrow_mut().push("query");
+            self.running
+        }
+        fn stop(&self) -> bool {
+            self.calls.borrow_mut().push("stop");
+            self.stops
+        }
+        fn delete(&self) -> io::Result<()> {
+            self.calls.borrow_mut().push("delete");
+            if self.delete_fails {
+                return Err(io::Error::from_raw_os_error(5));
+            }
+            Ok(())
+        }
+        fn start(&self) -> io::Result<()> {
+            self.calls.borrow_mut().push("start");
+            if self.start_fails {
+                return Err(io::Error::from_raw_os_error(1058));
+            }
+            Ok(())
+        }
+    }
+
+    /// A service stopped to be deleted and then not deleted is started
+    /// again when it was running; when even that fails, the sentence says
+    /// it is stopped and not removed, and what to do.
+    #[test]
+    fn a_service_that_stops_but_will_not_go_is_started_again_or_said_to_be_stopped() {
+        let removed = FakeService {
+            running: true,
+            stops: true,
+            ..Default::default()
+        };
+        assert_eq!(remove_service("Acme", &removed), Ok(()));
+        assert_eq!(*removed.calls.borrow(), vec!["query", "stop", "delete"]);
+
+        let restarted = FakeService {
+            running: true,
+            stops: true,
+            delete_fails: true,
+            ..Default::default()
+        };
+        let said = remove_service("Acme", &restarted);
+        assert_eq!(
+            *restarted.calls.borrow(),
+            vec!["query", "stop", "delete", "start"]
+        );
+        assert!(
+            matches!(&said, Err(Failure::Failed(s)) if s.contains("started again")),
+            "{said:?}"
+        );
+
+        let stranded = FakeService {
+            running: true,
+            stops: true,
+            delete_fails: true,
+            start_fails: true,
+            ..Default::default()
+        };
+        let said = remove_service("Acme", &stranded);
+        assert!(
+            matches!(&said, Err(Failure::Failed(s))
+                if s.contains("stopped and not removed") && s.contains("Services")),
+            "{said:?}"
+        );
+
+        // One that was not running is not started.
+        let idle = FakeService {
+            running: false,
+            stops: true,
+            delete_fails: true,
+            ..Default::default()
+        };
+        let said = remove_service("Acme", &idle);
+        assert_eq!(*idle.calls.borrow(), vec!["query", "stop", "delete"]);
+        assert!(
+            matches!(&said, Err(Failure::Failed(s)) if s.contains("as it was")),
+            "{said:?}"
+        );
+
+        // One that will not stop is not deleted.
+        let stuck = FakeService {
+            running: true,
+            ..Default::default()
+        };
+        assert!(remove_service("Acme", &stuck).is_err());
+        assert_eq!(*stuck.calls.borrow(), vec!["query", "stop"]);
     }
 
     #[test]
