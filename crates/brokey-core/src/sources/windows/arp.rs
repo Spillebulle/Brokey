@@ -454,8 +454,7 @@ fn steam_app(command: &Command) -> Option<String> {
         return None;
     };
     let id = only.strip_prefix("steam://uninstall/")?;
-    (!id.is_empty() && id.len() <= 10 && id.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| id.to_string())
+    crate::cleanup::internal::is_steam_app_id(id).then(|| id.to_string())
 }
 
 /// Whether a key name is shaped like an MSI ProductCode: braces around a
@@ -575,14 +574,17 @@ pub fn msiexec_program() -> String {
 pub fn removal_step(e: &RawEntry, msiexec: &str) -> Option<Step> {
     let name = e.display_name.clone().unwrap_or_else(|| e.key_name.clone());
     let command = match removal(e)? {
+        // Not `steam.exe` itself: when Steam is not running that process is
+        // the Steam client, and the step would last until Steam closed. The
+        // address goes to Explorer, which hands it to Steam and returns, and
+        // the step after it waits for the key to go.
         Removal::Steam(app) => {
-            let steam = e.uninstall_string.as_deref().and_then(command)?;
             return Some(Step {
                 source: SourceKind::Arp,
                 title: format!("Removing {name} through Steam"),
                 command: Command {
-                    program: steam.program,
-                    args: vec![format!("steam://uninstall/{app}")],
+                    program: crate::cleanup::internal::STEAM_UNINSTALL.to_string(),
+                    args: vec![app],
                     env: Vec::new(),
                     cwd: None,
                 },
@@ -1656,9 +1658,10 @@ mod tests {
         assert!(!step.needs_root, "never through the helper");
         assert_eq!(
             step.command.program,
-            r"C:\Program Files (x86)\Steam\steam.exe"
+            crate::cleanup::internal::STEAM_UNINSTALL,
+            "handed to Explorer as an address, never steam.exe itself"
         );
-        assert_eq!(step.command.args, vec!["steam://uninstall/1091500"]);
+        assert_eq!(step.command.args, vec!["1091500"]);
         assert_eq!(step.title, "Removing Cyberpunk 2077 through Steam");
     }
 

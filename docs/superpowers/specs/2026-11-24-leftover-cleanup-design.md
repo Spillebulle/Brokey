@@ -488,8 +488,29 @@ Where the build departed from or settled what is written above.
   elevates for any reason gets a root `EMPTY` for each waiting machine
   entry it does not already restore or empty; a plan that does not elevate
   never gets one.
-- **Steam.** A Steam game's step starts `steam.exe steam://uninstall/<id>`
-  as the user. When Steam is already running that process hands the
-  address on and exits; when it is not, the process *is* the Steam client
-  and the step lasts until Steam is closed. Left as it is, said here, for a
-  later look.
+- **Steam.** A Steam game is not removed by running `steam.exe`: when Steam
+  is not running that process is the Steam client, and the step would last
+  until Steam closed and Cancel would kill Steam. Instead the step is
+  Brokey's own `STEAM_UNINSTALL` (one app id, digits only), which hands
+  `steam://uninstall/<id>` to Explorer as the user, the way opening an
+  application does, and returns at once without reading Explorer's exit
+  code, which means nothing. A plain Explorer step would not do, because
+  the runner fails a step on a non-zero code. `AWAIT_GONE` does the
+  waiting. A cancelled Steam uninstall ends with "Steam did not remove
+  <name>. It may have been cancelled. Remove the game from your Steam
+  library, then look in Installed." Forced removal is never offered for a
+  `Steam App <id>` entry, and the planner refuses one, because Steam keeps
+  its own record of the game.
+- **A clear that would do nothing is an error**, not a plan that says
+  "Nothing to do.": nothing ticked, or everything ticked already gone
+  ("Everything ticked has already gone, so nothing was cleared."). A plan
+  in which a clear is not the only operation is refused, so nothing before
+  it can move what it holds and two clears of one scan never share a
+  holding id.
+- **The self-elevating uninstaller's call is sealed.**
+  `transaction::elevate::shell_open` is `pub(crate)` and takes a
+  `cleanup::internal::Refused`, made only by `Refused::by` from the closed
+  list's replaceable refusal of that command. `SHELL_OPEN` names a full path
+  to an `.exe` and nothing else. It waits on the uninstaller in 250 ms
+  slices (`SHELL_OPEN_SLICE`); "Stop waiting" stops the wait and the plan
+  and never kills the uninstaller, which is the user's window.

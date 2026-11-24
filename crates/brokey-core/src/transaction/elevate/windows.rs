@@ -52,6 +52,8 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 
 use super::Elevated;
+use crate::cleanup::internal::{Refused, SHELL_OPEN_SLICE, STOPPED_WAITING};
+use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
 
 /// The base name no other run will choose, which the two pipe names are
 /// derived from. The process id alone is not enough: one session can run
@@ -551,17 +553,25 @@ fn quote_argument(arg: &str) -> String {
 /// the prompt Windows shows names that file, exactly as when it is started
 /// from Settings. Brokey asks for nothing here.
 ///
-/// It is reached only through `cleanup::internal`'s `SHELL_OPEN` step, which
-/// asks the closed list again first. It lives here so that every call to
-/// `ShellExecuteEx` in the workspace stays in one place to audit.
+/// It takes a [`Refused`], which only `cleanup::internal`'s `SHELL_OPEN`
+/// step can make, and only out of the closed list refusing that very command
+/// as one this account can replace. So nothing else in the workspace can get
+/// here. It lives here so that every call to `ShellExecuteEx` in the
+/// workspace stays in one place to audit.
+///
+/// The wait is in slices of `SHELL_OPEN_SLICE`, and when `cancelled` says so
+/// it stops waiting: the uninstaller is the user's window and is never
+/// killed.
 ///
 /// `Ok` is the exit code, or 0 when the shell handed the file on without a
 /// process to wait on; whether the uninstall happened is the next step's
 /// question, which looks at the uninstall key.
-pub fn shell_open(program: &Path, args: &[String]) -> Result<u32, String> {
+pub(crate) fn shell_open(refused: &Refused, cancelled: &dyn Fn() -> bool) -> Result<u32, String> {
+    let program = refused.program();
     let file_wide = wide_null(&program.to_string_lossy());
     let verb_wide = wide_null("open");
-    let parameters = args
+    let parameters = refused
+        .args()
         .iter()
         .map(|a| quote_argument(a))
         .collect::<Vec<_>>()
@@ -604,15 +614,36 @@ pub fn shell_open(program: &Path, args: &[String]) -> Result<u32, String> {
     // because of `SEE_MASK_NOCLOSEPROCESS`, checked non-null above; this
     // takes ownership of it so it is closed exactly once.
     let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess as RawHandle) };
-    let mut inner = Inner { process };
-    match inner.wait() {
-        Ok(code) => Ok(code.unwrap_or(0) as u32),
-        Err(e) => Err(format!(
+    let handle = process.as_raw_handle() as HANDLE;
+    let could_not_wait = |e: io::Error| {
+        format!(
             "Brokey could not wait for {} ({e}). Check whether it finished, then look in \
              Installed.",
             program.display()
-        )),
+        )
+    };
+    let slice = SHELL_OPEN_SLICE.as_millis() as u32;
+    loop {
+        // SAFETY: `handle` is the valid process handle `process` owns for
+        // the whole loop; this waits at most `slice` milliseconds.
+        let waited = unsafe { WaitForSingleObject(handle, slice) };
+        if waited == WAIT_OBJECT_0 {
+            break;
+        }
+        if waited != WAIT_TIMEOUT {
+            return Err(could_not_wait(io::Error::last_os_error()));
+        }
+        if cancelled() {
+            return Err(STOPPED_WAITING.to_string());
+        }
     }
+    let mut code: u32 = 0;
+    // SAFETY: the same valid, now-exited process handle, and a writable
+    // out-parameter.
+    if unsafe { GetExitCodeProcess(handle, &mut code) } == 0 {
+        return Err(could_not_wait(io::Error::last_os_error()));
+    }
+    Ok(code)
 }
 
 #[cfg(test)]

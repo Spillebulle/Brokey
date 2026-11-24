@@ -7,7 +7,7 @@ use crate::{Query, Source, Store};
 use std::path::PathBuf;
 
 const UNINSTALLER: &str = r"C:\Program Files (x86)\Acme\uninstall.exe";
-const STEAM: &str = r"C:\Program Files (x86)\Steam\steam.exe";
+const STEAM: &str = crate::cleanup::internal::STEAM_UNINSTALL;
 
 /// An Add/Remove source that answers `plan` with one removal step.
 struct Arp {
@@ -71,7 +71,7 @@ fn steam_game() -> Step {
     Step {
         source: SourceKind::Arp,
         title: "Removing Cyberpunk 2077 through Steam".to_string(),
-        command: command(STEAM, &["steam://uninstall/1091500"]),
+        command: command(STEAM, &["1091500"]),
         needs_root: false,
         weight: 10,
     }
@@ -654,4 +654,53 @@ fn every_cleanup_step_is_one_of_brokeys_own() {
             programs(&plan)
         );
     }
+}
+
+#[test]
+fn a_clear_with_everything_gone_says_so_rather_than_succeeding() {
+    let mut machine = Machine::new();
+    scanned(&machine, false, None);
+    machine.view = Some(FixtureView::from_json("{}"));
+    let err = machine
+        .plan(&store(uninstaller), &[clear_op(&["item-0", "item-2"])])
+        .unwrap_err();
+    assert_eq!(err.message, ALL_GONE);
+}
+
+#[test]
+fn a_clear_with_nothing_ticked_says_so() {
+    let machine = Machine::new();
+    scanned(&machine, false, None);
+    let err = machine
+        .plan(&store(uninstaller), &[clear_op(&[])])
+        .unwrap_err();
+    assert_eq!(err.message, NOTHING_TICKED);
+}
+
+#[test]
+fn a_clear_is_never_planned_beside_anything_else() {
+    let machine = Machine::new();
+    scanned(&machine, false, None);
+    let store = store(uninstaller);
+    for ops in [
+        vec![clear_op(&["item-0"]), clear_op(&["item-1"])],
+        vec![remove(), clear_op(&["item-0"])],
+        vec![clear_op(&["item-0"]), Op::EmptyHolding { holding: None }],
+    ] {
+        let err = machine.plan(&store, &ops).unwrap_err();
+        assert_eq!(err.message, CLEAR_ALONE, "{ops:?}");
+    }
+}
+
+#[test]
+fn a_steam_game_is_never_removed_by_force() {
+    let mut machine = Machine::new();
+    let mut game = hints();
+    game.name = "Cyberpunk 2077".to_string();
+    game.uninstall_key = Some((Hive::Hklm32, "Steam App 1091500".to_string()));
+    machine.hints = Some(game);
+    let err = machine
+        .plan(&store(steam_game), &[Op::ForceRemove { package: acme() }])
+        .unwrap_err();
+    assert!(err.message.contains("Steam library"), "{}", err.message);
 }

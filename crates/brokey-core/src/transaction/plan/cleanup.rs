@@ -11,7 +11,7 @@ use crate::cleanup::hints::Hints;
 use crate::cleanup::holding::{self, HoldItem, Listing};
 use crate::cleanup::internal::{
     AWAIT_GONE, EMPTY, HOLD, HoldPayload, MSI_UNREGISTER, RESTORE, SCAN, SHELL_OPEN, ScanPayload,
-    Scans,
+    Scans, is_steam_app_key,
 };
 use crate::cleanup::view::{SystemView, ViewError};
 use crate::model::*;
@@ -105,8 +105,29 @@ pub fn force(package: &PackageRef, planning: &Planning) -> Result<Vec<Step>> {
             package.id
         ))
     })?;
+    // Steam keeps its own record of a game, which forcing the uninstall key
+    // away would leave behind; Steam's library is where it is removed.
+    if hints
+        .uninstall_key
+        .as_ref()
+        .is_some_and(|(_, key)| is_steam_app_key(key))
+    {
+        return Err(Error::new(format!(
+            "Brokey does not remove a Steam game by force. Remove {} from your Steam library.",
+            hints.name
+        )));
+    }
     Ok(vec![scan_step(&hints, true)])
 }
+
+/// The sentence for a clear with nothing left to do.
+pub const ALL_GONE: &str = "Everything ticked has already gone, so nothing was cleared.";
+/// The sentence for a clear with nothing ticked.
+pub const NOTHING_TICKED: &str =
+    "Nothing was ticked, so nothing was cleared. Tick what to move to the holding area.";
+/// The sentence for a clear asked for beside anything else.
+pub const CLEAR_ALONE: &str = "Clearing leftovers is a change of its own. Clear them first, then \
+                               make the other changes.";
 
 /// The sentence the confirm step shows before an uninstaller starts itself.
 pub fn shell_open_notice(name: &str) -> String {
@@ -248,6 +269,9 @@ pub fn clear(scan: &str, ticked: &[String], planning: &Planning) -> Result<Vec<S
                  the scan. Nothing was cleared.",
             )
         })?;
+    if ticked.is_empty() {
+        return Err(Error::new(NOTHING_TICKED));
+    }
     let name = record.findings.name.clone();
     let source = record.findings.package.source;
     let mut user = Vec::new();
@@ -310,6 +334,11 @@ pub fn clear(scan: &str, ticked: &[String], planning: &Planning) -> Result<Vec<S
             vec![code.clone(), holding],
             true,
         ));
+    }
+    // An empty plan would finish and say "Nothing to do." as if it had
+    // worked; the user should hear why nothing moved.
+    if steps.is_empty() {
+        return Err(Error::new(ALL_GONE));
     }
     Ok(steps)
 }

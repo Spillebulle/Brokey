@@ -6,8 +6,8 @@
 //! closed list: [`HOLD`] (move these items to the holding area), [`RESTORE`]
 //! (put a holding entry back), [`EMPTY`] (delete one for good, or all) and
 //! [`MSI_UNREGISTER`] (clear what the Windows Installer still records for a
-//! product that was removed by force). The other three, [`AWAIT_GONE`],
-//! [`SCAN`] and [`SHELL_OPEN`], only ever run as the user and are refused in
+//! product that was removed by force). The other four, [`AWAIT_GONE`],
+//! [`SCAN`], [`SHELL_OPEN`] and [`STEAM_UNINSTALL`], only ever run as the user and are refused in
 //! a step that asks for Administrator.
 //!
 //! [`check`] is the rule, and it is asked twice: by the closed list before
@@ -56,6 +56,21 @@ pub const AWAIT_GONE: &str = "brokey:await-gone";
 pub const SCAN: &str = "brokey:scan";
 /// `args` are the program and its arguments. As the user only.
 pub const SHELL_OPEN: &str = "brokey:shell-open";
+/// `args[0]` is a Steam app id, digits only. As the user only: the address
+/// `steam://uninstall/<id>` is handed to Explorer, which hands it to Steam.
+pub const STEAM_UNINSTALL: &str = "brokey:steam-uninstall";
+
+/// The start of the uninstall key name Steam gives each game.
+pub const STEAM_APP_KEY: &str = "Steam App ";
+
+/// How long [`SHELL_OPEN`] waits on the uninstaller between two looks at
+/// the cancel flag.
+pub const SHELL_OPEN_SLICE: Duration = Duration::from_millis(250);
+
+/// Why [`SHELL_OPEN`] stopped: the user stopped waiting. The uninstaller is
+/// never killed; it is the user's window.
+pub const STOPPED_WAITING: &str = "Brokey stopped waiting for the uninstaller. It is still open; \
+                                   finish it or close it yourself.";
 
 /// How long [`AWAIT_GONE`] leaves between two looks at the uninstall key.
 pub const AWAIT_POLL: Duration = Duration::from_secs(2);
@@ -76,10 +91,64 @@ pub fn not_removed(name: &str) -> String {
     )
 }
 
+/// [`not_removed`] for a Steam game. Steam keeps its own record of the game,
+/// so forced removal is never offered for one: the game is removed from
+/// Steam's library instead.
+pub fn steam_not_removed(name: &str) -> String {
+    format!(
+        "Steam did not remove {name}. It may have been cancelled. Remove the game from your \
+         Steam library, then look in Installed."
+    )
+}
+
+/// Whether an uninstall key is one Steam wrote for a game.
+pub fn is_steam_app_key(key: &str) -> bool {
+    key.strip_prefix(STEAM_APP_KEY)
+        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// A Steam app id as [`STEAM_UNINSTALL`] accepts it: one to ten digits.
+pub fn is_steam_app_id(id: &str) -> bool {
+    (1..=10).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// The steps that may run as Administrator.
 const ROOT: [&str; 4] = [HOLD, RESTORE, EMPTY, MSI_UNREGISTER];
 /// The steps that never may.
-const SESSION_ONLY: [&str; 3] = [AWAIT_GONE, SCAN, SHELL_OPEN];
+const SESSION_ONLY: [&str; 4] = [AWAIT_GONE, SCAN, SHELL_OPEN, STEAM_UNINSTALL];
+
+/// The one thing that reaches `transaction::elevate::shell_open`: an
+/// Add/Remove uninstaller the closed list has just refused because this
+/// account could replace it, and for no other reason. Its fields are private
+/// to this module, and the only constructor, [`Refused::by`], is called only
+/// by [`SHELL_OPEN`]'s step with the closed list's answer in hand. So no
+/// other code in the workspace can ask the shell to open anything.
+pub(crate) struct Refused {
+    program: PathBuf,
+    args: Vec<String>,
+}
+
+impl Refused {
+    /// The witness, when `answer` is the closed list refusing `program` as
+    /// one this account can replace; `None` for any other answer.
+    fn by(program: &str, args: &[String], answer: Result<(), String>) -> Option<Refused> {
+        match answer {
+            Err(why) if crate::transaction::allow::is_can_be_replaced(&why) => Some(Refused {
+                program: PathBuf::from(program),
+                args: args.to_vec(),
+            }),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn program(&self) -> &Path {
+        &self.program
+    }
+
+    pub(crate) fn args(&self) -> &[String] {
+        &self.args
+    }
+}
 
 /// What [`HOLD`] carries.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,17 +305,25 @@ pub(crate) fn check_with(
             ));
         }
         // What the shell is asked to open is an uninstaller the registry
-        // names in full, never a word for it to look up.
+        // names in full, never a word for it to look up, and a program
+        // starting itself, never a document or a folder for some other
+        // program to open.
         if program == SHELL_OPEN
-            && step
-                .command
-                .args
-                .first()
-                .is_none_or(|p| path_parts(p).is_none())
+            && step.command.args.first().is_none_or(|p| {
+                path_parts(p).is_none() || !p.to_ascii_lowercase().ends_with(".exe")
+            })
         {
             return Err(format!(
                 "Brokey refused {program}, because it does not name a program by its full \
                  path. Remove the application again from Brokey."
+            ));
+        }
+        if program == STEAM_UNINSTALL
+            && !matches!(step.command.args.as_slice(), [id] if is_steam_app_id(id))
+        {
+            return Err(format!(
+                "Brokey refused {program}, because it does not carry one Steam app id. Remove \
+                 the game again from Brokey."
             ));
         }
         return Ok(());
@@ -1268,7 +1345,12 @@ pub(crate) fn run_in(
                 .map_err(|_| unreadable_payload(program))?;
             scan_step(payload, ctx, view, session)
         }
-        SHELL_OPEN => shell_open_step(args, session),
+        SHELL_OPEN => shell_open_step(args, ctx, session),
+        STEAM_UNINSTALL => {
+            let id = one_argument(program, args)?;
+            session.open_steam(&format!("steam://uninstall/{id}"))?;
+            Ok(None)
+        }
         // `check_with` refuses every other name before this.
         _ => Err(unreadable_payload(program)),
     }
@@ -1277,7 +1359,7 @@ pub(crate) fn run_in(
 // ---------------------------------------------------------------------------
 // The steps that run as the user
 
-/// What the three session steps ask of the machine beyond the guard's view,
+/// What the session steps ask of the machine beyond the guard's view,
 /// so that a test answers from a table and never waits two seconds, reads
 /// the real registry or starts a program.
 pub(crate) trait Session {
@@ -1290,9 +1372,12 @@ pub(crate) trait Session {
     fn installed(&self) -> (Vec<Package>, u32);
     /// What the closed list says of a step that would run as Administrator.
     fn closed_list(&self, step: &Step) -> Result<(), String>;
-    /// Start a program as the user through the shell and wait for it; its
-    /// exit code, or the sentence for why it did not start.
-    fn shell_open(&self, program: &Path, args: &[String]) -> Result<u32, String>;
+    /// Start the uninstaller the closed list refused as the user through
+    /// the shell, and wait for it while `cancelled` says to; its exit code,
+    /// or the sentence for why it did not start or why waiting stopped.
+    fn shell_open(&self, refused: &Refused, cancelled: &dyn Fn() -> bool) -> Result<u32, String>;
+    /// Hand a `steam://` address to Explorer, as the user, without waiting.
+    fn open_steam(&self, url: &str) -> Result<(), String>;
 }
 
 /// This machine.
@@ -1348,19 +1433,39 @@ impl Session for LiveSession {
         }
     }
 
-    fn shell_open(&self, program: &Path, args: &[String]) -> Result<u32, String> {
+    fn shell_open(&self, refused: &Refused, cancelled: &dyn Fn() -> bool) -> Result<u32, String> {
         #[cfg(windows)]
         {
-            crate::transaction::elevate::shell_open(program, args)
+            crate::transaction::elevate::shell_open(refused, cancelled)
         }
         #[cfg(not(windows))]
         {
-            let _ = args;
+            let _ = cancelled;
             Err(format!(
                 "{} can only be started this way on Windows.",
-                program.display()
+                refused.program().display()
             ))
         }
+    }
+
+    fn open_steam(&self, url: &str) -> Result<(), String> {
+        // Explorer hands the address to Steam, as the user, and returns;
+        // its exit code says nothing either way, so it is not read. A
+        // thread reaps it so it leaves no zombie handle behind.
+        let program = crate::launch::explorer_program();
+        let mut child = std::process::Command::new(&program)
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                format!("Brokey could not hand the game to Steam ({e}). Remove it from Steam.")
+            })?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
     }
 }
 
@@ -1408,7 +1513,11 @@ fn await_gone(
         }
         if ctx.finished.swap(false, Ordering::SeqCst) {
             return if session.listed(*hive, key) {
-                Err(not_removed(&hints.name))
+                Err(if is_steam_app_key(key) {
+                    steam_not_removed(&hints.name)
+                } else {
+                    not_removed(&hints.name)
+                })
             } else {
                 Ok(None)
             };
@@ -1471,7 +1580,11 @@ fn scan_step(
 /// for what the closed list still refuses as a program this account can
 /// replace and which the registry records as an Add/Remove removal; for
 /// anything else Brokey starts nothing.
-fn shell_open_step(args: &[String], session: &dyn Session) -> Result<Option<String>, String> {
+fn shell_open_step(
+    args: &[String],
+    ctx: &mut InternalContext,
+    session: &dyn Session,
+) -> Result<Option<String>, String> {
     let Some((program, rest)) = args.split_first() else {
         return Err(unreadable_payload(SHELL_OPEN));
     };
@@ -1487,16 +1600,13 @@ fn shell_open_step(args: &[String], session: &dyn Session) -> Result<Option<Stri
         needs_root: true,
         weight: 0,
     };
-    match session.closed_list(&as_removal) {
-        Err(why) if crate::transaction::allow::is_can_be_replaced(&why) => {}
-        _ => {
-            return Err(format!(
-                "Brokey did not start {program}, because it is not an uninstaller Windows has \
-                 to ask about. Remove the application again from Brokey."
-            ));
-        }
-    }
-    match session.shell_open(Path::new(program), rest)? {
+    let Some(refused) = Refused::by(program, rest, session.closed_list(&as_removal)) else {
+        return Err(format!(
+            "Brokey did not start {program}, because it is not an uninstaller Windows has to \
+             ask about. Remove the application again from Brokey."
+        ));
+    };
+    match session.shell_open(&refused, ctx.cancelled)? {
         0 => Ok(None),
         // The key, not the code, says whether it worked: the next step
         // looks at it.

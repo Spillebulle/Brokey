@@ -127,6 +127,9 @@ crates/brokey-core/src/
   appstream/        catalogue XML parser, icon resolution, index
   group.rs          packages -> apps. Pure. Fixture-tested
   transaction/      Plan building and the Runner (spawns the helper and user-session steps)
+    plan/cleanup.rs the cleanup's planning: wait and scan after a removal,
+                    forced removal, clearing, restoring, emptying, and the
+                    uninstaller that elevates itself
     elevate/        the one place that obtains privilege: unix.rs is pkexec with
                     piped stdio, windows.rs is ShellExecuteEx with runas and the
                     two named pipes the plan and the events travel on
@@ -201,17 +204,22 @@ These were decided before the first line and are not re-litigated in a fix:
   replace", and Brokey will not elevate a file the user could have
   replaced. So it is started **as the user** and elevates itself through
   its own manifest, and the prompt Windows shows names that file, exactly
-  as when it is started from Settings. It is held narrow in code: the
-  planner (`transaction/plan/cleanup.rs`, `self_elevating`) rewrites a step
-  into `cleanup::internal`'s `SHELL_OPEN` only when it came from an
-  Add/Remove entry and `allow::check_step` refused it with that sentence
-  and no other; the step asks the closed list again just before it runs
-  and starts nothing for any other answer; and it is
-  `transaction::elevate::shell_open`, `ShellExecuteEx` with the `open` verb,
-  never `runas`, so Brokey asks for nothing and Windows alone decides
-  whether to prompt. The confirm step has said "Windows will ask you to
-  allow ..." before it runs. It lives in `transaction/elevate/` all the
-  same, so the one place to audit stays one place.
+  as when it is started from Settings. It is held narrow in code, in three
+  places that each close what the last one leaves open: the planner
+  (`transaction/plan/cleanup.rs`, `self_elevating`) rewrites a step into
+  `cleanup::internal`'s `SHELL_OPEN` only when it came from an Add/Remove
+  entry and `allow::check_step` refused it with that sentence and no other,
+  and the closed list then admits that step only for a full path to an
+  `.exe`; `transaction::elevate::shell_open` is `pub(crate)` and takes a
+  `Refused`, whose fields are private to `cleanup::internal` and which
+  `Refused::by` makes only out of the closed list refusing that very
+  command as replaceable, asked again by the step just before it runs, so
+  no other code can reach the call; and the call is `ShellExecuteEx` with
+  the `open` verb, never `runas`, so Brokey asks for nothing and Windows
+  alone decides whether to prompt. Stopping the wait never kills the
+  uninstaller. The confirm step has said "Windows will ask you to allow
+  ..." before it runs. It lives in `transaction/elevate/` all the same, so
+  the one place to audit stays one place.
 - **A source never runs anything.** `Source::plan` returns steps; the Runner
   runs them. This is what makes every source testable with fixtures.
 - **Opening an installed application is the one process started outside the

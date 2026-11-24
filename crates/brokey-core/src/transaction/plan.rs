@@ -77,6 +77,12 @@ fn live<R>(store: &Store, scans: &Scans, f: impl FnOnce(&Planning) -> R) -> R {
 
 /// [`build`], with what the cleanup asks of the machine handed in.
 pub fn build_in(store: &Store, ops: &[Op], planning: &Planning) -> Result<Plan> {
+    // A clear is a plan of its own: its HOLDs are checked before anything
+    // runs, so nothing before it may move what it holds, and two clears of
+    // one scan in one plan would share a holding id.
+    if ops.len() > 1 && ops.iter().any(|op| matches!(op, Op::ClearLeftovers { .. })) {
+        return Err(crate::Error::new(cleanup::CLEAR_ALONE));
+    }
     let mut gatherer = Gatherer {
         store,
         planning,

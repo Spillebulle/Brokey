@@ -663,6 +663,11 @@ struct FakeSession {
     closed_list: Option<Result<(), String>>,
     opened: std::cell::RefCell<Vec<(PathBuf, Vec<String>)>>,
     exit_code: u32,
+    /// Stands in for the uninstaller still running: `shell_open` waits on
+    /// the cancel flag, as the live one does in its slices.
+    still_running: bool,
+    /// What `open_steam` was handed.
+    steam: std::cell::RefCell<Vec<String>>,
 }
 
 impl Session for FakeSession {
@@ -680,11 +685,21 @@ impl Session for FakeSession {
     fn closed_list(&self, _: &Step) -> Result<(), String> {
         self.closed_list.clone().unwrap_or(Ok(()))
     }
-    fn shell_open(&self, program: &Path, args: &[String]) -> Result<u32, String> {
+    fn shell_open(&self, refused: &Refused, cancelled: &dyn Fn() -> bool) -> Result<u32, String> {
         self.opened
             .borrow_mut()
-            .push((program.to_path_buf(), args.to_vec()));
+            .push((refused.program().to_path_buf(), refused.args().to_vec()));
+        if self.still_running {
+            while !cancelled() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            return Err(STOPPED_WAITING.to_string());
+        }
         Ok(self.exit_code)
+    }
+    fn open_steam(&self, url: &str) -> Result<(), String> {
+        self.steam.borrow_mut().push(url.to_string());
+        Ok(())
     }
 }
 
@@ -1028,6 +1043,135 @@ fn an_uninstaller_that_ends_with_a_code_leaves_the_verdict_to_the_key() {
     );
     let note = result.unwrap().unwrap();
     assert!(note.contains("code 2"), "{note}");
+}
+
+fn replaceable_answer() -> Option<Result<(), String>> {
+    Some(Err(format!(
+        "{}{REPLACEABLE}.",
+        crate::transaction::allow::CAN_BE_REPLACED
+    )))
+}
+
+#[test]
+fn shell_open_of_anything_but_a_program_is_refused() {
+    let view = FixtureView::from_json("{}");
+    for target in [
+        r"C:\Program Files (x86)\Steam\readme.txt",
+        r"C:\Program Files (x86)\Steam",
+        r"C:\Program Files (x86)\Steam\uninstall.bat",
+    ] {
+        let session = FakeSession {
+            closed_list: replaceable_answer(),
+            ..Default::default()
+        };
+        let (result, _, _) = run_session(&shell_open_of(target), &view, &session, false, false);
+        assert!(result.unwrap_err().contains("full path"), "{target}");
+        assert!(session.opened.borrow().is_empty(), "{target}");
+    }
+}
+
+/// "Stop waiting" while a self-elevating uninstaller is open stops the wait
+/// and the plan, and kills nothing: the fake's uninstaller is still running
+/// when the step returns.
+#[test]
+fn stop_waiting_on_a_self_elevating_uninstaller_leaves_it_running() {
+    let session = FakeSession {
+        closed_list: replaceable_answer(),
+        still_running: true,
+        ..Default::default()
+    };
+    let (result, _, _) = run_session(
+        &shell_open_of(REPLACEABLE),
+        &FixtureView::from_json("{}"),
+        &session,
+        false,
+        true,
+    );
+    assert_eq!(result, Err(STOPPED_WAITING.to_string()));
+    assert_eq!(session.opened.borrow().len(), 1);
+}
+
+#[test]
+fn the_witness_is_made_only_from_a_replaceable_refusal() {
+    let args = vec!["/S".to_string()];
+    assert!(Refused::by(REPLACEABLE, &args, Ok(())).is_none());
+    assert!(Refused::by(REPLACEABLE, &args, Err("The helper refused it.".into())).is_none());
+    let witness = Refused::by(REPLACEABLE, &args, replaceable_answer().unwrap())
+        .expect("the one refusal it is made from");
+    assert_eq!(witness.program(), Path::new(REPLACEABLE));
+    assert_eq!(witness.args(), args.as_slice());
+}
+
+#[test]
+fn a_steam_game_is_handed_to_steam_through_its_address() {
+    let session = FakeSession::default();
+    let (result, events, _) = run_session(
+        &step(STEAM_UNINSTALL, vec!["1091500".into()], false),
+        &FixtureView::from_json("{}"),
+        &session,
+        false,
+        false,
+    );
+    assert_eq!(result, Ok(None), "it returns at once; the next step waits");
+    assert!(events.is_empty());
+    assert_eq!(*session.steam.borrow(), vec!["steam://uninstall/1091500"]);
+}
+
+#[test]
+fn a_steam_step_carries_one_app_id_of_digits_and_nothing_else() {
+    for args in [
+        vec![],
+        vec!["10x".to_string()],
+        vec!["10 -silent".to_string()],
+        vec!["12345678901".to_string()],
+        vec!["10".to_string(), "20".to_string()],
+    ] {
+        let session = FakeSession::default();
+        let (result, _, _) = run_session(
+            &step(STEAM_UNINSTALL, args.clone(), false),
+            &FixtureView::from_json("{}"),
+            &session,
+            false,
+            false,
+        );
+        assert!(result.is_err(), "{args:?}");
+        assert!(session.steam.borrow().is_empty(), "{args:?}");
+    }
+    let root = step(STEAM_UNINSTALL, vec!["10".into()], true);
+    assert!(
+        check_with(
+            &root,
+            &FixtureView::from_json("{}"),
+            &temp_roots(Path::new("x")),
+            &PLAIN
+        )
+        .is_err()
+    );
+}
+
+/// A Steam game whose uninstall was cancelled in Steam: the sentence sends
+/// the user to Steam's library and never offers forced removal.
+#[test]
+fn a_cancelled_steam_uninstall_points_at_the_steam_library() {
+    let mut hints = acme_hints();
+    hints.name = "Cyberpunk 2077".to_string();
+    hints.uninstall_key = Some((Hive::Hklm32, "Steam App 1091500".to_string()));
+    let session = FakeSession {
+        listed: vec![true],
+        ..Default::default()
+    };
+    let wait = step(
+        AWAIT_GONE,
+        vec![serde_json::to_string(&hints).unwrap()],
+        false,
+    );
+    let (result, events, _) =
+        run_session(&wait, &FixtureView::from_json("{}"), &session, true, false);
+    let err = result.unwrap_err();
+    assert_eq!(err, steam_not_removed("Cyberpunk 2077"));
+    assert!(err.contains("Steam library"), "{err}");
+    assert!(!err.contains("Forced removal"), "{err}");
+    assert!(!events.iter().any(|e| matches!(e, Event::Leftovers { .. })));
 }
 
 #[test]
