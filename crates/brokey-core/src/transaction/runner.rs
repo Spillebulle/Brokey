@@ -1309,7 +1309,6 @@ pub fn summary(ops: &[Op]) -> String {
     summary_with(ops, &Scans::default())
 }
 
-/// [`summary`], with the scans a clear names its application from.
 /// A scan id's place in time: `scan-<millis>-<counter>`, compared as
 /// numbers. An id of another shape comes first.
 fn scan_order(id: &str) -> (u128, u32) {
@@ -1319,6 +1318,7 @@ fn scan_order(id: &str) -> (u128, u32) {
     (millis, counter)
 }
 
+/// [`summary`], with the scans a clear names its application from.
 pub fn summary_with(ops: &[Op], scans: &Scans) -> String {
     if ops.is_empty() {
         return "Finished.".to_string();
