@@ -821,6 +821,40 @@ fn a_forced_msi_is_unregistered_only_when_its_key_or_folder_is_ticked() {
     }
 }
 
+/// What decides the unregister is what the clear moves, not what was
+/// ticked: a folder gone since the scan, or one another application now
+/// uses, does not bring it.
+#[test]
+fn a_ticked_folder_the_clear_leaves_out_does_not_unregister() {
+    let mut machine = Machine::new();
+    scanned(&machine, true, Some(CODE));
+    let store = store(uninstaller);
+    let ticked = clear_op(&["item-0", "item-2"]);
+    machine.view = Some(after_the_scan(""));
+    let plan = machine.plan(&store, std::slice::from_ref(&ticked)).unwrap();
+    assert_eq!(programs(&plan), vec![HOLD, HOLD, MSI_UNREGISTER]);
+
+    // Gone since the scan: only the roaming folder is still there.
+    machine.view = Some(FixtureView::from_json(
+        r#"{ "dirs": { "C:\\Users\\you\\AppData\\Roaming\\Acme": [] } }"#,
+    ));
+    let plan = machine.plan(&store, std::slice::from_ref(&ticked)).unwrap();
+    assert_eq!(programs(&plan), vec![HOLD]);
+
+    // Used now by an application installed into it since.
+    machine.view = Some(after_the_scan(
+        r#""Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall": { "subkeys": ["Acme Draw"] },
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Acme Draw": {
+            "values": [
+                ["DisplayName", "Acme Draw"],
+                ["InstallLocation", "C:\\Program Files (x86)\\Acme\\Draw"]
+            ]
+        }"#,
+    ));
+    let plan = machine.plan(&store, std::slice::from_ref(&ticked)).unwrap();
+    assert_eq!(programs(&plan), vec![HOLD]);
+}
+
 #[test]
 fn an_msi_removed_by_its_own_uninstaller_is_not_unregistered_again() {
     let machine = Machine::new();

@@ -284,6 +284,9 @@ pub fn clear(scan: &str, ticked: &[String], planning: &Planning) -> Result<Vec<S
     let source = record.findings.package.source;
     let holding = holding_id(&name);
     let machine_holding = format!("{holding}-m");
+    // Decided from what the clear moves, never from what was ticked: a key
+    // or folder gone since the scan, or used now, does not bring it.
+    let moves_registration = says_it_is_there(&record.hints, user.iter().chain(&machine));
     let mut steps = Vec::new();
     for (items, root) in [(user, false), (machine, true)] {
         if items.is_empty() {
@@ -310,7 +313,7 @@ pub fn clear(scan: &str, ticked: &[String], planning: &Planning) -> Result<Vec<S
     }
     if record.forced
         && let Some(code) = &record.hints.product_code
-        && says_it_is_there(&record, ticked)
+        && moves_registration
     {
         steps.push(internal(
             source,
@@ -334,11 +337,10 @@ pub fn clear(scan: &str, ticked: &[String], planning: &Planning) -> Result<Vec<S
     Ok(steps)
 }
 
-/// Whether what was ticked includes what says the application is there:
-/// its uninstall key, or its install folder however that is spelt. Without
-/// either, its Windows Installer registration is left as it is.
-fn says_it_is_there(record: &ScanRecord, ticked: &[String]) -> bool {
-    let hints = &record.hints;
+/// Whether what the clear moves includes what says the application is
+/// there: its uninstall key, or its install folder however that is spelt.
+/// Without either, its Windows Installer registration is left as it is.
+fn says_it_is_there<'a>(hints: &Hints, moved: impl IntoIterator<Item = &'a HoldItem>) -> bool {
     let key = hints.uninstall_key.as_ref().map(|(hive, key)| {
         format!(r"{}\{}\{key}", scan::hive_word(*hive), scan::UNINSTALL).to_lowercase()
     });
@@ -347,16 +349,11 @@ fn says_it_is_there(record: &ScanRecord, ticked: &[String]) -> bool {
         .flatten()
         .map(|d| shortcut::normalise(&d.to_string_lossy()))
         .collect();
-    record
-        .findings
-        .items
-        .iter()
-        .filter(|i| ticked.contains(&i.id))
-        .any(|i| match i.kind {
-            ItemKind::RegistryKey => key.as_deref() == Some(i.location.to_lowercase().as_str()),
-            ItemKind::Folder => folders.contains(&shortcut::normalise(&i.location)),
-            _ => false,
-        })
+    moved.into_iter().any(|i| match i.kind {
+        ItemKind::RegistryKey => key.as_deref() == Some(i.location.to_lowercase().as_str()),
+        ItemKind::Folder => folders.contains(&shortcut::normalise(&i.location)),
+        _ => false,
+    })
 }
 
 /// What a clear leaves where it is although it was ticked, one sentence
