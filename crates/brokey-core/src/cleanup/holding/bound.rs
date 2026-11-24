@@ -46,12 +46,13 @@ use windows_sys::Win32::Foundation::{
     RtlNtStatusToDosError, UNICODE_STRING,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, CreateFileW, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_INFO,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
-    FileAttributeTagInfo, FileBasicInfo, FileDispositionInfo, GetFileInformationByHandleEx,
-    GetFinalPathNameByHandleW, OPEN_EXISTING, SYNCHRONIZE, SetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, DELETE, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
+    FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_WRITE_ATTRIBUTES, FileAttributeTagInfo, FileBasicInfo, FileDispositionInfo,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+    OPEN_EXISTING, SYNCHRONIZE, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
@@ -273,6 +274,26 @@ fn open_checked(
     Ok(handle)
 }
 
+/// A file opened to be copied that has more than one name: a hard link,
+/// which anyone may make to a file they can read, a system file among
+/// them. Copied as Administrator it would hand its content to whoever made
+/// the link, and the removal after the copy would take a name from it.
+fn refuse_hard_link(handle: &OwnedHandle, path: &Path) -> io::Result<()> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: an open handle and a plain-data out parameter.
+    if unsafe { GetFileInformationByHandle(handle.as_raw_handle() as _, &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if info.nNumberOfLinks > 1 {
+        return Err(io::Error::other(format!(
+            "{} is also another file elsewhere on the drive (a hard link), so Brokey did not \
+             copy it",
+            text_of(path)
+        )));
+    }
+    Ok(())
+}
+
 fn delete_on_close(handle: &OwnedHandle) {
     let info = FILE_DISPOSITION_INFO { DeleteFile: true };
     // SAFETY: an open handle with DELETE access and a plain-data input.
@@ -487,6 +508,7 @@ impl Disk for Bound {
 
     fn copy_file(&mut self, from: &Path, to: &Path) -> io::Result<()> {
         let source = open_checked(from, GENERIC_READ | SYNCHRONIZE, ANY, Some(false))?;
+        refuse_hard_link(&source, from)?;
         let to_dir = parent_of(to)?;
         let parent = self.folder(to_dir)?;
         let target = create_in(

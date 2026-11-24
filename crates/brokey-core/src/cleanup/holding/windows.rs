@@ -2296,6 +2296,55 @@ pub(crate) mod tests {
         assert_eq!(privilege_state(NAME), Some(false));
     }
 
+    /// A file inside an item that is another name for a file elsewhere (a
+    /// hard link, which anyone may make to a file they can read, a system
+    /// file among them) is never copied, let alone moved, as Administrator:
+    /// the whole item stays where it is, and so does the other file.
+    #[test]
+    fn a_folder_holding_a_hard_link_is_never_copied() {
+        let temp = tempfile::tempdir().unwrap();
+        let elsewhere = temp.path().join("system.dll");
+        std::fs::write(&elsewhere, "system").unwrap();
+        let app = temp.path().join("disk").join("App");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("a.dat"), "a").unwrap();
+        std::fs::hard_link(&elsewhere, app.join("linked.dll")).unwrap();
+        let root = temp.path().join("holding");
+        let mut m = LiveMutate {
+            force_copy: true,
+            ..LiveMutate::new(temp.path().join("machine"))
+        };
+        let items = vec![HoldItem {
+            kind: ItemKind::Folder,
+            location: app.display().to_string(),
+        }];
+        let report = hold(&root, "copy-1", "Acme", &items, &mut m);
+        assert_eq!(report.held, 0, "{report:?}");
+        assert!(
+            report.failed[0].1.contains("hard link"),
+            "{:?}",
+            report.failed
+        );
+        assert_eq!(std::fs::read_to_string(app.join("a.dat")).unwrap(), "a");
+        assert_eq!(
+            std::fs::read_to_string(app.join("linked.dll")).unwrap(),
+            "system"
+        );
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "system");
+        assert!(!root.join("copy-1").exists(), "no copy is left behind");
+
+        // Asked directly, the one file is refused too, and nothing is made.
+        let mut disk = super::super::bound::Bound::default();
+        let to = temp.path().join("copy.dll");
+        let refused = super::super::Disk::copy_file(&mut disk, &app.join("linked.dll"), &to);
+        assert!(refused.is_err());
+        assert!(!to.exists());
+        // A file with one name is copied as before.
+        let copied = temp.path().join("a-copy.dat");
+        super::super::Disk::copy_file(&mut disk, &app.join("a.dat"), &copied).unwrap();
+        assert_eq!(std::fs::read_to_string(&copied).unwrap(), "a");
+    }
+
     #[test]
     fn the_machine_root_is_made_for_administrators_only_or_not_at_all() {
         use windows_sys::Win32::Security::Authorization::{
