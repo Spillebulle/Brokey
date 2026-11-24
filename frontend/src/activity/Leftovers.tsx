@@ -148,7 +148,7 @@ export function Leftovers({ plan, scan }: { plan: string; scan: string }) {
 
   const move = async () => {
     setStarting(true);
-    const intro = `Brokey moves ${plural(chosen.length, "item")} from ${found.name} to the holding area. Nothing is deleted yet: Settings can put it back, and empties it after 30 days.`;
+    const intro = `Brokey moves ${plural(chosen.length, "item")} from ${found.name} to the holding area. Nothing is deleted yet: Settings can put them back, and Brokey empties the holding area after 30 days.`;
     const started = await startOps([{ op: "clearleftovers", scan: found.scan, items: chosen.map((i) => i.id) }], `Move leftovers from ${found.name}`, intro);
     setStarting(false);
     if (started) close();

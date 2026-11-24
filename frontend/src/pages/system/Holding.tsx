@@ -19,8 +19,8 @@ function when(created: string): string {
 
 /** What reads under an entry's name. */
 function detail(e: HoldingEntry): string {
-  const kind = e.scope_machine ? "Needs Administrator" : "Yours";
-  return `${when(e.created)}, ${plural(e.items, "item")}. ${kind}.`;
+  const kind = e.scope_machine ? "Needs Administrator to restore or delete." : "Held in your account.";
+  return `Held since ${when(e.created)}, ${plural(e.items, "item")}. ${kind}`;
 }
 
 function EntryRow({ entry, busy }: { entry: HoldingEntry; busy: boolean }) {
