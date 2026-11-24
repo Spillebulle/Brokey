@@ -717,6 +717,9 @@ fn copy_then_remove(from: &Path, to: &Path, disk: &mut dyn Disk) -> Done<()> {
                 kept_new = true;
                 Ok(())
             }
+            // Gone by itself since the copy: nothing to remove, and the
+            // copy has it.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             other => other,
         }
     });
@@ -2844,6 +2847,34 @@ mod tests {
         assert_eq!(text(&to.join("a.dat")), "a");
         assert_eq!(text(&to.join("sub").join("b.dat")), "bb");
         assert!(!to.join("sub").join("new.txt").exists());
+    }
+
+    /// Plain `std::fs`, and a surveyed file deleted by someone else once the
+    /// copy is made and before anything is removed.
+    struct GoneMeanwhile(PathBuf);
+
+    impl Disk for GoneMeanwhile {
+        fn release(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    /// What has gone by itself after the copy needs no removing: the move
+    /// still succeeds, and the copy has it.
+    #[test]
+    fn a_file_gone_after_the_copy_does_not_fail_the_move() {
+        let mc = machine();
+        let app = mc.disk.join("App");
+        let to = mc.root.join("moved");
+        let got = move_with(
+            &app,
+            &to,
+            true,
+            &mut GoneMeanwhile(app.join("sub").join("b.dat")),
+        );
+        assert!(got.is_ok(), "{got:?}");
+        assert!(!app.exists());
+        assert_eq!(text(&to.join("sub").join("b.dat")), "bb");
     }
 
     /// A service that runs as an account with a password, or a task saved
