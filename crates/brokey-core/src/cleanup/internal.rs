@@ -128,10 +128,50 @@ enum Mode {
     Restore,
 }
 
+/// What a check asks of the machine directly rather than through the
+/// guard's view: whether each part of a path is a link, and whether the way
+/// to a registry key is. [`Live`] opens them; a test answers from a table.
+pub(crate) trait Machine {
+    /// One part of a path, in its `\\?\` spelling, opened as itself.
+    fn part(&self, verbatim: &str) -> Part;
+    /// The way to a key, each part opened as itself.
+    fn key(&self, hive: Hive, path: &str) -> Part;
+}
+
+/// This machine.
+pub(crate) struct Live;
+
+impl Machine for Live {
+    fn part(&self, verbatim: &str) -> Part {
+        open_part(verbatim)
+    }
+
+    fn key(&self, hive: Hive, path: &str) -> Part {
+        key_part(hive, path)
+    }
+}
+
+/// The two things a check reads with.
+struct Ask<'a> {
+    view: &'a dyn SystemView,
+    machine: &'a dyn Machine,
+}
+
 /// Whether one of Brokey's own steps may run, and why not when it may not.
 /// `view` is the machine as the guard reads it; `roots` is where a restore's
 /// manifest is read from.
 pub fn check(step: &Step, view: &dyn SystemView, roots: &Roots) -> Result<(), String> {
+    check_with(step, view, roots, &Live)
+}
+
+/// [`check`] with what is asked of the machine directly handed in.
+pub(crate) fn check_with(
+    step: &Step,
+    view: &dyn SystemView,
+    roots: &Roots,
+    machine: &dyn Machine,
+) -> Result<(), String> {
+    let ask = Ask { view, machine };
     let program = step.command.program.as_str();
     let root = step.needs_root;
     if !is_internal(program) || !(ROOT.contains(&program) || SESSION_ONLY.contains(&program)) {
@@ -159,12 +199,12 @@ pub fn check(step: &Step, view: &dyn SystemView, roots: &Roots) -> Result<(), St
     match program {
         HOLD => {
             let payload = hold_payload(args)?;
-            check_hold(&payload, root, view)
+            check_hold(&payload, root, &ask)
         }
         RESTORE => {
             let id = one_argument(program, args)?;
             check_id(id)?;
-            check_restore(roots.of(root), id, root, view)
+            check_restore(roots.of(root), id, root, &ask)
         }
         EMPTY => {
             let id = one_argument(program, args)?;
@@ -234,7 +274,7 @@ fn hold_payload(args: &[String]) -> Result<HoldPayload, String> {
     serde_json::from_str(json).map_err(|_| bad("its list of items could not be read"))
 }
 
-fn check_hold(payload: &HoldPayload, root: bool, view: &dyn SystemView) -> Result<(), String> {
+fn check_hold(payload: &HoldPayload, root: bool, ask: &Ask) -> Result<(), String> {
     check_id(&payload.holding)?;
     let name = payload.name.trim();
     if name.is_empty() || name.chars().count() > 260 || name.chars().any(char::is_control) {
@@ -254,7 +294,7 @@ fn check_hold(payload: &HoldPayload, root: bool, view: &dyn SystemView) -> Resul
     }
     let set: Vec<String> = payload.items.iter().map(|i| i.location.clone()).collect();
     for item in &payload.items {
-        check_item(item, root, Mode::Hold, view, &set)?;
+        check_item(item, root, Mode::Hold, ask, &set)?;
     }
     Ok(())
 }
@@ -262,7 +302,7 @@ fn check_hold(payload: &HoldPayload, root: bool, view: &dyn SystemView) -> Resul
 /// The restore's own check: every destination in the manifest, by the same
 /// rules as a clear. That the manifest lives in an Administrators-only
 /// folder is a reason to trust it more, not a reason to stop checking.
-fn check_restore(dir: &Path, id: &str, root: bool, view: &dyn SystemView) -> Result<(), String> {
+fn check_restore(dir: &Path, id: &str, root: bool, ask: &Ask) -> Result<(), String> {
     let manifest = match holding::read_manifest(&dir.join(id)) {
         Ok(Some(manifest)) => manifest,
         Ok(None) => {
@@ -294,7 +334,7 @@ fn check_restore(dir: &Path, id: &str, root: bool, view: &dyn SystemView) -> Res
         if root && msi_registration(item) {
             continue;
         }
-        check_item(item, root, Mode::Restore, view, &set)?;
+        check_item(item, root, Mode::Restore, ask, &set)?;
     }
     Ok(())
 }
@@ -317,16 +357,17 @@ fn check_item(
     item: &HoldItem,
     root: bool,
     mode: Mode,
-    view: &dyn SystemView,
+    ask: &Ask,
     set: &[String],
 ) -> Result<(), String> {
     let location = item.location.as_str();
+    let view = ask.view;
     match item.kind {
         ItemKind::File | ItemKind::Folder | ItemKind::Shortcut => {
-            check_path(location, mode, view, set)
+            check_path(location, mode, ask, set)
         }
         ItemKind::RegistryKey | ItemKind::RegistryValue => {
-            check_key(item, root, mode)?;
+            check_key(item, root, mode, ask.machine)?;
             if guard::is_protected_among(location, view, set) {
                 return Err(refuse(location, mode, "it is a place Brokey never clears"));
             }
@@ -455,12 +496,8 @@ fn windows_keeps(drive: char, names: &[&str], view: &dyn SystemView) -> bool {
         })
 }
 
-fn check_path(
-    location: &str,
-    mode: Mode,
-    view: &dyn SystemView,
-    set: &[String],
-) -> Result<(), String> {
+fn check_path(location: &str, mode: Mode, ask: &Ask, set: &[String]) -> Result<(), String> {
+    let view = ask.view;
     let Some((drive, names)) = path_parts(location) else {
         return Err(refuse(
             location,
@@ -483,7 +520,7 @@ fn check_path(
     }
     // The links before the guard, so that a folder swapped for a junction is
     // refused as one, and not as whatever place the junction leads to.
-    no_link_on_the_way(location, drive, &names, mode)?;
+    no_link_on_the_way(location, drive, &names, mode, ask.machine)?;
     let plain = format!("{drive}:\\{}", names.join("\\"));
     if guard::is_protected_among(&plain, view, set) {
         return Err(refuse(location, mode, "it is a place Brokey never clears"));
@@ -501,10 +538,11 @@ fn fixed_volume(_: char) -> bool {
     false
 }
 
-/// What opening one part of a path without following it found.
+/// What opening one part of a path, or of the way to a key, without
+/// following it found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
-enum Part {
+pub(crate) enum Part {
     Plain,
     /// A junction, a symbolic link or a mount point.
     Link,
@@ -524,13 +562,14 @@ fn no_link_on_the_way(
     drive: char,
     names: &[&str],
     mode: Mode,
+    machine: &dyn Machine,
 ) -> Result<(), String> {
     let mut path = format!(r"\\?\{drive}:");
     for name in names {
         path.push('\\');
         path.push_str(name);
         let shown = path.trim_start_matches(r"\\?\");
-        match open_part(&path) {
+        match machine.part(&path) {
             Part::Plain => {}
             Part::Link => {
                 return Err(refuse(
@@ -629,6 +668,24 @@ fn open_part(_: &str) -> Part {
     Part::Unknown
 }
 
+/// The way to a key, each part opened as itself (`REG_OPTION_OPEN_LINK`),
+/// as the live backend walks it when it acts.
+#[cfg(windows)]
+fn key_part(hive: Hive, path: &str) -> Part {
+    use super::holding::windows::{KeyWay, key_way};
+    match key_way(hive, path) {
+        KeyWay::Clear => Part::Plain,
+        KeyWay::Link => Part::Link,
+        KeyWay::Missing => Part::Missing,
+        KeyWay::Unreadable => Part::Unknown,
+    }
+}
+
+#[cfg(not(windows))]
+fn key_part(_: Hive, _: &str) -> Part {
+    Part::Unknown
+}
+
 /// `IsReparseTagNameSurrogate`: the bit Windows sets on every tag whose
 /// reparse point names another place (junctions, symbolic links, mount
 /// points). Cloud files and App Execution Aliases do not set it.
@@ -640,12 +697,14 @@ fn is_name_surrogate(tag: u32) -> bool {
 // ---------------------------------------------------------------------------
 // The registry
 
-/// Keys Windows keeps under `Software` that the guard has no reason to name,
-/// since no scan offers them, as lower-case names under `Software`. A key is
-/// refused when it is one of these or lies inside one; `Clients`,
-/// `RegisteredApplications` and `ODBC` only down to the list itself, since
-/// what an application put in them is that application's.
-const CLASSES_WINDOWS_KEEPS: [&str; 8] = [
+/// Keys under `Software\Classes` that Windows keeps and the guard has no
+/// reason to name, since no scan offers them, in lower case: the class
+/// store's own roots, and Windows's own ProgIDs, which an application that
+/// made itself their handler leaves its command in. A key is refused when it
+/// is one of these or lies inside one. `Clients`, `RegisteredApplications`
+/// and `ODBC`, beside `Classes`, are refused only down to the list itself,
+/// since what an application put in them is that application's.
+const CLASSES_WINDOWS_KEEPS: &[&str] = &[
     "installer",
     "local settings",
     "protocols",
@@ -654,9 +713,32 @@ const CLASSES_WINDOWS_KEEPS: [&str; 8] = [
     "extensions",
     "activatableclasses",
     "wow6432node",
+    "batfile",
+    "cmdfile",
+    "comfile",
+    "exefile",
+    "regfile",
+    "txtfile",
+    "inifile",
+    "inffile",
+    "vbsfile",
+    "jsfile",
+    "wsffile",
+    "msi.package",
+    "msi.patch",
+    "microsoft.powershellscript.1",
+    "microsoft.powershelldata.1",
+    "microsoft.powershellmodule.1",
+    "lnkfile",
+    "htmlfile",
+    "folder",
+    "directory",
+    "drive",
+    "allfilesystemobjects",
+    "compressedfolder",
 ];
 
-fn key_windows_keeps(parts: &[String]) -> bool {
+fn key_windows_keeps(parts: &[String], value: bool) -> bool {
     let mut parts: Vec<&str> = parts.iter().map(String::as_str).collect();
     if parts.len() >= 2 && parts[1] == "wow6432node" {
         parts.remove(1);
@@ -664,7 +746,8 @@ fn key_windows_keeps(parts: &[String]) -> bool {
     match parts.as_slice() {
         ["software", "classes", first, ..] => CLASSES_WINDOWS_KEEPS.contains(first),
         ["software", "clients" | "odbc", rest @ ..] => rest.len() <= 1,
-        ["software", "registeredapplications"] => true,
+        // Each value in it is one application's registration.
+        ["software", "registeredapplications"] => !value,
         _ => false,
     }
 }
@@ -684,7 +767,7 @@ fn key_parts(location: &str) -> Option<(String, Vec<String>, Option<&str>)> {
     Some((hive.to_ascii_uppercase(), parts, value))
 }
 
-fn check_key(item: &HoldItem, root: bool, mode: Mode) -> Result<(), String> {
+fn check_key(item: &HoldItem, root: bool, mode: Mode, machine: &dyn Machine) -> Result<(), String> {
     let location = item.location.as_str();
     let Some((hive, parts, value)) = key_parts(location) else {
         return Err(refuse(
@@ -721,10 +804,31 @@ fn check_key(item: &HoldItem, root: bool, mode: Mode) -> Result<(), String> {
             "it has a part that is empty, \".\" or \"..\"",
         ));
     }
-    if key_windows_keeps(&parts) {
+    if key_windows_keeps(&parts, value.is_some()) {
         return Err(refuse(location, mode, "it is a place Brokey never clears"));
     }
-    Ok(())
+    // The way to it, opened part by part as the live backend will open it:
+    // a registry link anywhere on it would take the clear somewhere else.
+    let hive = match hive.as_str() {
+        "HKLM" => Hive::Hklm,
+        "HKLM32" => Hive::Hklm32,
+        _ => Hive::Hkcu,
+    };
+    match machine.key(hive, &parts.join("\\")) {
+        Part::Plain => Ok(()),
+        Part::Missing if mode == Mode::Restore => Ok(()),
+        Part::Missing => Err(refuse(location, mode, "it is not there")),
+        Part::Link => Err(refuse(
+            location,
+            mode,
+            "it is a registry link to another key, or has one on the way to it",
+        )),
+        Part::Unknown => Err(refuse(
+            location,
+            mode,
+            "the way to it could not be checked for a registry link",
+        )),
+    }
 }
 
 /// Whether a key or value lies under `Software\Classes\.<extension>`, which
@@ -810,6 +914,12 @@ fn check_system(item: &HoldItem, mode: Mode, view: &dyn SystemView) -> Result<()
                 Some(s) if runs_windows(&s.image_path, view) => Err(windows("service")),
                 Some(_) => Ok(()),
                 None if services.unreadable > 0 && mode == Mode::Hold => Err(unlisted("services")),
+                // A service being put back is not there, so there is no
+                // program of its to ask about here; what it will run is read
+                // from its exported key in the holding area. That file is
+                // safe to take at its word only because `trust_entry`
+                // refuses an entry folder anyone but an Administrator could
+                // have written, before the restore reads anything from it.
                 None => Ok(()),
             }
         }
@@ -1013,11 +1123,15 @@ pub fn run(step: &Step, ctx: &mut InternalContext) -> Result<Option<String>, Str
     #[cfg(windows)]
     {
         let roots = Roots::live();
-        let mut m = holding::LiveMutate {
-            machine_root: roots.machine.clone(),
-            force_copy: false,
-        };
-        run_in(step, ctx, &roots, &super::view::LiveView::new(), &mut m)
+        let mut m = holding::LiveMutate::new(roots.machine.clone());
+        run_in(
+            step,
+            ctx,
+            &roots,
+            &super::view::LiveView::new(),
+            &mut m,
+            &Live,
+        )
     }
     #[cfg(not(windows))]
     {
@@ -1040,6 +1154,7 @@ pub(crate) fn run_in(
     roots: &Roots,
     view: &dyn SystemView,
     m: &mut dyn Mutate,
+    machine: &dyn Machine,
 ) -> Result<Option<String>, String> {
     let program = step.command.program.as_str();
     let root = step.needs_root;
@@ -1058,14 +1173,13 @@ pub(crate) fn run_in(
             ),
         })?;
     }
-    check(step, view, roots)?;
+    check_with(step, view, roots, machine)?;
     let args = &step.command.args;
     match program {
         HOLD => {
             let payload = hold_payload(args)?;
-            let items = in_order(&payload.items);
-            let report = holding::hold(dir, &payload.holding, &payload.name, &items, m);
-            outcome(report, items.len(), "moved to the holding area")
+            let report = hold_in_order(dir, &payload, view, m);
+            outcome(report, payload.items.len(), "moved to the holding area")
         }
         RESTORE => {
             let report = holding::restore(dir, &args[0], m);
@@ -1089,6 +1203,127 @@ pub(crate) fn run_in(
         }
         _ => Err(not_yet(program)),
     }
+}
+
+/// A HOLD in two passes, as [`in_order`] orders it: everything but the
+/// extension keys first, then each extension key, unless it names a ProgID
+/// whose key was in the set and could not be moved. That one stays, said so,
+/// since the guard let it go only because its ProgID was going too.
+fn hold_in_order(
+    dir: &Path,
+    payload: &HoldPayload,
+    view: &dyn SystemView,
+    m: &mut dyn Mutate,
+) -> HoldReport {
+    let mut rest = in_order(&payload.items);
+    let first_extension = rest
+        .iter()
+        .position(|i| is_extension(&i.location))
+        .unwrap_or(rest.len());
+    let extensions = rest.split_off(first_extension);
+    let mut report = holding::hold(dir, &payload.holding, &payload.name, &rest, m);
+    // The ProgID keys that stayed, by their name in lower case.
+    let stuck: Vec<(String, String)> = report
+        .failed
+        .iter()
+        .filter_map(|(location, _)| progid_of(location).map(|p| (p, location.clone())))
+        .collect();
+    let mut go = Vec::new();
+    for item in extensions {
+        let named = progids_named(&item.location, view);
+        // A key that could not be read might name any of them.
+        let blocked = named.iter().find_map(|n| match n {
+            None => stuck.first(),
+            Some(n) => stuck.iter().find(|(p, _)| p == n),
+        });
+        match blocked {
+            Some((_, progid)) => report.failed.push((
+                item.location.clone(),
+                format!(
+                    "{} was left where it is, because {progid}, which it names, could not be \
+                     moved. Clear it again once {progid} has gone.",
+                    item.location
+                ),
+            )),
+            None => go.push(item),
+        }
+    }
+    if !go.is_empty() {
+        let more = holding::hold(dir, &payload.holding, &payload.name, &go, m);
+        report.held += more.held;
+        report.failed.extend(more.failed);
+    }
+    report
+}
+
+/// The ProgID a key under `Software\Classes` is, in lower case, when it is
+/// one: a key directly under `Classes` that is not an extension.
+fn progid_of(location: &str) -> Option<String> {
+    let (_, mut parts, value) = key_parts(location)?;
+    if parts.len() >= 2 && parts[1] == "wow6432node" {
+        parts.remove(1);
+    }
+    match parts.as_slice() {
+        [software, classes, progid]
+            if software == "software"
+                && classes == "classes"
+                && value.is_none()
+                && !progid.starts_with('.') =>
+        {
+            Some(progid.clone())
+        }
+        _ => None,
+    }
+}
+
+/// The ProgIDs an extension item names, in lower case: one
+/// `OpenWithProgids` value names its own; the extension's key names its
+/// default and each of its `OpenWithProgids`. `None` in the list stands for
+/// a key that could not be read, which might name anything.
+fn progids_named(location: &str, view: &dyn SystemView) -> Vec<Option<String>> {
+    let Some((hive, mut parts, value)) = key_parts(location) else {
+        return vec![None];
+    };
+    if let Some(name) = value
+        && parts.last().is_some_and(|p| p == "openwithprogids")
+    {
+        return vec![Some(name.trim().to_lowercase())];
+    }
+    let wow = parts.len() >= 2 && parts[1] == "wow6432node";
+    if wow {
+        parts.remove(1);
+    }
+    let hive = match hive.as_str() {
+        "HKLM" if wow => Hive::Hklm32,
+        "HKLM" => Hive::Hklm,
+        "HKLM32" => Hive::Hklm32,
+        _ => Hive::Hkcu,
+    };
+    let Some(extension) = parts.get(2) else {
+        return vec![None];
+    };
+    let key = format!(r"Software\Classes\{extension}");
+    let mut named = Vec::new();
+    match view.values(hive, &key) {
+        Ok(values) => named.extend(
+            values
+                .into_iter()
+                .filter(|(n, _)| n.is_empty())
+                .map(|(_, d)| Some(d.trim().to_lowercase())),
+        ),
+        Err(ViewError::Missing(_)) => {}
+        Err(ViewError::Unreadable(_)) => named.push(None),
+    }
+    match view.values(hive, &format!(r"{key}\OpenWithProgids")) {
+        Ok(values) => named.extend(
+            values
+                .into_iter()
+                .map(|(n, _)| Some(n.trim().to_lowercase())),
+        ),
+        Err(ViewError::Missing(_)) => {}
+        Err(ViewError::Unreadable(_)) => named.push(None),
+    }
+    named
 }
 
 /// Until the removal flow can wait and scan, these say so rather than

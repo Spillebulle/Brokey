@@ -23,6 +23,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
+pub mod bound;
+#[cfg(windows)]
 pub mod windows;
 #[cfg(windows)]
 pub use windows::LiveMutate;
@@ -396,6 +398,51 @@ fn sentence_for(location: &str, f: Failure) -> String {
 /// that undoing fails, the answer is [`Failure::Partial`] and the copy is
 /// kept whole.
 pub fn move_file_or_folder(from: &Path, to: &Path, force_copy: bool) -> Done<()> {
+    move_with(from, to, force_copy, &mut Plain)
+}
+
+/// How a move or a merge reaches the disk. [`Plain`] is `std::fs`; the live
+/// backend's [`bound::Bound`] binds every step to the place that was
+/// checked, so that nothing swapped in after the check is gone through.
+pub trait Disk {
+    /// Make the folder something is about to go into, and those above it.
+    fn make_parent(&mut self, dir: &Path) -> io::Result<()> {
+        fs::create_dir_all(dir)
+    }
+    /// Rename `from` to `to`, never replacing what is there.
+    fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {
+        rename_no_replace(from, to)
+    }
+    /// A folder a copy is about to copy from: hold it as it is until
+    /// [`Disk::release`].
+    fn keep_source(&mut self, dir: &Path) -> io::Result<()> {
+        let _ = dir;
+        Ok(())
+    }
+    /// Make one folder that is not there yet.
+    fn make_dir(&mut self, dir: &Path) -> io::Result<()> {
+        fs::create_dir(dir)
+    }
+    /// Copy one file to a name that is not there yet.
+    fn copy_file(&mut self, from: &Path, to: &Path) -> io::Result<()> {
+        fs::copy(from, to).map(|_| ())
+    }
+    /// A folder that is there already is about to be written into.
+    fn enter(&mut self, dir: &Path) -> io::Result<()> {
+        let _ = dir;
+        Ok(())
+    }
+    /// Let go of what a copy holds, before anything is removed.
+    fn release(&mut self) {}
+}
+
+/// `std::fs`, as it is.
+pub struct Plain;
+
+impl Disk for Plain {}
+
+/// [`move_file_or_folder`] through `disk`.
+pub fn move_with(from: &Path, to: &Path, force_copy: bool, disk: &mut dyn Disk) -> Done<()> {
     let shown = from.display().to_string();
     match fs::symlink_metadata(from) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(Failure::Missing),
@@ -406,7 +453,7 @@ pub fn move_file_or_folder(from: &Path, to: &Path, force_copy: bool) -> Done<()>
         return Err(Failure::Occupied);
     }
     if let Some(parent) = to.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
+        disk.make_parent(parent).map_err(|e| {
             Failure::Failed(format!(
                 "Brokey could not make {} ({e}), so {shown} was left where it is. Try again.",
                 parent.display()
@@ -414,14 +461,14 @@ pub fn move_file_or_folder(from: &Path, to: &Path, force_copy: bool) -> Done<()>
         })?;
     }
     if !force_copy {
-        match rename_no_replace(from, to) {
+        match disk.rename(from, to) {
             Ok(()) => return Ok(()),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(Failure::Occupied),
             Err(e) if crosses_volumes(&e) => {}
             Err(e) => return Err(Failure::Failed(io_sentence(&shown, &e))),
         }
     }
-    copy_then_remove(from, to)
+    copy_then_remove(from, to, disk)
 }
 
 fn crosses_volumes(e: &io::Error) -> bool {
@@ -522,7 +569,7 @@ fn under(base: &Path, rel: &Path) -> PathBuf {
     }
 }
 
-fn copy_then_remove(from: &Path, to: &Path) -> Done<()> {
+fn copy_then_remove(from: &Path, to: &Path, disk: &mut dyn Disk) -> Done<()> {
     let shown = from.display().to_string();
     let entries = survey(from)?;
     let copied = (|| -> Done<()> {
@@ -534,14 +581,17 @@ fn copy_then_remove(from: &Path, to: &Path) -> Done<()> {
                 fs::symlink_metadata(&src).map_err(|e| Failure::Failed(io_sentence(&shown, &e)))?;
             check_copyable(from, &src, &meta)?;
             let done = if *is_dir {
-                fs::create_dir(&dst)
+                disk.keep_source(&src).and_then(|()| disk.make_dir(&dst))
             } else {
-                fs::copy(&src, &dst).map(|_| ())
+                disk.copy_file(&src, &dst)
             };
             done.map_err(|e| Failure::Failed(io_sentence(&shown, &e)))?;
         }
         Ok(())
     })();
+    // What the copy held is let go of before anything is removed, here or
+    // from where it came.
+    disk.release();
     if let Err(f) = copied {
         // Nothing was removed from `from`; what was copied is not needed.
         // Should it not all go, it is still never taken for a whole copy:
@@ -564,12 +614,13 @@ fn copy_then_remove(from: &Path, to: &Path) -> Done<()> {
                 continue;
             }
             let done = if *is_dir {
-                fs::create_dir(&src)
+                disk.make_dir(&src)
             } else {
-                fs::copy(&dst, &src).map(|_| ())
+                disk.copy_file(&dst, &src)
             };
             put_back &= done.is_ok();
         }
+        disk.release();
         if put_back {
             discard(to);
             return Err(Failure::Failed(io_sentence(&shown, &e)));
@@ -590,6 +641,11 @@ fn copy_then_remove(from: &Path, to: &Path) -> Done<()> {
 /// refused, never followed; so is a file where a folder was, or the other
 /// way round. What could not be put back stays in `from`.
 pub fn merge_file_or_folder(from: &Path, to: &Path, force_copy: bool) -> Done<()> {
+    merge_with(from, to, force_copy, &mut Plain)
+}
+
+/// [`merge_file_or_folder`] through `disk`.
+pub fn merge_with(from: &Path, to: &Path, force_copy: bool, disk: &mut dyn Disk) -> Done<()> {
     let shown = to.display().to_string();
     let from_meta = match fs::symlink_metadata(from) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(Failure::Missing),
@@ -598,7 +654,7 @@ pub fn merge_file_or_folder(from: &Path, to: &Path, force_copy: bool) -> Done<()
     };
     let to_meta = match fs::symlink_metadata(to) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return move_file_or_folder(from, to, force_copy);
+            return move_with(from, to, force_copy, disk);
         }
         Err(e) => return Err(Failure::Failed(io_sentence(&shown, &e))),
         Ok(m) => m,
@@ -616,13 +672,16 @@ pub fn merge_file_or_folder(from: &Path, to: &Path, force_copy: bool) -> Done<()
             Ok(())
         }
         (true, true) => {
+            // Held as it is while anything is put into it.
+            disk.enter(to)
+                .map_err(|e| Failure::Failed(io_sentence(&shown, &e)))?;
             let entries =
                 fs::read_dir(from).map_err(|e| Failure::Failed(io_sentence(&shown, &e)))?;
             let mut first = None;
             for entry in entries {
                 let entry = entry.map_err(|e| Failure::Failed(io_sentence(&shown, &e)))?;
                 let inside = to.join(entry.file_name());
-                if let Err(f) = merge_file_or_folder(&entry.path(), &inside, force_copy) {
+                if let Err(f) = merge_with(&entry.path(), &inside, force_copy, disk) {
                     first.get_or_insert(f);
                 }
             }

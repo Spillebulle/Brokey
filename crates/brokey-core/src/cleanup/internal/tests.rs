@@ -35,6 +35,21 @@ fn hold(id: &str, items: Vec<HoldItem>, root: bool) -> Step {
     step(HOLD, vec![serde_json::to_string(&payload).unwrap()], root)
 }
 
+/// Answers every question about the disk and the registry one way.
+struct Answer(Part);
+
+impl Machine for Answer {
+    fn part(&self, _: &str) -> Part {
+        self.0
+    }
+
+    fn key(&self, _: Hive, _: &str) -> Part {
+        self.0
+    }
+}
+
+const PLAIN: Answer = Answer(Part::Plain);
+
 fn temp_roots(temp: &Path) -> Roots {
     Roots {
         user: temp.join("user-holding"),
@@ -58,16 +73,14 @@ fn run_here(step: &Step, roots: &Roots) -> (Result<Option<String>, String>, Vec<
     };
     #[cfg(windows)]
     let result = {
-        let mut m = holding::LiveMutate {
-            machine_root: roots.machine.clone(),
-            force_copy: false,
-        };
+        let mut m = holding::LiveMutate::new(roots.machine.clone());
         run_in(
             step,
             &mut ctx,
             roots,
             &super::super::view::LiveView::new(),
             &mut m,
+            &Live,
         )
     };
     #[cfg(not(windows))]
@@ -102,10 +115,11 @@ const PROGID: &str = r"HKLM\Software\Classes\Acme.Doc";
 fn an_extension_whose_progid_stays_is_refused() {
     let view = classes();
     let roots = Roots::live();
-    let err = check(
+    let err = check_with(
         &hold("abc", vec![item(ItemKind::RegistryKey, EXT)], true),
         &view,
         &roots,
+        &PLAIN,
     )
     .expect_err("Acme.Doc is still there and not going");
     assert!(err.contains("never clears"), "{err}");
@@ -125,10 +139,13 @@ fn an_extension_whose_progid_goes_with_it_is_allowed() {
             item(ItemKind::RegistryKey, EXT),
         ],
     ] {
-        assert_eq!(check(&hold("abc", items, true), &view, &roots), Ok(()));
+        assert_eq!(
+            check_with(&hold("abc", items, true), &view, &roots, &PLAIN),
+            Ok(())
+        );
     }
     // Another extension in the same set is still asked about its own.
-    let err = check(
+    let err = check_with(
         &hold(
             "abc",
             vec![
@@ -140,6 +157,7 @@ fn an_extension_whose_progid_goes_with_it_is_allowed() {
         ),
         &view,
         &roots,
+        &PLAIN,
     )
     .expect_err("Other.Doc stays");
     assert!(err.contains(".other"), "{err}");
@@ -187,19 +205,20 @@ fn a_session_hold_takes_only_hkcu_keys_and_never_a_service() {
         item(ItemKind::FirewallRule, "firewall:Acme"),
     ] {
         let location = refused.location.clone();
-        let err = check(&hold("abc", vec![refused], false), &view, &roots)
+        let err = check_with(&hold("abc", vec![refused], false), &view, &roots, &PLAIN)
             .expect_err("not a session item");
         assert!(err.contains(&location), "{err}");
     }
     assert_eq!(
-        check(
+        check_with(
             &hold(
                 "abc",
                 vec![item(ItemKind::RegistryKey, r"HKCU\Software\Acme")],
                 false
             ),
             &view,
-            &roots
+            &roots,
+            &PLAIN
         ),
         Ok(())
     );
@@ -218,7 +237,13 @@ fn a_key_and_a_value_must_say_which_they_are() {
         item(ItemKind::RegistryKey, "HKLM"),
     ] {
         assert!(
-            check(&hold("abc", vec![wrong.clone()], true), &view, &roots).is_err(),
+            check_with(
+                &hold("abc", vec![wrong.clone()], true),
+                &view,
+                &roots,
+                &PLAIN
+            )
+            .is_err(),
             "{wrong:?}"
         );
     }
@@ -258,10 +283,11 @@ fn a_service_that_runs_windows_or_cannot_be_placed_is_refused() {
     );
     let roots = Roots::live();
     let ok = |location: &str, kind: ItemKind| {
-        check(
+        check_with(
             &hold("abc", vec![item(kind, location)], true),
             &view,
             &roots,
+            &PLAIN,
         )
     };
     assert_eq!(ok("service:AcmeUpdate", ItemKind::Service), Ok(()));
@@ -274,10 +300,11 @@ fn a_service_that_runs_windows_or_cannot_be_placed_is_refused() {
     assert!(ok("firewall:Twice", ItemKind::FirewallRule).is_err());
 
     let unlisted = FixtureView::from_json(r#"{ "unreadable_services": 1 }"#);
-    let err = check(
+    let err = check_with(
         &hold("abc", vec![item(ItemKind::Service, "service:Gone")], true),
         &unlisted,
         &roots,
+        &PLAIN,
     )
     .expect_err("it may be among the ones that could not be read");
     assert!(err.contains("could not be read"), "{err}");
@@ -644,4 +671,558 @@ fn a_report_with_failures_names_them_and_what_was_kept() {
         r"2 of 3 items were moved to the holding area. What was moved can be restored from Settings. C:\Acme\log.txt is in use. Close Acme and try again."
     );
     assert_eq!(outcome(HoldReport::default(), 3, "moved"), Ok(None));
+}
+
+// ---------------------------------------------------------------------------
+// Every refusal rule, one table each
+
+/// A machine with its well-known folders where a stock Windows has them,
+/// and `extra` (more JSON members) beside them.
+fn machine(extra: &str) -> FixtureView {
+    let comma = if extra.trim().is_empty() { "" } else { "," };
+    FixtureView::from_json(&format!(
+        r#"{{
+            "folders": {{
+                "Windows": "C:\\Windows",
+                "ProgramFiles": "C:\\Program Files",
+                "ProgramFilesX86": "C:\\Program Files (x86)",
+                "ProgramData": "C:\\ProgramData",
+                "AppData": "C:\\Users\\me\\AppData\\Roaming",
+                "LocalAppData": "C:\\Users\\me\\AppData\\Local",
+                "LocalLow": "C:\\Users\\me\\AppData\\LocalLow",
+                "Profile": "C:\\Users\\me",
+                "StartMenuMachine": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+                "StartMenuUser": "C:\\Users\\me\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs"
+            }}{comma}
+            {extra}
+        }}"#
+    ))
+}
+
+/// The refusal for `step` on `view` with the machine answering `answer`,
+/// which must say `why` and keep the copy rules.
+fn refused_for(step: &Step, view: &FixtureView, answer: Part, why: &str) {
+    let err =
+        check_with(step, view, &Roots::live(), &Answer(answer)).expect_err("the rule refuses this");
+    assert!(err.contains(why), "expected {why:?} in: {err}");
+    assert!(err.ends_with('.') && !err.contains('\u{2014}'), "{err}");
+}
+
+fn allowed_for(step: &Step, view: &FixtureView) {
+    assert_eq!(check_with(step, view, &Roots::live(), &PLAIN), Ok(()));
+}
+
+fn hold_named(name: &str, items: Vec<HoldItem>) -> Step {
+    let payload = HoldPayload {
+        holding: "abc".to_string(),
+        name: name.to_string(),
+        items,
+    };
+    step(HOLD, vec![serde_json::to_string(&payload).unwrap()], true)
+}
+
+#[test]
+fn a_hold_whose_name_is_not_one_brokey_would_show_is_refused() {
+    let view = classes();
+    let key = || vec![item(ItemKind::RegistryKey, r"HKLM\Software\Acme")];
+    let long = "a".repeat(261);
+    for name in ["", "   ", "Acme\u{7}Studio", "Acme\nStudio", long.as_str()] {
+        refused_for(
+            &hold_named(name, key()),
+            &view,
+            Part::Plain,
+            "application's name",
+        );
+    }
+    allowed_for(&hold_named(&"a".repeat(260), key()), &view);
+}
+
+#[test]
+fn a_step_with_the_wrong_number_of_arguments_is_refused() {
+    let view = classes();
+    let code = "{12345678-1234-1234-1234-123456789012}".to_string();
+    for program in [RESTORE, EMPTY] {
+        for args in [vec![], vec!["abc".to_string(), "def".to_string()]] {
+            refused_for(
+                &step(program, args, true),
+                &view,
+                Part::Plain,
+                "exactly one",
+            );
+        }
+    }
+    for args in [
+        vec![code.clone()],
+        vec![code.clone(), "abc".to_string(), "x".to_string()],
+        vec![],
+    ] {
+        refused_for(
+            &step(MSI_UNREGISTER, args, true),
+            &view,
+            Part::Plain,
+            "a product code and a holding area entry",
+        );
+    }
+    allowed_for(&step(EMPTY, vec!["all".to_string()], true), &view);
+    allowed_for(
+        &step(MSI_UNREGISTER, vec![code, "abc".to_string()], true),
+        &view,
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_name_windows_would_read_otherwise_is_refused() {
+    let view = machine("");
+    for c in [':', '*', '?', '|', '<', '>', '"', '\u{1}'] {
+        let path = format!(r"C:\Acme\a{c}b");
+        refused_for(
+            &hold("abc", vec![item(ItemKind::Folder, &path)], true),
+            &view,
+            Part::Plain,
+            "does not allow in a name",
+        );
+    }
+    for path in [r"C:\Acme\name.", r"C:\Acme\name ", r"C:\Acme. \name"] {
+        refused_for(
+            &hold("abc", vec![item(ItemKind::Folder, path)], true),
+            &view,
+            Part::Plain,
+            "ending in a dot or a space",
+        );
+    }
+    allowed_for(
+        &hold("abc", vec![item(ItemKind::Folder, r"C:\Acme\name.d")], true),
+        &view,
+    );
+}
+
+/// Each answer the walk can get, for a path to move and for one to put
+/// back: a link refuses both, a part that cannot be asked refuses both, and
+/// a missing part refuses only what is to be moved.
+#[cfg(windows)]
+#[test]
+fn each_answer_the_walk_gets_is_heeded() {
+    let view = machine("");
+    let path = r"C:\Acme\App";
+    let held = || hold("abc", vec![item(ItemKind::Folder, path)], true);
+    refused_for(
+        &held(),
+        &view,
+        Part::Link,
+        "junction, a symbolic link or a mount point",
+    );
+    refused_for(
+        &held(),
+        &view,
+        Part::Unknown,
+        "could not be checked for a junction",
+    );
+    refused_for(&held(), &view, Part::Missing, "is not there");
+
+    let temp = tempfile::tempdir().unwrap();
+    let roots = temp_roots(temp.path());
+    manifest_with(&roots, "acme", vec![item(ItemKind::Folder, path)]);
+    let back = step(RESTORE, vec!["acme".into()], false);
+    for (answer, verdict) in [
+        (Part::Missing, Ok(())),
+        (Part::Plain, Ok(())),
+        (Part::Link, Err("junction")),
+        (Part::Unknown, Err("could not be checked")),
+    ] {
+        let got = check_with(&back, &view, &roots, &Answer(answer));
+        match verdict {
+            Ok(()) => assert_eq!(got, Ok(()), "{answer:?}"),
+            Err(why) => assert!(got.is_err_and(|e| e.contains(why)), "{answer:?}"),
+        }
+    }
+}
+
+/// The same for the way to a registry key.
+#[test]
+fn each_answer_the_registry_walk_gets_is_heeded() {
+    let view = classes();
+    let key = || {
+        hold(
+            "abc",
+            vec![item(ItemKind::RegistryKey, r"HKLM\Software\Acme")],
+            true,
+        )
+    };
+    refused_for(&key(), &view, Part::Link, "registry link");
+    refused_for(
+        &key(),
+        &view,
+        Part::Unknown,
+        "could not be checked for a registry link",
+    );
+    refused_for(&key(), &view, Part::Missing, "it is not there");
+    allowed_for(&key(), &view);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_registry_restore_heeds_the_walk_too() {
+    let view = classes();
+    let temp = tempfile::tempdir().unwrap();
+    let roots = temp_roots(temp.path());
+    manifest_with(
+        &roots,
+        "acme",
+        vec![item(ItemKind::RegistryKey, r"HKCU\Software\Acme")],
+    );
+    let back = step(RESTORE, vec!["acme".into()], false);
+    assert_eq!(
+        check_with(&back, &view, &roots, &Answer(Part::Missing)),
+        Ok(())
+    );
+    assert!(check_with(&back, &view, &roots, &Answer(Part::Link)).is_err());
+}
+
+#[test]
+fn a_control_character_in_a_key_or_value_name_is_refused() {
+    let view = classes();
+    for (kind, location) in [
+        (ItemKind::RegistryKey, "HKLM\\Software\\Ac\u{1}me"),
+        (ItemKind::RegistryKey, "HKLM\\Software\\Acme\\\u{0}"),
+        (ItemKind::RegistryValue, "HKLM\\Software\\Acme | Na\u{1}me"),
+        (ItemKind::RegistryValue, "HKLM\\Software\\Acme | \n"),
+    ] {
+        let err = check_with(
+            &hold("abc", vec![item(kind, location)], true),
+            &view,
+            &Roots::live(),
+            &PLAIN,
+        );
+        assert!(err.is_err(), "{location:?}");
+    }
+}
+
+#[test]
+fn each_key_windows_keeps_beside_the_guards_is_refused() {
+    let view = classes();
+    for key in [
+        r"HKLM\Software\Classes\Local Settings\Software",
+        r"HKLM\Software\Classes\Protocols\Handler\acme",
+        r"HKLM\Software\Classes\MIME\Database\Content Type\application/x-acme",
+        r"HKLM\Software\Classes\PackagedCom\Package",
+        r"HKLM\Software\Classes\Extensions\ContractId",
+        r"HKLM\Software\Classes\ActivatableClasses\Package",
+        r"HKLM\Software\Classes\exefile\shell\open",
+        r"HKLM\Software\Classes\batfile",
+        r"HKLM\Software\Classes\Msi.Package\shell",
+        r"HKLM\Software\Classes\Microsoft.PowerShellScript.1\Shell",
+        r"HKLM\Software\Classes\CompressedFolder\shell",
+        r"HKLM\Software\Classes\Folder\shell\acme",
+        r"HKLM\Software\Classes\htmlfile",
+        r"HKLM\Software\Classes\txtfile\shell",
+        r"HKLM32\Software\Classes\regfile",
+        r"HKLM\Software\WOW6432Node\Classes\VBSFile",
+        r"HKLM\Software\ODBC",
+        r"HKLM\Software\ODBC\ODBC.INI",
+        r"HKLM\Software\Clients\StartMenuInternet",
+        r"HKLM\Software\RegisteredApplications",
+    ] {
+        refused_for(
+            &hold("abc", vec![item(ItemKind::RegistryKey, key)], true),
+            &view,
+            Part::Plain,
+            "never clears",
+        );
+    }
+    // What an application put in them is its own.
+    for (kind, key) in [
+        (
+            ItemKind::RegistryKey,
+            r"HKLM\Software\ODBC\ODBC.INI\Acme DSN",
+        ),
+        (
+            ItemKind::RegistryKey,
+            r"HKLM\Software\Clients\StartMenuInternet\Acme",
+        ),
+        (
+            ItemKind::RegistryValue,
+            r"HKLM\Software\RegisteredApplications | Acme",
+        ),
+        (
+            ItemKind::RegistryKey,
+            r"HKLM\Software\Classes\Acme.Document",
+        ),
+    ] {
+        allowed_for(&hold("abc", vec![item(kind, key)], true), &view);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn common_files_microsoft_shared_is_refused() {
+    let view = machine("");
+    for path in [
+        r"C:\Program Files\Common Files\Microsoft Shared",
+        r"C:\Program Files\Common Files\Microsoft Shared\Acme",
+        r"C:\Program Files (x86)\Common Files\microsoft shared\Acme",
+    ] {
+        refused_for(
+            &hold("abc", vec![item(ItemKind::Folder, path)], true),
+            &view,
+            Part::Plain,
+            "never clears",
+        );
+    }
+    allowed_for(
+        &hold(
+            "abc",
+            vec![item(
+                ItemKind::Folder,
+                r"C:\Program Files\Common Files\Acme",
+            )],
+            true,
+        ),
+        &view,
+    );
+}
+
+#[test]
+fn a_task_or_rule_brokey_cannot_place_is_refused() {
+    let view = machine(
+        r#""tasks": [
+                { "path": "\\Acme\\Update", "actions": ["\"C:\\Program Files\\Acme\\update.exe\""] },
+                { "path": "\\Acme\\Shell", "actions": ["C:\\Program Files\\Acme\\a.exe", "C:\\Windows\\System32\\cmd.exe /c x"] }
+            ]"#,
+    );
+    let task = |path: &str| {
+        hold(
+            "abc",
+            vec![item(ItemKind::Task, &format!("task:{path}"))],
+            true,
+        )
+    };
+    allowed_for(&task(r"\Acme\Update"), &view);
+    refused_for(&task(r"\Acme\Shell"), &view, Part::Plain, "Windows's own");
+
+    let unreadable_tasks = machine(r#""unreadable_tasks": 1"#);
+    refused_for(
+        &task(r"\Acme\Gone"),
+        &unreadable_tasks,
+        Part::Plain,
+        "could not be read",
+    );
+
+    let rule = hold(
+        "abc",
+        vec![item(ItemKind::FirewallRule, "firewall:Acme")],
+        true,
+    );
+    let unreadable_rules = machine(r#""unreadable_firewall": 2"#);
+    refused_for(&rule, &unreadable_rules, Part::Plain, "could not be read");
+    allowed_for(&rule, &machine(""));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_restore_whose_record_cannot_be_read_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let roots = temp_roots(temp.path());
+    let entry = roots.user.join("acme");
+    std::fs::create_dir_all(&entry).unwrap();
+    std::fs::write(entry.join("manifest.json"), "{ not a record").unwrap();
+    let err = check_with(
+        &step(RESTORE, vec!["acme".into()], false),
+        &classes(),
+        &roots,
+        &PLAIN,
+    )
+    .expect_err("an unreadable record");
+    assert!(err.contains("could not be read"), "{err}");
+}
+
+/// The live walk of the registry, through the closed list's own door: a
+/// key with a link on the way to it is refused before anything moves.
+#[cfg(windows)]
+#[test]
+fn the_closed_list_refuses_a_key_with_a_registry_link_on_the_way() {
+    use crate::cleanup::holding::windows::tests::{TestKey, make_link, remove_link};
+    let key = TestKey::new("internal-link");
+    let target = format!(r"{}\Target", key.0);
+    windows_registry::CURRENT_USER
+        .create(format!(r"{target}\Inner"))
+        .unwrap();
+    let way = format!(r"{}\Way", key.0);
+    make_link(&way, &target);
+    let item_at = |path: &str| item(ItemKind::RegistryKey, &format!(r"HKCU\{path}"));
+    let err = check(
+        &hold("abc", vec![item_at(&format!(r"{way}\Inner"))], false),
+        &super::super::view::LiveView::new(),
+        &Roots::live(),
+    );
+    remove_link(&way);
+    let err = err.expect_err("a link on the way");
+    assert!(err.contains("registry link"), "{err}");
+    assert_eq!(
+        check(
+            &hold("abc", vec![item_at(&format!(r"{target}\Inner"))], false),
+            &super::super::view::LiveView::new(),
+            &Roots::live(),
+        ),
+        Ok(())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// An extension stays when the ProgID it names could not go
+
+/// The registry as the holding area changes it, in so far as these tests
+/// need: every key exports empty and deletes, but for one that is in use.
+struct OneKeyInUse {
+    in_use: &'static str,
+    deleted: Vec<String>,
+}
+
+impl Mutate for OneKeyInUse {
+    fn make_root(&mut self, _: &Path) -> holding::Done<()> {
+        Ok(())
+    }
+    fn trust_entry(&mut self, _: &Path, _: &Path) -> holding::Done<()> {
+        Ok(())
+    }
+    fn move_path(&mut self, _: &Path, _: &Path) -> holding::Done<()> {
+        Err(Failure::Failed("No files in this test.".into()))
+    }
+    fn merge_path(&mut self, _: &Path, _: &Path) -> holding::Done<()> {
+        Err(Failure::Failed("No files in this test.".into()))
+    }
+    fn export_key(&mut self, _: Hive, path: &str) -> holding::Done<holding::KeyNode> {
+        if path.eq_ignore_ascii_case(self.in_use) {
+            Err(Failure::Failed(format!("{path} is in use.")))
+        } else {
+            Ok(holding::KeyNode::default())
+        }
+    }
+    fn delete_key(&mut self, _: Hive, path: &str) -> holding::Done<()> {
+        self.deleted.push(path.to_string());
+        Ok(())
+    }
+    fn restore_key(
+        &mut self,
+        _: Hive,
+        _: &str,
+        _: &holding::KeyNode,
+        _: bool,
+    ) -> holding::Done<()> {
+        Ok(())
+    }
+    fn export_value(&mut self, _: Hive, _: &str, _: &str) -> holding::Done<holding::RegValue> {
+        Ok(holding::RegValue {
+            ty: holding::REG_SZ,
+            data: Vec::new(),
+        })
+    }
+    fn delete_value(&mut self, _: Hive, key: &str, name: &str) -> holding::Done<()> {
+        self.deleted.push(format!("{key} | {name}"));
+        Ok(())
+    }
+    fn restore_value(
+        &mut self,
+        _: Hive,
+        _: &str,
+        _: &str,
+        _: &holding::RegValue,
+        _: bool,
+    ) -> holding::Done<()> {
+        Ok(())
+    }
+    fn export_service(&mut self, _: &str) -> holding::Done<holding::KeyNode> {
+        Err(Failure::Missing)
+    }
+    fn delete_service(&mut self, _: &str) -> holding::Done<()> {
+        Err(Failure::Missing)
+    }
+    fn restore_service(&mut self, _: &str, _: &holding::KeyNode, _: bool) -> holding::Done<()> {
+        Err(Failure::Missing)
+    }
+    fn export_task(&mut self, _: &str) -> holding::Done<String> {
+        Err(Failure::Missing)
+    }
+    fn delete_task(&mut self, _: &str) -> holding::Done<()> {
+        Err(Failure::Missing)
+    }
+    fn restore_task(&mut self, _: &str, _: &str, _: bool) -> holding::Done<()> {
+        Err(Failure::Missing)
+    }
+    fn export_firewall_rule(&mut self, _: &str) -> holding::Done<Vec<(String, String)>> {
+        Err(Failure::Missing)
+    }
+    fn delete_firewall_rule(&mut self, _: &str, _: &[(String, String)]) -> holding::Done<()> {
+        Err(Failure::Missing)
+    }
+    fn restore_firewall_rule(
+        &mut self,
+        _: &str,
+        _: &[(String, String)],
+        _: bool,
+    ) -> holding::Done<()> {
+        Err(Failure::Missing)
+    }
+}
+
+#[test]
+fn an_extension_stays_when_the_progid_it_names_could_not_go() {
+    let view = FixtureView::from_json(
+        r#"{
+            "registry": {
+                "Hkcu": {
+                    "Software\\Classes\\.acme": { "values": [["", "Acme.Doc"]] },
+                    "Software\\Classes\\Acme.Doc": { "subkeys": ["shell"] },
+                    "Software\\Classes\\.other": { },
+                    "Software\\Classes\\.zip\\OpenWithProgids": { "values": [["Acme.Doc", ""]] }
+                }
+            }
+        }"#,
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let roots = temp_roots(temp.path());
+    let mut m = OneKeyInUse {
+        in_use: r"Software\Classes\Acme.Doc",
+        deleted: Vec::new(),
+    };
+    let clear = hold(
+        "acme-1",
+        vec![
+            item(ItemKind::RegistryKey, r"HKCU\Software\Classes\.acme"),
+            item(
+                ItemKind::RegistryValue,
+                r"HKCU\Software\Classes\.zip\OpenWithProgids | Acme.Doc",
+            ),
+            item(ItemKind::RegistryKey, r"HKCU\Software\Classes\.other"),
+            item(ItemKind::RegistryKey, r"HKCU\Software\Classes\Acme.Doc"),
+        ],
+        false,
+    );
+    let mut events = Vec::new();
+    let mut sink = |e: Event| events.push(e);
+    let never = || false;
+    let mut ctx = InternalContext {
+        plan: "p",
+        step: 0,
+        sink: &mut sink,
+        cancelled: &never,
+        finished: Arc::new(AtomicBool::new(false)),
+        scans: Scans::default(),
+    };
+    let err = run_in(&clear, &mut ctx, &roots, &view, &mut m, &PLAIN)
+        .expect_err("the ProgID could not be moved");
+    assert!(err.starts_with("1 of 4 items were moved"), "{err}");
+    assert!(
+        err.contains(r"Software\Classes\Acme.Doc is in use."),
+        "{err}"
+    );
+    assert!(
+        err.contains(r"HKCU\Software\Classes\.acme was left where it is, because HKCU\Software\Classes\Acme.Doc, which it names, could not be moved."),
+        "{err}"
+    );
+    assert!(
+        err.contains(r"OpenWithProgids | Acme.Doc was left where it is"),
+        "{err}"
+    );
+    assert_eq!(m.deleted, vec![r"Software\Classes\.other".to_string()]);
 }

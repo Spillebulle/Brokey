@@ -404,6 +404,18 @@ impl Runner {
                 return fail(message);
             }
         }
+        // And Brokey's own steps that run as the user, by the same rules, so
+        // that a refusal never arrives half-way through a plan.
+        #[cfg(windows)]
+        for step in plan
+            .steps
+            .iter()
+            .filter(|s| !s.needs_root && internal::is_internal(&s.command.program))
+        {
+            if let Err(message) = allow::check_internal(step) {
+                return fail(message);
+            }
+        }
         let mut state = ProgressState::new(&plan.steps);
         for run in &runs {
             if self.cancel.is_cancelled() {
@@ -1337,42 +1349,80 @@ pub fn summary(ops: &[Op]) -> String {
 mod tests {
     use super::*;
 
-    /// Brokey's own steps are carried out by the runner and never started
-    /// as a program: the failure is the step's own sentence, not "Could not
-    /// start brokey:…", and it ends the plan like any failed step.
-    #[test]
-    fn an_internal_session_step_is_run_here_and_never_spawned() {
-        for program in [internal::SHELL_OPEN, "brokey:nothing-like-this"] {
-            let plan = Plan {
-                id: "p".to_string(),
-                ops: Vec::new(),
-                steps: vec![Step {
+    fn session_plan(steps: Vec<(&str, Vec<String>)>) -> Plan {
+        Plan {
+            id: "p".to_string(),
+            ops: Vec::new(),
+            steps: steps
+                .into_iter()
+                .map(|(program, args)| Step {
                     source: SourceKind::Arp,
                     title: "Starting Acme's uninstaller".to_string(),
                     command: Command {
                         program: program.to_string(),
-                        args: vec!["x".to_string()],
+                        args,
                         env: Vec::new(),
                         cwd: None,
                     },
                     needs_root: false,
                     weight: 1,
-                }],
-            };
+                })
+                .collect(),
+        }
+    }
+
+    /// Brokey's own steps are carried out by the runner and never started
+    /// as a program: the failure is the step's own sentence, not "Could not
+    /// start brokey:…", and it ends the plan like any failed step.
+    #[test]
+    fn an_internal_session_step_is_run_here_and_never_spawned() {
+        let plan = session_plan(vec![(internal::SHELL_OPEN, vec!["x".to_string()])]);
+        let mut events = Vec::new();
+        let mut sink = |e: Event| events.push(e);
+        let outcome = Runner::new().with_helper(None).execute(&plan, &mut sink);
+        assert!(!outcome.ok);
+        assert!(
+            outcome.message.contains(internal::SHELL_OPEN),
+            "{}",
+            outcome.message
+        );
+        assert!(
+            !outcome.message.contains("Could not start"),
+            "{}",
+            outcome.message
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::StepFinished { ok: false, message: Some(m), .. } if m.contains(internal::SHELL_OPEN)
+        )));
+    }
+
+    /// One of Brokey's own session steps that the rules refuse is refused
+    /// before the plan's first step starts, as a root step would be, so the
+    /// plan never stops half-way for it.
+    #[cfg(windows)]
+    #[test]
+    fn a_refused_internal_session_step_stops_the_plan_before_it_starts() {
+        for refused in [
+            ("brokey:nothing-like-this", vec![]),
+            (internal::RESTORE, vec!["Not An Id".to_string()]),
+            (internal::HOLD, vec!["not json".to_string()]),
+        ] {
+            let plan = session_plan(vec![
+                (internal::SHELL_OPEN, vec!["x".to_string()]),
+                refused.clone(),
+            ]);
             let mut events = Vec::new();
             let mut sink = |e: Event| events.push(e);
             let outcome = Runner::new().with_helper(None).execute(&plan, &mut sink);
             assert!(!outcome.ok);
-            assert!(outcome.message.contains(program), "{}", outcome.message);
+            assert!(outcome.message.contains("refused"), "{}", outcome.message);
             assert!(
-                !outcome.message.contains("Could not start"),
-                "{}",
-                outcome.message
+                !events
+                    .iter()
+                    .any(|e| matches!(e, Event::StepStarted { .. })),
+                "nothing started for {refused:?}: {events:?}"
             );
-            assert!(events.iter().any(|e| matches!(
-                e,
-                Event::StepFinished { ok: false, message: Some(m), .. } if m.contains(program)
-            )));
         }
     }
 
