@@ -125,9 +125,18 @@ pub(super) const SHELL_CLASSES: [&str; 20] = [
 /// How many folders deep a Start menu is searched below `Programs`.
 const MENU_DEPTH: u8 = 3;
 
-/// What a scan over one machine looks for.
+/// What a scan over one machine looks for, after the application's
+/// uninstaller has run.
 pub fn scan(hints: &Hints, view: &dyn SystemView) -> Scanned {
+    scan_with(hints, view, false)
+}
+
+/// [`scan`], or with `force` for a forced removal, whose application's
+/// folder is still there: a shortcut into it is then as dead as one whose
+/// target has gone.
+pub fn scan_with(hints: &Hints, view: &dyn SystemView, force: bool) -> Scanned {
     let mut scan = Scan::new(hints, view);
+    scan.force = force;
     for home in scan.homes.clone() {
         scan.home(&home);
     }
@@ -166,6 +175,8 @@ enum MenuPart {
 struct Scan<'a> {
     hints: &'a Hints,
     view: &'a dyn SystemView,
+    /// A forced removal: the application's folder is still there.
+    force: bool,
     /// The application's normalised name, when it is specific enough.
     name: Option<String>,
     /// The publisher's normalised name, when it is specific enough.
@@ -383,6 +394,7 @@ impl<'a> Scan<'a> {
         let mut scan = Scan {
             hints,
             view,
+            force: false,
             name: usable(normalise::name(&hints.name)),
             publisher: hints
                 .publisher
@@ -905,7 +917,9 @@ impl<'a> Scan<'a> {
         (whole, parts)
     }
 
-    /// A shortcut whose target lay in a home and is no longer there.
+    /// A shortcut whose target lay in a home and is no longer there, or,
+    /// in a forced scan, whose target is in a home at all: the folder goes
+    /// with the clear.
     fn dead_shortcut(&self, path: &str) -> bool {
         if !path.to_lowercase().ends_with(".lnk") {
             return false;
@@ -915,7 +929,7 @@ impl<'a> Scan<'a> {
         };
         let target = target.to_string_lossy();
         self.homes.iter().any(|home| inside(&target, home))
-            && !self.view.exists(Path::new(&*target))
+            && (self.force || !self.view.exists(Path::new(&*target)))
     }
 
     fn desktop(&mut self) {
@@ -1602,6 +1616,51 @@ mod tests {
             Some(Confidence::Certain)
         );
         assert_eq!(s.unreadable, 2);
+    }
+
+    /// A Start menu and desktop whose shortcuts lead into Acme Studio's
+    /// folder, which is still there, and one that leads elsewhere.
+    const LIVE_SHORTCUTS: &str = r#"{
+      "folders": {
+        "ProgramFiles": "C:\\Program Files",
+        "StartMenuUser": "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+        "Desktop": "C:\\Users\\you\\Desktop",
+        "Profile": "C:\\Users\\you"
+      },
+      "dirs": {
+        "C:\\Program Files": [{ "name": "Acme", "is_dir": true }, { "name": "Other", "is_dir": true }],
+        "C:\\Program Files\\Acme": [{ "name": "Acme Studio", "is_dir": true }],
+        "C:\\Program Files\\Acme\\Acme Studio": [{ "name": "acmestudio.exe", "size": 1 }],
+        "C:\\Program Files\\Other": [{ "name": "other.exe", "size": 1 }],
+        "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs": [
+          { "name": "Acme Studio.lnk", "size": 1 },
+          { "name": "Other.lnk", "size": 1 }
+        ],
+        "C:\\Users\\you\\Desktop": [{ "name": "Acme Studio.lnk", "size": 1 }]
+      },
+      "shortcuts": {
+        "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Acme Studio.lnk": "C:\\Program Files\\Acme\\Acme Studio\\acmestudio.exe",
+        "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Other.lnk": "C:\\Program Files\\Other\\other.exe",
+        "C:\\Users\\you\\Desktop\\Acme Studio.lnk": "C:\\Program Files\\Acme\\Acme Studio\\acmestudio.exe"
+      }
+    }"#;
+
+    /// A forced removal leaves the folder in place until the clear, so a
+    /// shortcut into it is as dead as one whose target has gone; after an
+    /// uninstaller, one whose target is still there is not offered.
+    #[test]
+    fn a_forced_scan_offers_the_shortcuts_into_the_applications_folder() {
+        let h = hints("Acme Studio", Some("Acme Corp"), Some(STUDIO), None);
+        let view = FixtureView::from_json(LIVE_SHORTCUTS);
+        let menu = format!(r"{USER_MENU}\Acme Studio.lnk");
+        let desktop = r"C:\Users\you\Desktop\Acme Studio.lnk";
+        let forced = scan_with(&h, &view, true);
+        assert_eq!(confidence(&forced, &menu), Some(Confidence::Certain));
+        assert_eq!(confidence(&forced, desktop), Some(Confidence::Certain));
+        assert!(at(&forced, &format!(r"{USER_MENU}\Other.lnk")).is_none());
+        let after = scan(&h, &view);
+        assert!(at(&after, &menu).is_none());
+        assert!(at(&after, desktop).is_none());
     }
 
     #[test]

@@ -1556,7 +1556,7 @@ fn scan_step(
     session: &dyn Session,
 ) -> Result<Option<String>, String> {
     let ScanPayload { hints, force } = payload;
-    let scanned = scan::scan(&hints, view);
+    let scanned = scan::scan_with(&hints, view, force);
     let (installed, failed) = session.installed();
     let claims = guard::claims(view, &installed, force.then_some(&hints));
     let id = new_scan_id();

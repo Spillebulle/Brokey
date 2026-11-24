@@ -480,7 +480,7 @@ fn choose(record: &ScanRecord, ticked: &[String], planning: &Planning) -> Result
             &(planning.installed)(),
             record.forced.then_some(&record.hints),
         ),
-        found: scan::scan(&record.hints, view).candidates,
+        found: scan::scan_with(&record.hints, view, record.forced).candidates,
         view,
     });
     let mut chosen = Chosen {
