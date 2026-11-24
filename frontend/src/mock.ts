@@ -1127,16 +1127,16 @@ function discordFindings(pkg: PackageRef): Findings {
     package: pkg,
     name: "Discord",
     items: [
-      item("item-0", "folder", "C:\Users\you\AppData\Local\Discord", 388 * MB, "certain", "It is the application's own install folder."),
-      item("item-1", "folder", "C:\Users\you\AppData\Roaming\discord", 24 * MB, "likely", "The folder is named after the application."),
-      item("item-2", "folder", "C:\Users\you\Documents\Discord", 12000, "yourdata", "The folder is named after the application and is in Documents, where you keep your own files."),
-      item("item-3", "registry_key", "HKCU\Software\Discord", null, "likely", "The key is named after the application."),
-      item("item-4", "registry_value", "HKCU\Software\Microsoft\Windows\CurrentVersion\Run | Discord", null, "certain", "It starts a file inside the application's folder."),
-      item("item-5", "shortcut", "C:\Users\you\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Discord Inc", null, "certain", "The shortcut starts the application."),
+      item("item-0", "folder", "C:\\Users\\you\\AppData\\Local\\Discord", 388 * MB, "certain", "It is the application's own install folder."),
+      item("item-1", "folder", "C:\\Users\\you\\AppData\\Roaming\\discord", 24 * MB, "likely", "The folder is named after the application."),
+      item("item-2", "folder", "C:\\Users\\you\\Documents\\Discord", 12000, "yourdata", "The folder is named after the application and is in Documents, where you keep your own files."),
+      item("item-3", "registry_key", "HKCU\\Software\\Discord", null, "likely", "The key is named after the application."),
+      item("item-4", "registry_value", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run | Discord", null, "certain", "It starts a file inside the application's folder."),
+      item("item-5", "shortcut", "C:\\Users\\you\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Discord Inc", null, "certain", "The shortcut starts the application."),
     ],
     kept: [
-      { location: "C:\Users\you\AppData\Local\Squirrel", used_by: "Another application that updates itself the same way" },
-      { location: "HKCU\Software\Discord Inc", used_by: "Discord PTB" },
+      { location: "C:\\Users\\you\\AppData\\Local\\Squirrel", used_by: "Another application that updates itself the same way" },
+      { location: "HKCU\\Software\\Discord Inc", used_by: "Discord PTB" },
     ],
     not_offered_cloud: 0,
     unreadable: 0,
@@ -1152,7 +1152,7 @@ export async function leftovers_get(scan: string): Promise<Findings | null> {
 
 /** The user saying the uninstaller has finished; the mock never waits for one. */
 export async function await_finished(plan: string): Promise<void> {
-  if (!plans.has(plan)) throw new Error(`There is no running plan ${plan} to tell. It may have finished already.`);
+  if (plans.get(plan)?.state !== "running") throw new Error(`There is no running plan ${plan} to tell. It may have finished already.`);
 }
 
 export async function holding_list(): Promise<HoldingListing> {

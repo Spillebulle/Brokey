@@ -1171,6 +1171,26 @@ mod tests {
     }
 
     #[test]
+    fn leftovers_with_nothing_found_says_so_and_has_no_table() {
+        let findings = Findings {
+            scan: "s".into(),
+            package: PackageRef {
+                source: SourceKind::Winget,
+                id: "Valve.Steam".into(),
+            },
+            name: "Steam".into(),
+            items: Vec::new(),
+            kept: Vec::new(),
+            not_offered_cloud: 0,
+            unreadable: 0,
+        };
+        assert_eq!(
+            leftovers_text(&findings, None),
+            "Nothing was found that Steam would leave behind.\nNothing was changed.\n"
+        );
+    }
+
+    #[test]
     fn a_reference_is_source_colon_id() {
         let r = parse_ref("flatpak:flathub/app/org.gimp.GIMP/x86_64/stable").unwrap();
         assert_eq!(r.source, SourceKind::Flatpak);
