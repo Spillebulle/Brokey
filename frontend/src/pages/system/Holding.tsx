@@ -20,7 +20,9 @@ function when(created: string): string {
 /** What reads under an entry's name. */
 function detail(e: HoldingEntry): string {
   const kind = e.scope_machine ? "Needs Administrator to restore or delete." : "Held in your account.";
-  return `Held since ${when(e.created)}, ${plural(e.items, "item")}. ${kind}`;
+  const base = `Held since ${when(e.created)}, ${plural(e.items, "item")}. ${kind}`;
+  if (e.incomplete) return `${base} Moved in part, or its record cannot be read, so Brokey never empties it by itself. Delete now asks first.`;
+  return e.waiting ? `${base} Waiting to be emptied.` : base;
 }
 
 function EntryRow({ entry, busy }: { entry: HoldingEntry; busy: boolean }) {
@@ -29,7 +31,7 @@ function EntryRow({ entry, busy }: { entry: HoldingEntry; busy: boolean }) {
     <div className="bk-setting lo-entry">
       <div className="bk-setting-text">
         <span className="bk-setting-label">{entry.name}</span>
-        <span className="bk-setting-note">{entry.waiting ? `${detail(entry)} Waiting to be emptied.` : detail(entry)}</span>
+        <span className="bk-setting-note">{detail(entry)}</span>
       </div>
       <Bytes value={entry.size} />
       <div className="bk-setting-control">
@@ -121,7 +123,8 @@ export function Holding() {
           </div>
         </div>
       ) : (
-        listing.entries.map((e) => <EntryRow key={e.id} entry={e} busy={running} />)
+        // Each root's entry has an id of its own; the root is in the key as well, so that two rows never share one.
+        listing.entries.map((e) => <EntryRow key={`${e.scope_machine ? "machine" : "user"}-${e.id}`} entry={e} busy={running} />)
       )}
       <div className="bk-setting">
         <div className="bk-setting-text">

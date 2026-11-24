@@ -285,11 +285,7 @@ fn refuse_hard_link(handle: &OwnedHandle, path: &Path) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     if info.nNumberOfLinks > 1 {
-        return Err(io::Error::other(format!(
-            "{} is also another file elsewhere on the drive (a hard link), so Brokey did not \
-             copy it",
-            text_of(path)
-        )));
+        return Err(io::Error::other(super::HardLink(text_of(path))));
     }
     Ok(())
 }

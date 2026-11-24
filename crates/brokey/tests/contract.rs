@@ -730,7 +730,7 @@ fn everything_the_page_receives_matches_types_ts() {
             items: 4,
             scope_machine: true,
             waiting: false,
-            incomplete: false,
+            incomplete: true,
         },
     );
     c.value(

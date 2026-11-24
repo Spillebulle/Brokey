@@ -1173,8 +1173,8 @@ export async function holding_list(): Promise<HoldingListing> {
   if (!LEFTOVERS) return { entries: [], unreadable: [] };
   return {
     entries: [
-      { id: "h-discord", name: "Discord", created: new Date((NOW - 2 * DAY) * 1000).toISOString(), size: 412 * MB, items: 5, scope_machine: false, waiting: false },
-      { id: "h-oldapp", name: "Old Application", created: new Date((NOW - 45 * DAY) * 1000).toISOString(), size: 96 * MB, items: 3, scope_machine: true, waiting: true },
+      { id: "h-discord", name: "Discord", created: new Date((NOW - 2 * DAY) * 1000).toISOString(), size: 412 * MB, items: 5, scope_machine: false, waiting: false, incomplete: false },
+      { id: "h-oldapp", name: "Old Application", created: new Date((NOW - 45 * DAY) * 1000).toISOString(), size: 96 * MB, items: 3, scope_machine: true, waiting: true, incomplete: false },
     ],
     unreadable: [],
   };

@@ -2384,10 +2384,11 @@ pub(crate) mod tests {
         }];
         let report = hold(&root, "copy-1", "Acme", &items, &mut m);
         assert_eq!(report.held, 0, "{report:?}");
+        // Its own sentence: trying again cannot help.
+        let said = &report.failed[0].1;
         assert!(
-            report.failed[0].1.contains("hard link"),
-            "{:?}",
-            report.failed
+            said.contains("under another name elsewhere") && !said.contains("Try again"),
+            "{said}"
         );
         assert_eq!(std::fs::read_to_string(app.join("a.dat")).unwrap(), "a");
         assert_eq!(

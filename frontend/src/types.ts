@@ -310,6 +310,8 @@ export interface HoldingEntry {
   scope_machine: boolean;
   /** Machine items past 30 days that have not been emptied yet. */
   waiting: boolean;
+  /** Its record cannot be read, or it holds the only whole copy of something moved in part. Never emptied by age. */
+  incomplete: boolean;
 }
 
 /** What holding_list returns: every entry, newest first, and the roots that could not be read. */

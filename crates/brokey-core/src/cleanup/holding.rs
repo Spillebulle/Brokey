@@ -359,6 +359,16 @@ pub fn firewall_parts(location: &str) -> Option<(&str, &str)> {
 
 /// The sentence for a file or folder that could not be moved.
 pub fn io_sentence(location: &str, e: &io::Error) -> String {
+    if let Some(HardLink(file)) = e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<HardLink>())
+    {
+        return format!(
+            "{location} was left where it is, because {file} also exists under another name \
+             elsewhere on the drive, and Brokey never moves a file like that. Delete it yourself \
+             if you no longer want it."
+        );
+    }
     // ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
     if matches!(e.raw_os_error(), Some(32 | 33)) && cfg!(windows) {
         return in_use(location);
@@ -371,6 +381,24 @@ pub fn io_sentence(location: &str, e: &io::Error) -> String {
     }
     format!("{location} could not be moved ({e}), so it was left where it is. Try again.")
 }
+
+/// A file with a second name elsewhere (a hard link), which is never copied
+/// as Administrator: the error a move carries for it, so that its sentence
+/// is its own and does not ask the user to try again.
+#[derive(Debug)]
+pub struct HardLink(pub String);
+
+impl std::fmt::Display for HardLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} also exists under another name elsewhere on the drive (a hard link)",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for HardLink {}
 
 /// The sentence for a file another program has open.
 pub fn in_use(location: &str) -> String {
@@ -2682,6 +2710,20 @@ mod tests {
         assert_eq!(listed.unreadable, vec![loc(&mc.root)]);
         assert_eq!(emptied.held, 0);
         assert_eq!(emptied.failed.len(), 1, "{emptied:?}");
+    }
+
+    /// A hard link is refused for good, so its sentence never says to try
+    /// again; any other failure still does.
+    #[test]
+    fn a_hard_link_has_a_sentence_of_its_own() {
+        let link = io::Error::other(HardLink(r"C:\Acme\linked.dll".into()));
+        let said = io_sentence(r"C:\Acme", &link);
+        assert_eq!(
+            said,
+            r"C:\Acme was left where it is, because C:\Acme\linked.dll also exists under another name elsewhere on the drive, and Brokey never moves a file like that. Delete it yourself if you no longer want it."
+        );
+        let other = io::Error::other("the disk is full");
+        assert!(io_sentence(r"C:\Acme", &other).ends_with("Try again."));
     }
 
     #[test]

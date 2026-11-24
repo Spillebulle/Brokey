@@ -476,9 +476,7 @@ pub struct HoldingEntry {
     pub waiting: bool,
     /// Its record cannot be read, or it holds the only whole copy of
     /// something moved in part. Never emptied by age; Delete now, which
-    /// the user confirms, says so. Read by the planner for the confirm's
-    /// sentence and not sent to the page, whose types do not carry it.
-    #[serde(skip)]
+    /// the user confirms, says so, and the Settings row says it too.
     pub incomplete: bool,
 }
 
