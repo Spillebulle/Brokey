@@ -79,13 +79,13 @@ const STOP_LIST: [&str; 11] = [
 const SHORTEST_NAME: usize = 4;
 
 const SOFTWARE: &str = "Software";
-const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
+pub(super) const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 const APP_PATHS: &str = r"Software\Microsoft\Windows\CurrentVersion\App Paths";
 const RUN_KEYS: [&str; 2] = [
     r"Software\Microsoft\Windows\CurrentVersion\Run",
     r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
 ];
-const CLASSES: &str = r"Software\Classes";
+pub(super) const CLASSES: &str = r"Software\Classes";
 
 /// Keys directly under `Software` that are never a vendor's, whatever the
 /// application is called.
@@ -94,7 +94,7 @@ const NOT_A_VENDOR: [&str; 4] = ["classes", "microsoft", "policies", "wow6432nod
 /// Keys under `Software\Classes` that Windows itself owns. An application
 /// that set itself as the handler of one of these leaves its command there,
 /// and the key is still the protocol's or the shell's after it is gone.
-const SHELL_CLASSES: [&str; 20] = [
+pub(super) const SHELL_CLASSES: [&str; 20] = [
     "*",
     "allfilesystemobjects",
     "appid",
@@ -188,7 +188,7 @@ struct Scan<'a> {
     out: Scanned,
 }
 
-fn usable(normalised: String) -> Option<String> {
+pub(super) fn usable(normalised: String) -> Option<String> {
     (normalised.chars().count() >= SHORTEST_NAME && !STOP_LIST.contains(&normalised.as_str()))
         .then_some(normalised)
 }
@@ -221,7 +221,7 @@ fn parent_and_leaf(path: &str) -> Option<(String, String)> {
     Some((parent, leaf.to_string()))
 }
 
-fn hive_word(hive: Hive) -> &'static str {
+pub(super) fn hive_word(hive: Hive) -> &'static str {
     match hive {
         Hive::Hklm => "HKLM",
         Hive::Hklm32 => "HKLM32",
@@ -242,7 +242,7 @@ fn rank(confidence: Confidence) -> u8 {
 /// program ends at its closing quote; an unquoted one at the first word that
 /// ends in a program's extension, or else where the first switch begins. It
 /// is read from the text alone, never by asking the disk which reading exists.
-fn program_of(command: &str) -> String {
+pub(super) fn program_of(command: &str) -> String {
     let command = command.trim();
     let (quoted, rest) = match command.strip_prefix('"') {
         Some(rest) => (true, rest),
@@ -269,6 +269,36 @@ fn program_of(command: &str) -> String {
         .flatten()
         .min();
     rest[..switch.unwrap_or(rest.len())].trim().to_string()
+}
+
+/// `%NAME%` to what it stands for, from the well-known folders.
+pub(super) fn environment(view: &dyn SystemView) -> HashMap<String, String> {
+    [
+        ("LOCALAPPDATA", Known::LocalAppData),
+        ("APPDATA", Known::AppData),
+        ("USERPROFILE", Known::Profile),
+        ("PROGRAMFILES", Known::ProgramFiles),
+        ("PROGRAMW6432", Known::ProgramFiles),
+        ("PROGRAMFILES(X86)", Known::ProgramFilesX86),
+        ("PROGRAMDATA", Known::ProgramData),
+        ("ALLUSERSPROFILE", Known::ProgramData),
+        ("SYSTEMROOT", Known::Windows),
+        ("WINDIR", Known::Windows),
+    ]
+    .into_iter()
+    .filter_map(|(name, k)| {
+        view.known_folder(k)
+            .map(|f| (name.to_string(), f.to_string_lossy().into_owned()))
+    })
+    .collect()
+}
+
+/// The program a command line starts, with `%NAME%` expanded from `env`.
+pub(super) fn program(command: &str, env: &HashMap<String, String>) -> String {
+    let command = command.trim();
+    let expanded = shortcut::expand_with(command, &|name| env.get(&name.to_uppercase()).cloned())
+        .unwrap_or_else(|| command.to_string());
+    program_of(&expanded)
 }
 
 fn text_of(path: &Option<std::path::PathBuf>) -> Option<String> {
@@ -331,21 +361,7 @@ impl<'a> Scan<'a> {
         .filter_map(|(k, tail)| folder(k).map(|f| join(&f, tail)))
         .collect();
         let data_roots = of(&[Known::Documents, Known::SavedGames]);
-        let env = [
-            ("LOCALAPPDATA", Known::LocalAppData),
-            ("APPDATA", Known::AppData),
-            ("USERPROFILE", Known::Profile),
-            ("PROGRAMFILES", Known::ProgramFiles),
-            ("PROGRAMW6432", Known::ProgramFiles),
-            ("PROGRAMFILES(X86)", Known::ProgramFilesX86),
-            ("PROGRAMDATA", Known::ProgramData),
-            ("ALLUSERSPROFILE", Known::ProgramData),
-            ("SYSTEMROOT", Known::Windows),
-            ("WINDIR", Known::Windows),
-        ]
-        .into_iter()
-        .filter_map(|(name, k)| folder(k).map(|f| (name.to_string(), f)))
-        .collect();
+        let env = environment(view);
         let mut scan = Scan {
             hints,
             view,
@@ -547,11 +563,7 @@ impl<'a> Scan<'a> {
         if self.homes.is_empty() {
             return None;
         }
-        let command = command.trim();
-        let expanded =
-            shortcut::expand_with(command, &|name| self.env.get(&name.to_uppercase()).cloned())
-                .unwrap_or_else(|| command.to_string());
-        let program = program_of(&expanded);
+        let program = program(command, &self.env);
         self.homes
             .iter()
             .any(|home| inside(&program, home))
