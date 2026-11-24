@@ -53,6 +53,14 @@ function footerSentences(found: Findings): string[] {
   return out;
 }
 
+/** What a row shows: a firewall rule by its name, since its id (often a GUID) only tells two same-named rules apart and stays in the tooltip. */
+export function shownLocation(item: LeftoverItem): string {
+  if (item.kind !== "firewall_rule") return item.location;
+  const bare = item.location.replace(/^firewall:/, "");
+  const cut = bare.lastIndexOf(" | ");
+  return cut > 0 ? bare.slice(0, cut) : bare;
+}
+
 function ItemRow({ item, ticked, onToggle }: { item: LeftoverItem; ticked: boolean; onToggle: (on: boolean) => void }) {
   return (
     <Row
@@ -69,7 +77,7 @@ function ItemRow({ item, ticked, onToggle }: { item: LeftoverItem; ticked: boole
         </>
       }
     >
-      {middleTruncate(item.location)}
+      {middleTruncate(shownLocation(item))}
     </Row>
   );
 }
