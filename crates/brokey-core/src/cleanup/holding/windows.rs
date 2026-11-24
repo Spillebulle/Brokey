@@ -657,7 +657,9 @@ thread_local! {
 }
 
 /// A subkey that must not be a link, opened or, with `create`, made, and
-/// whether it was made new. Both the open and the create take a link at
+/// whether it was made new. `create` is the access asked for beside
+/// `access` only when the key is made here, so that a key that was there
+/// already is never opened for more than it needs. Both the open and the create take a link at
 /// that name as the link itself (`REG_OPTION_OPEN_LINK`), never what it
 /// leads to, so a link planted between the two is opened, asked, and
 /// refused; and what comes back is asked whatever the create says it did.
@@ -665,13 +667,20 @@ fn child_unlinked(
     parent: &windows_registry::Key,
     name: &str,
     access: u32,
-    create: bool,
+    create: Option<u32>,
     location: &str,
 ) -> Done<(windows_registry::Key, bool)> {
+    let Some(extra) = create else {
+        return match open_child(parent, name, access, false) {
+            Ok(key) if is_link(&key) => Err(link_failure(location)),
+            Ok(key) => Ok((key, false)),
+            Err(code) => Err(win32_failure(location, code)),
+        };
+    };
     match open_child(parent, name, access, false) {
         Ok(key) if is_link(&key) => return Err(link_failure(location)),
         Ok(key) => return Ok((key, false)),
-        Err(code) if !create || code != ERROR_FILE_NOT_FOUND => {
+        Err(code) if code != ERROR_FILE_NOT_FOUND => {
             return Err(win32_failure(location, code));
         }
         Err(_) => {}
@@ -693,7 +702,7 @@ fn child_unlinked(
             0,
             ptr::null(),
             REG_OPTION_NON_VOLATILE | REG_OPTION_OPEN_LINK,
-            access | KEY_QUERY_VALUE | KEY_WOW64_64KEY,
+            access | extra | KEY_QUERY_VALUE | KEY_WOW64_64KEY,
             ptr::null(),
             &mut handle,
             &mut disposition,
@@ -763,7 +772,7 @@ fn walk_made(
                 .map_err(|code| win32_failure(&location, code))?;
             (key, false)
         } else {
-            child_unlinked(parent, part, want, create, &location)?
+            child_unlinked(parent, part, want, create.then_some(0), &location)?
         };
         current = Some(key);
         made = new;
@@ -820,7 +829,7 @@ fn read_node(key: &windows_registry::Key, location: &str) -> Done<KeyNode> {
         .map_err(|e| registry_failure(location, e))?
         .collect();
     for name in names {
-        let (sub, _) = child_unlinked(key, &name, KEY_READ, false, location)?;
+        let (sub, _) = child_unlinked(key, &name, KEY_READ, None, location)?;
         node.subkeys.push((name, read_node(&sub, location)?));
     }
     Ok(node)
@@ -851,8 +860,10 @@ fn write_node(
             .map_err(|e| registry_failure(location, e))?;
     }
     for (name, sub) in &node.subkeys {
-        let access = KEY_READ | KEY_WRITE | KEY_DELETE;
-        let (child, new) = child_unlinked(key, name, access, true, location)?;
+        // DELETE only on a key made here, which a failed restore takes
+        // back; one that was there is only read and written.
+        let (child, new) =
+            child_unlinked(key, name, KEY_READ | KEY_WRITE, Some(KEY_DELETE), location)?;
         if fresh && !new {
             return Err(Failure::Occupied);
         }
@@ -885,7 +896,7 @@ fn delete_tree(key: &windows_registry::Key, location: &str) -> Done<()> {
         .map_err(|e| registry_failure(location, e))?
         .collect();
     for name in names {
-        let (child, _) = child_unlinked(key, &name, KEY_READ | KEY_DELETE, false, location)?;
+        let (child, _) = child_unlinked(key, &name, KEY_READ | KEY_DELETE, None, location)?;
         delete_tree(&child, location)?;
     }
     // SAFETY: an open key with DELETE access; it is closed when `key` goes.
@@ -2015,6 +2026,73 @@ pub(crate) mod tests {
     /// A subkey that turns up inside a key a restore has just made, between
     /// the look and the create, is someone else's: nothing is written into
     /// it, and taking back the half-made key never deletes it.
+    #[test]
+    fn a_merge_writes_into_an_existing_subkey_it_may_not_delete() {
+        /// Put a DACL from SDDL on a key this user owns.
+        fn set_key_dacl(path: &str, sddl: &str) {
+            use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RegOpenKeyExW};
+            const WRITE_DAC: u32 = 0x0004_0000;
+            let name = wide_str(path);
+            let mut handle: HKEY = ptr::null_mut();
+            // SAFETY: a NUL-terminated name and an out parameter; the owner
+            // may always change the DACL.
+            let opened = unsafe {
+                RegOpenKeyExW(HKEY_CURRENT_USER, name.as_ptr(), 0, WRITE_DAC, &mut handle)
+            };
+            assert_eq!(opened, 0);
+            // SAFETY: a key handle just opened, owned by nothing else.
+            let key = unsafe { windows_registry::Key::from_raw(handle as _) };
+            let sddl = wide(sddl);
+            let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+            // SAFETY: out parameters; the descriptor is freed once at the end.
+            unsafe {
+                assert_ne!(
+                    ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                        sddl.as_ptr(),
+                        SDDL_REVISION_1,
+                        &mut descriptor,
+                        ptr::null_mut(),
+                    ),
+                    0
+                );
+                let code = windows_sys::Win32::System::Registry::RegSetKeySecurity(
+                    key.as_raw() as _,
+                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                    descriptor,
+                );
+                LocalFree(descriptor as HLOCAL);
+                assert_eq!(code, 0);
+            }
+        }
+        let key = TestKey::new("merge-no-delete");
+        let sub = format!(r"{}\Sub", key.0);
+        windows_registry::CURRENT_USER
+            .create(&sub)
+            .unwrap()
+            .set_u32("There", 1)
+            .unwrap();
+        // Read and write, and no DELETE, for everyone.
+        set_key_dacl(&sub, "D:P(A;;KRKW;;;WD)");
+        let node = KeyNode {
+            values: Vec::new(),
+            subkeys: vec![(
+                "Sub".into(),
+                KeyNode {
+                    values: vec![("Back".into(), value(REG_DWORD, &2u32.to_le_bytes()))],
+                    subkeys: Vec::new(),
+                },
+            )],
+        };
+        let mut m = LiveMutate::new(PathBuf::from(r"C:\nowhere"));
+        let restored = m.restore_key(Hive::Hkcu, &key.0, &node, true);
+        let back = windows_registry::CURRENT_USER
+            .open(&sub)
+            .and_then(|k| k.get_u32("Back"));
+        set_key_dacl(&sub, "D:P(A;;KA;;;WD)");
+        assert_eq!(restored, Ok(()));
+        assert_eq!(back.ok(), Some(2));
+    }
+
     #[test]
     fn a_subkey_someone_else_makes_inside_a_new_key_is_left_alone() {
         let key = TestKey::new("theirs");
