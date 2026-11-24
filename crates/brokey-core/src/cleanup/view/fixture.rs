@@ -22,6 +22,12 @@ struct Snapshot {
     unreadable: Vec<String>,
     /// Paths whose own reparse kind is not `None`.
     reparse: HashMap<String, Reparse>,
+    /// Folder path to how many of its entries cannot be read.
+    unreadable_entries: HashMap<String, u32>,
+    /// How many services, tasks and firewall rules cannot be read.
+    unreadable_services: u32,
+    unreadable_tasks: u32,
+    unreadable_firewall: u32,
     /// Folder sizes that are not the sum of what they hold.
     sizes: HashMap<String, u64>,
     /// Hive to key path to the key.
@@ -37,6 +43,8 @@ pub struct FixtureView {
     folders: HashMap<Known, String>,
     dirs: HashMap<String, Vec<Entry>>,
     unreadable: HashSet<String>,
+    unreadable_entries: HashMap<String, u32>,
+    unreadable_counts: [u32; 3],
     reparse: HashMap<String, Reparse>,
     sizes: HashMap<String, u64>,
     registry: HashMap<(Hive, String), Key>,
@@ -78,6 +86,16 @@ impl FixtureView {
             folders: snap.folders,
             dirs: snap.dirs.into_iter().map(|(p, e)| (norm(&p), e)).collect(),
             unreadable: snap.unreadable.iter().map(|p| norm(p)).collect(),
+            unreadable_entries: snap
+                .unreadable_entries
+                .iter()
+                .map(|(p, n)| (norm(p), *n))
+                .collect(),
+            unreadable_counts: [
+                snap.unreadable_services,
+                snap.unreadable_tasks,
+                snap.unreadable_firewall,
+            ],
             reparse: snap.reparse.iter().map(|(p, r)| (norm(p), *r)).collect(),
             sizes: snap.sizes.iter().map(|(p, s)| (norm(p), *s)).collect(),
             registry,
@@ -117,6 +135,7 @@ impl FixtureView {
         };
         entries
             .iter()
+            .filter(|e| e.reparse == Reparse::None)
             .map(|e| {
                 if e.is_dir {
                     self.size_of(&format!("{key}\\{}", e.name.to_lowercase()))
@@ -133,15 +152,18 @@ impl SystemView for FixtureView {
         self.folders.get(&which).map(PathBuf::from)
     }
 
-    fn list(&self, dir: &Path) -> Result<Vec<Entry>, ViewError> {
+    fn list(&self, dir: &Path) -> Result<Listed<Entry>, ViewError> {
         let key = norm_path(dir);
         if self.unreadable.contains(&key) {
             return Err(ViewError::Unreadable(dir.display().to_string()));
         }
-        self.dirs
+        let items = self
+            .dirs
             .get(&key)
             .cloned()
-            .ok_or_else(|| ViewError::Missing(dir.display().to_string()))
+            .ok_or_else(|| ViewError::Missing(dir.display().to_string()))?;
+        let unreadable = self.unreadable_entries.get(&key).copied().unwrap_or(0);
+        Ok(Listed { items, unreadable })
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -176,16 +198,25 @@ impl SystemView for FixtureView {
         self.shortcuts.get(&norm_path(lnk)).map(PathBuf::from)
     }
 
-    fn services(&self) -> Vec<Service> {
-        self.services.clone()
+    fn services(&self) -> Listed<Service> {
+        Listed {
+            items: self.services.clone(),
+            unreadable: self.unreadable_counts[0],
+        }
     }
 
-    fn tasks(&self) -> Vec<ScheduledTask> {
-        self.tasks.clone()
+    fn tasks(&self) -> Listed<ScheduledTask> {
+        Listed {
+            items: self.tasks.clone(),
+            unreadable: self.unreadable_counts[1],
+        }
     }
 
-    fn firewall_rules(&self) -> Vec<FirewallRule> {
-        self.firewall.clone()
+    fn firewall_rules(&self) -> Listed<FirewallRule> {
+        Listed {
+            items: self.firewall.clone(),
+            unreadable: self.unreadable_counts[2],
+        }
     }
 }
 
@@ -207,6 +238,8 @@ mod tests {
             Some(PathBuf::from(r"C:\Program Files"))
         );
         let listed = v.list(Path::new(r"C:\Program Files\Acme")).unwrap();
+        assert_eq!(listed.unreadable, 1);
+        let listed = listed.items;
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].name, "acme.exe");
         assert!(!listed[0].is_dir);
@@ -228,13 +261,13 @@ mod tests {
             Err(ViewError::Missing(r"Software\Acme".into()))
         );
 
-        assert_eq!(v.services().len(), 1);
-        assert_eq!(v.services()[0].name, "AcmeSvc");
+        assert_eq!(v.services().items.len(), 1);
+        assert_eq!(v.services().items[0].name, "AcmeSvc");
         assert_eq!(
-            v.tasks()[0].actions,
+            v.tasks().items[0].actions,
             vec![r"C:\Program Files\Acme\acme.exe"]
         );
-        assert_eq!(v.firewall_rules()[0].name, "Acme");
+        assert_eq!(v.firewall_rules().items[0].name, "Acme");
 
         assert_eq!(
             v.reparse(Path::new(r"C:\Program Files\Acme\link")),
@@ -251,7 +284,10 @@ mod tests {
 
         assert!(v.exists(Path::new(r"C:\Program Files\Acme\acme.exe")));
         assert!(!v.exists(Path::new(r"C:\Program Files\Nothing")));
-        assert_eq!(v.dir_size(Path::new(r"C:\Program Files\Acme")), 1000 + 50);
+        assert_eq!(v.dir_size(Path::new(r"C:\Program Files\Acme")), 1000);
+        assert_eq!(v.services().unreadable, 2);
+        assert_eq!(v.tasks().unreadable, 3);
+        assert_eq!(v.firewall_rules().unreadable, 0);
         assert_eq!(
             v.shortcut_target(Path::new(r"C:\Start\Acme.lnk")),
             Some(PathBuf::from(r"C:\Program Files\Acme\acme.exe"))

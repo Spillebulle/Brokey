@@ -13,6 +13,9 @@
     "C:\\Program Files\\Acme\\link": [{ "name": "inner.txt", "size": 50 }]
   },
   "unreadable": ["C:\\ProgramData\\Locked"],
+  "unreadable_entries": { "C:\\Program Files\\Acme": 1 },
+  "unreadable_services": 2,
+  "unreadable_tasks": 3,
   "reparse": { "C:\\Users\\me\\OneDrive": "Cloud" },
   "registry": {
     "Hkcu": {

@@ -112,9 +112,28 @@ pub enum ViewError {
     Missing(String),
 }
 
+/// What a read found, and how many places it could not look in. The scan
+/// reports the count rather than skipping those places silently.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed<T> {
+    pub items: Vec<T>,
+    pub unreadable: u32,
+}
+
+impl<T> Default for Listed<T> {
+    fn default() -> Self {
+        Listed {
+            items: Vec::new(),
+            unreadable: 0,
+        }
+    }
+}
+
 pub trait SystemView {
     fn known_folder(&self, which: Known) -> Option<PathBuf>;
-    fn list(&self, dir: &Path) -> Result<Vec<Entry>, ViewError>;
+    /// `Err` only when the directory itself cannot be read; entries inside
+    /// it that cannot be read are counted in `unreadable`.
+    fn list(&self, dir: &Path) -> Result<Listed<Entry>, ViewError>;
     fn exists(&self, path: &Path) -> bool;
     /// Of the path itself, not of what it leads to.
     fn reparse(&self, path: &Path) -> Reparse;
@@ -123,7 +142,7 @@ pub trait SystemView {
     /// Each value's data as text.
     fn values(&self, hive: Hive, path: &str) -> Result<Vec<(String, String)>, ViewError>;
     fn shortcut_target(&self, lnk: &Path) -> Option<PathBuf>;
-    fn services(&self) -> Vec<Service>;
-    fn tasks(&self) -> Vec<ScheduledTask>;
-    fn firewall_rules(&self) -> Vec<FirewallRule>;
+    fn services(&self) -> Listed<Service>;
+    fn tasks(&self) -> Listed<ScheduledTask>;
+    fn firewall_rules(&self) -> Listed<FirewallRule>;
 }

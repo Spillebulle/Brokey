@@ -4,7 +4,6 @@
 
 use super::*;
 use crate::sources::windows::shortcut;
-use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
@@ -65,7 +64,7 @@ fn io_error(path: &Path, e: &std::io::Error) -> ViewError {
 /// The reparse tag of a path that is one, read from the directory entry
 /// (`dwReserved0` holds the tag there) without opening what it leads to.
 fn reparse_tag(path: &Path) -> Option<u32> {
-    let wide: Vec<u16> = OsStr::new(path).encode_wide().chain([0]).collect();
+    let wide: Vec<u16> = long_path(path).encode_wide().chain([0]).collect();
     // SAFETY: `wide` is NUL-terminated and outlives the call, `data` is a
     // plain-data out parameter, and the handle is closed on the one path
     // that opens it.
@@ -80,6 +79,19 @@ fn reparse_tag(path: &Path) -> Option<u32> {
     }
 }
 
+/// The `\\?\` form of an absolute path, which lifts the 260 character limit.
+fn long_path(path: &Path) -> std::ffi::OsString {
+    let text = path.as_os_str();
+    let s = text.to_string_lossy();
+    if s.starts_with(r"\\?\") || !path.is_absolute() {
+        text.to_os_string()
+    } else if let Some(unc) = s.strip_prefix(r"\\") {
+        format!(r"\\?\UNC\{unc}").into()
+    } else {
+        format!(r"\\?\{s}").into()
+    }
+}
+
 fn reparse_of_attributes(path: &Path, attributes: u32) -> Reparse {
     if attributes & (FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_RECALL_ON_OPEN) != 0 {
         return Reparse::Cloud;
@@ -90,6 +102,10 @@ fn reparse_of_attributes(path: &Path, attributes: u32) -> Reparse {
     match reparse_tag(path) {
         Some(IO_REPARSE_TAG_MOUNT_POINT | IO_REPARSE_TAG_SYMLINK) => Reparse::NameSurrogate,
         Some(tag) if is_cloud_tag(tag) => Reparse::Cloud,
+        // The attribute says it is a reparse point and the tag cannot be
+        // read: assume the worst, since a name that leads elsewhere is what
+        // this exists to keep a clean-up out of.
+        None => Reparse::NameSurrogate,
         _ => Reparse::None,
     }
 }
@@ -227,21 +243,26 @@ impl SystemView for LiveView {
         }
     }
 
-    fn list(&self, dir: &Path) -> Result<Vec<Entry>, ViewError> {
+    fn list(&self, dir: &Path) -> Result<Listed<Entry>, ViewError> {
         let read = std::fs::read_dir(dir).map_err(|e| io_error(dir, &e))?;
-        let mut out = Vec::new();
+        let mut out = Listed::default();
         for item in read {
-            let Ok(item) = item else { continue };
+            let Ok(item) = item else {
+                out.unreadable += 1;
+                continue;
+            };
             let path = item.path();
             // `symlink_metadata` describes the name and not what it leads to.
             let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                out.unreadable += 1;
                 continue;
             };
             let attributes = meta.file_attributes();
-            out.push(Entry {
+            let is_dir = attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+            out.items.push(Entry {
                 name: item.file_name().to_string_lossy().into_owned(),
-                is_dir: attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
-                size: meta.len(),
+                is_dir,
+                size: if is_dir { 0 } else { meta.len() },
                 reparse: reparse_of_attributes(&path, attributes),
             });
         }
@@ -309,68 +330,102 @@ impl SystemView for LiveView {
         link.target.map(PathBuf::from)
     }
 
-    fn services(&self) -> Vec<Service> {
+    /// A service whose key cannot be opened or read counts as unreadable; one
+    /// with no `ImagePath` (a driver entry, say) is simply not an application.
+    fn services(&self) -> Listed<Service> {
+        let mut out = Listed::default();
         let Ok(root) = windows_registry::LOCAL_MACHINE.open(SERVICES) else {
-            return Vec::new();
+            out.unreadable = 1;
+            return out;
         };
         let Ok(names) = root.keys() else {
-            return Vec::new();
+            out.unreadable = 1;
+            return out;
         };
-        names
-            .filter_map(|name| {
-                let image_path = root.open(&name).ok()?.get_string("ImagePath").ok()?;
-                Some(Service { name, image_path })
-            })
-            .collect()
+        for name in names {
+            let Ok(key) = root.open(&name) else {
+                out.unreadable += 1;
+                continue;
+            };
+            match key.get_value("ImagePath") {
+                Ok(v) => {
+                    out.items.push(Service {
+                        name,
+                        image_path: value_text(v),
+                    });
+                }
+                Err(e) if NOT_FOUND.contains(&e.code().0) => {}
+                Err(_) => out.unreadable += 1,
+            }
+        }
+        out
     }
 
-    /// Tasks whose definition cannot be read are left out: the scheduler
+    /// Task files and folders that cannot be read are counted: the scheduler
     /// keeps some of them readable by SYSTEM only.
-    fn tasks(&self) -> Vec<ScheduledTask> {
+    fn tasks(&self) -> Listed<ScheduledTask> {
         let root = Path::new(TASKS_DIR);
-        let mut out = Vec::new();
+        let mut out = Listed::default();
         let mut pending = vec![root.to_path_buf()];
         while let Some(dir) = pending.pop() {
             let Ok(read) = std::fs::read_dir(&dir) else {
+                out.unreadable += 1;
                 continue;
             };
-            for item in read.flatten() {
+            for item in read {
+                let Ok(item) = item else {
+                    out.unreadable += 1;
+                    continue;
+                };
                 let path = item.path();
-                let Ok(kind) = item.file_type() else { continue };
+                let Ok(kind) = item.file_type() else {
+                    out.unreadable += 1;
+                    continue;
+                };
                 if kind.is_dir() {
                     pending.push(path);
                 } else if let Ok(bytes) = std::fs::read(&path) {
                     let rel = path.strip_prefix(root).unwrap_or(&path);
-                    out.push(ScheduledTask {
+                    out.items.push(ScheduledTask {
                         path: format!(r"\{}", rel.display()),
                         actions: task_commands(&decode(&bytes)),
                     });
+                } else {
+                    out.unreadable += 1;
                 }
             }
         }
         out
     }
 
-    fn firewall_rules(&self) -> Vec<FirewallRule> {
+    fn firewall_rules(&self) -> Listed<FirewallRule> {
+        let mut out = Listed::default();
         let Ok(key) = windows_registry::LOCAL_MACHINE.open(FIREWALL_RULES) else {
-            return Vec::new();
+            out.unreadable = 1;
+            return out;
         };
         let Ok(values) = key.values() else {
-            return Vec::new();
+            out.unreadable = 1;
+            return out;
         };
-        values
-            .filter_map(|(id, value)| {
-                let text = String::try_from(value).ok()?;
-                let (app, name) = firewall_fields(&text);
-                Some(FirewallRule {
+        for (id, value) in values {
+            let Ok(text) = String::try_from(value) else {
+                out.unreadable += 1;
+                continue;
+            };
+            let (app, name) = firewall_fields(&text);
+            // A rule with no program is about a port or a service: not ours.
+            if let Some(app) = app {
+                out.items.push(FirewallRule {
                     name: name
                         .filter(|n| !n.starts_with('@'))
                         .unwrap_or(&id)
                         .to_string(),
-                    program: app?.to_string(),
-                })
-            })
-            .collect()
+                    program: app.to_string(),
+                });
+            }
+        }
+        out
     }
 }
 
@@ -421,12 +476,54 @@ mod tests {
     }
 
     #[test]
+    fn a_junction_is_a_name_surrogate_and_is_not_counted_through() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("big.bin"), vec![0u8; 4096]).unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.txt"), b"abc").unwrap();
+        let link = root.join("link");
+        // `mklink /J` needs no privilege, unlike a directory symlink.
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .unwrap();
+        if !made.status.success() {
+            eprintln!("could not make a junction here, skipping");
+            return;
+        }
+        let v = LiveView::new();
+        assert_eq!(v.reparse(&link), Reparse::NameSurrogate);
+        assert_eq!(v.reparse(&root.join("a.txt")), Reparse::None);
+        assert_eq!(v.dir_size(&root), 3);
+        let listed = v.list(&root).unwrap();
+        let entry = listed.items.iter().find(|e| e.name == "link").unwrap();
+        assert_eq!(entry.reparse, Reparse::NameSurrogate);
+        assert_eq!(entry.size, 0);
+        assert_eq!(listed.unreadable, 0);
+    }
+
+    #[test]
+    fn long_paths_get_the_verbatim_prefix() {
+        assert_eq!(long_path(Path::new(r"C:\a\b")), r"\\?\C:\a\b");
+        assert_eq!(
+            long_path(Path::new(r"\\srv\share\x")),
+            r"\\?\UNC\srv\share\x"
+        );
+        assert_eq!(long_path(Path::new(r"\\?\C:\a")), r"\\?\C:\a");
+    }
+
+    #[test]
     #[ignore]
     fn live_view_reads_this_machine() {
         let v = LiveView::new();
         let pf = v.known_folder(Known::ProgramFiles).expect("Program Files");
         assert!(v.exists(&pf));
-        assert!(!v.services().is_empty());
+        assert!(!v.services().items.is_empty());
         if let Some(profile) = v.known_folder(Known::Profile) {
             let r = v.reparse(&profile.join("OneDrive"));
             assert!(matches!(r, Reparse::Cloud | Reparse::None), "{r:?}");
