@@ -123,6 +123,32 @@ Turning one on or off asks to allow it as Administrator. When Windows needs a
 restart to finish the change, the end of the transaction says so; Brokey never
 restarts the machine. `brokey features` lists them in a terminal.
 
+## Leftovers
+
+On Windows, removing an application does not stop at its uninstaller. Brokey
+notes where the application lives before the uninstaller runs, waits until it
+has really finished, and then looks for what it left behind: its folder, its
+folders in AppData and ProgramData, its registry keys, Start menu shortcuts
+that now point at nothing, and services, scheduled tasks and firewall rules
+that run something from its folder. The list says how sure Brokey is of each
+item, **Certain**, **Likely**, **Possible** or **Your data**, and ticks only
+the first two. Save games and documents are offered but never ticked.
+
+Anything another installed application still uses is kept, and the list says
+how many items were kept and why. Folders OneDrive syncs are never offered.
+What you choose is moved to a holding area rather than deleted: Settings lists
+it, puts it back with **Restore**, deletes it with **Delete now**, and Brokey
+empties anything older than 30 days by itself. Items from Program Files or the
+machine's registry need Administrator to move, restore or delete.
+
+When an uninstaller is missing or fails, an Add/Remove Programs entry's page
+offers **Forced removal**, which does not run the uninstaller and clears the
+same list, including a Windows Installer product's own registration so it can
+be installed again. A Steam game is removed by Steam itself, which asks you to
+confirm. `brokey leftovers <source>:<id>` shows, for an application that is
+still installed, what would be offered and what would be kept, and changes
+nothing.
+
 ## For other applications
 
 From 0.1.8 another application can hand the user to Brokey for one installed
@@ -145,6 +171,7 @@ supports this are in [`docs/brokey-handoff.md`](docs/brokey-handoff.md).
 - apt and dnf are written to the same interface as pacman but have not run on a real Debian or Fedora. They are marked untested in the sources list until they have.
 - Drivers are managed only through chwd (CachyOS). Elsewhere they install as ordinary packages.
 - On Windows the Features page has optional features and the two OpenSSH capabilities, not the rest of Windows's capabilities, such as language packs and the RSAT tools: only DISM lists those, and it answers only a process running as Administrator. Turning a feature on or off is admitted by the helper and covered by tests, but has not yet been carried out on a real machine.
+- Clearing leftovers after a removal works on Windows only. Linux comes next: there a package manager already removes the files it installed, and what remains is the configuration and caches in your home folder.
 - No reviews, and no ratings outside the Microsoft Store's own.
 - An application installed by hand, such as a browser unpacked into your home folder, is not listed: no package manager has a record of it.
 - AppImages from GitHub releases are placed in `~/.local/bin` without a menu entry yet.
