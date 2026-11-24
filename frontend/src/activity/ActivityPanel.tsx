@@ -2,9 +2,9 @@
 // has just ended: the step in hand as the title, a rail with a fraction only
 // when one is known (§7.18), "2 of 5", and the log a click away.
 
-import { Activity, Terminal, X } from "lucide-react";
+import { Activity, Terminal, Trash2, X } from "lucide-react";
 import { useEffect, useRef } from "react";
-import { cancel_plan } from "../api";
+import { await_finished, cancel_plan } from "../api";
 import { Button } from "../components/Button";
 import { Figure } from "../components/Figure";
 import { IconButton } from "../components/IconButton";
@@ -14,7 +14,10 @@ import { Progress } from "../components/Progress";
 import { toast } from "../components/toastStore";
 import { selectIsWindows, useShell } from "../shell/store";
 import type { PlanStatus } from "../types";
-import { isLive, selectActivePlan, selectLivePlans, useActivity } from "./store";
+import { forcedRemovalIntro, forcedRemovalOffer } from "./forced";
+import { startOps } from "./flow";
+import { Leftovers } from "./Leftovers";
+import { isLive, leftoversOf, selectActivePlan, selectLivePlans, useActivity } from "./store";
 
 /** How many log lines the block keeps; older ones scroll out of memory, not just out of view. */
 const LOG_LINES = 200;
@@ -34,6 +37,8 @@ interface Snapshot {
   message: string | null;
   /** What the step that failed said. */
   failure: string | null;
+  /** What the step says while it waits for the user to finish an uninstaller; null when it is not waiting. */
+  waiting: string | null;
   finished: string | null;
   log: LogLine[];
 }
@@ -47,6 +52,7 @@ function snapshot(plan: PlanStatus): Snapshot {
     fraction: null,
     message: null,
     failure: null,
+    waiting: null,
     finished: null,
     log: [],
   };
@@ -60,6 +66,13 @@ function snapshot(plan: PlanStatus): Snapshot {
         s.stepTitle = e.title;
         s.fraction = null;
         s.message = null;
+        s.waiting = null;
+        break;
+      case "waiting":
+        s.waiting = e.message;
+        s.fraction = null;
+        break;
+      case "leftovers":
         break;
       case "progress":
         s.fraction = e.fraction;
@@ -69,6 +82,7 @@ function snapshot(plan: PlanStatus): Snapshot {
         s.log.push({ line: e.line, stderr: e.stderr });
         break;
       case "step_finished":
+        s.waiting = null;
         if (e.message) {
           s.log.push({ line: e.message, stderr: !e.ok });
           if (!e.ok) s.failure = e.message;
@@ -125,6 +139,7 @@ function sentence(plan: PlanStatus, snap: Snapshot, flags: PanelFlags): string |
     case "authorising":
       return flags.windows ? "Allow the change in the Windows dialog." : "Enter your password in the system dialog.";
     case "running":
+      if (snap.waiting) return snap.waiting;
       return snap.message ?? (snap.fraction === null ? "No progress has been reported yet." : null);
     case "done":
       return snap.finished;
@@ -166,12 +181,31 @@ export function ActivityPanel() {
   const windows = useShell(selectIsWindows);
   if (!plan) return null;
 
+  const found = plan.state === "done" ? leftoversOf(plan) : null;
+  if (found) return <Leftovers plan={plan.plan.id} scan={found.scan} />;
+
   const snap = snapshot(plan);
   const live = isLive(plan.state);
   const flags: PanelFlags = { cancelling, windows };
   const title = heading(plan, snap, flags);
   const line = sentence(plan, snap, flags);
-  const fraction = plan.state === "done" ? 1 : snap.fraction;
+  const fraction = plan.state === "done" ? 1 : snap.waiting ? null : snap.fraction;
+  const waiting = live && !cancelling && snap.waiting !== null;
+  const offer = forcedRemovalOffer(plan);
+
+  const finished = async () => {
+    try {
+      await await_finished(plan.plan.id);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  };
+  const force = () => {
+    if (!offer) return;
+    void startOps([{ op: "forceremove", package: offer.package }], `Forced removal of ${offer.name}`, forcedRemovalIntro(offer.name)).then((started) => {
+      if (started) dismiss(plan.plan.id);
+    });
+  };
 
   const cancel = async () => {
     markCancelling(plan.plan.id);
@@ -191,7 +225,17 @@ export function ActivityPanel() {
       count={liveCount > 1 ? liveCount : undefined}
       commands={
         <>
-          {live && !cancelling ? (
+          {waiting ? (
+            <>
+              <Button kind="primary" onClick={() => void finished()} title="Tell Brokey the uninstaller is done. It checks that the application has gone.">
+                It has finished
+              </Button>
+              <Button kind="ghost" onClick={() => void cancel()} title="Stop waiting. The uninstaller stays open; finish it or close it yourself.">
+                Stop waiting
+              </Button>
+            </>
+          ) : null}
+          {live && !cancelling && !waiting ? (
             <Button kind="ghost" onClick={() => void cancel()} title="Stop after the current step. Nothing half done is left behind.">
               Cancel
             </Button>
@@ -213,6 +257,13 @@ export function ActivityPanel() {
             <Figure className="bk-dim">
               {snap.step} of {snap.steps}
             </Figure>
+          </div>
+        ) : null}
+        {offer ? (
+          <div className="lo-offer">
+            <Button kind="outline" icon={<Trash2 {...ICON} aria-hidden="true" />} onClick={force} title="Removes its folder and registry entry without running the uninstaller. Asks first.">
+              Forced removal…
+            </Button>
           </div>
         ) : null}
         {showLog ? <Log lines={snap.log} /> : null}

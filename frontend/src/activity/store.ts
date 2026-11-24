@@ -41,6 +41,12 @@ function stub(id: string): PlanStatus {
 
 const LIVE: ReadonlySet<PlanState> = new Set<PlanState>(["pending", "authorising", "running"]);
 
+/** The scan a removal ended with, or null when it made none. */
+export function leftoversOf(plan: PlanStatus): { scan: string; count: number } | null {
+  for (const e of plan.events) if (e.event === "leftovers") return { scan: e.scan, count: e.count };
+  return null;
+}
+
 export function isLive(state: PlanState): boolean {
   return LIVE.has(state);
 }
@@ -111,7 +117,8 @@ export const useActivity = create<ActivityState>((set, get) => ({
       if (!(next.state === "done" && namesItsOwnOutcome(next))) {
         toast(event.message, next.state === "done" ? "good" : next.state === "failed" ? "error" : "neutral");
       }
-      if (next.state !== "failed") {
+      // A removal that found leftovers stays until the list has been answered.
+      if (next.state !== "failed" && !(next.state === "done" && leftoversOf(next) !== null)) {
         window.setTimeout(() => {
           const now = get().plans[event.plan];
           if (now && now.state === next.state) get().dismiss(event.plan);

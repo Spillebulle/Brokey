@@ -58,6 +58,8 @@ const MB = 1000 * 1000;
 //                       design's section 6) and the holding area has two
 //                       entries, one of them waiting. Combine it with
 //                       ?platform=windows
+//   ?waiting=1          with ?leftovers=1, a removal waits for the uninstaller
+//                       until "It has finished" is pressed
 // A plan whose operations name a package called "fail-please" fails at that
 // step; one naming "no-such-package" cannot be planned at all, so the confirm
 // dialog shows what api.plan failing looks like.
@@ -66,6 +68,7 @@ const PARAMS = new URLSearchParams(window.location.search);
 const FAST = PARAMS.has("fast");
 const HOLD: string | null = PARAMS.get("hold");
 const LEFTOVERS = PARAMS.get("leftovers") === "1";
+const WAITING = PARAMS.get("waiting") === "1";
 const FAIL_ID = "fail-please";
 const UNPLANNABLE_ID = "no-such-package";
 
@@ -1028,10 +1031,13 @@ function stepsFor(op: Op): Step[] {
           return [];
       }
     case "clearleftovers":
+      return [{ source: "arp", title: "Moving leftovers to the holding area", command: cmd("brokey-clear", op.scan), needs_root: false, weight: 2 }];
     case "restore":
+      return [{ source: "arp", title: "Restoring from the holding area", command: cmd("brokey-restore", op.holding), needs_root: false, weight: 1 }];
     case "emptyholding":
+      return [{ source: "arp", title: "Emptying the holding area", command: cmd("brokey-empty", op.holding ?? "all"), needs_root: false, weight: 1 }];
     case "forceremove":
-      return [];
+      return [{ source: "arp", title: "Removing its folder and registry entry", command: cmd("brokey-force", op.package.id), needs_root: false, weight: 2 }];
   }
 }
 
@@ -1153,7 +1159,11 @@ export async function leftovers_get(scan: string): Promise<Findings | null> {
 /** The user saying the uninstaller has finished; the mock never waits for one. */
 export async function await_finished(plan: string): Promise<void> {
   if (plans.get(plan)?.state !== "running") throw new Error(`There is no running plan ${plan} to tell. It may have finished already.`);
+  finishers.get(plan)?.();
 }
+
+/** Resolves a plan's wait for its uninstaller, by plan id. */
+const finishers = new Map<string, () => void>();
 
 export async function holding_list(): Promise<HoldingListing> {
   await delay(60);
@@ -1349,6 +1359,21 @@ async function run(status: PlanStatus) {
       if (midway && ((HOLD === "" || HOLD === "step") && i === 0)) await hold();
       if (midway && HOLD === "unknown" && !known) await hold();
     }
+    if (WAITING && LEFTOVERS && i === 0 && p.ops.some((o) => o.op === "remove")) {
+      emit({ event: "waiting", plan: id, step: i, message: "Waiting for the uninstaller to finish. Close its window when it is done." });
+      await new Promise<void>((resolve) => {
+        const poll = window.setInterval(() => {
+          if (cancelled.has(id)) done();
+        }, 200);
+        const done = () => {
+          window.clearInterval(poll);
+          resolve();
+        };
+        finishers.set(id, done);
+      });
+      finishers.delete(id);
+      if (!alive()) return;
+    }
     if (failing) {
       await delay(200);
       if (!alive()) return;
@@ -1366,8 +1391,8 @@ async function run(status: PlanStatus) {
   running.delete(id);
   if (!alive()) return;
   for (const op of p.ops) applyOp(op);
-  const removed = p.ops.find((o) => o.op === "remove");
-  if (LEFTOVERS && removed && removed.op === "remove") {
+  const removed = p.ops.find((o) => o.op === "remove" || o.op === "forceremove");
+  if (LEFTOVERS && removed && (removed.op === "remove" || removed.op === "forceremove")) {
     const found = discordFindings(removed.package);
     findingsByScan.set(found.scan, found);
     emit({ event: "leftovers", plan: id, scan: found.scan, count: found.items.length });

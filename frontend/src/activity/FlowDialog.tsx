@@ -101,6 +101,7 @@ export function FlowDialog() {
   const open = useFlow((s) => s.open);
   const title = useFlow((s) => s.title);
   const ops = useFlow((s) => s.ops);
+  const intro = useFlow((s) => s.intro);
   const preview = useFlow((s) => s.preview);
   const error = useFlow((s) => s.error);
   const starting = useFlow((s) => s.starting);
@@ -113,16 +114,16 @@ export function FlowDialog() {
   const steps = preview?.plan.steps ?? [];
   const prompts = promptCount(steps);
   const elevated = elevatedCopy(windows);
-  const removes = removalSentence(ops, steps);
+  const removes = intro ?? removalSentence(ops, steps);
   const disabledReason = error ?? (preview ? null : "The steps are still being worked out.");
 
   const primary =
     disabledReason !== null ? (
-      <Button kind={verb === "Remove" ? "danger" : "primary"} disabled disabledReason={disabledReason}>
+      <Button kind={verb === "Remove" || verb === "Empty" ? "danger" : "primary"} disabled disabledReason={disabledReason}>
         {verb}
       </Button>
     ) : (
-      <Button kind={verb === "Remove" ? "danger" : "primary"} onClick={() => void confirm()}>
+      <Button kind={verb === "Remove" || verb === "Empty" ? "danger" : "primary"} onClick={() => void confirm()}>
         {verb}
       </Button>
     );
