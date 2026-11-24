@@ -17,6 +17,7 @@ Newest first. Each section is the release's notes, published verbatim.
 - Brokey recognises its own Windows installation, so its update notice says to run the new setup executable rather than that it cannot tell how Brokey was installed. A package manager's edition of an application now ranks ahead of its bare Add/Remove Programs entry.
 - An Add/Remove Programs entry whose `SystemComponent` or `WindowsInstaller` value is written as text rather than a number is read correctly, so a runtime is no longer listed as an application and an MSI is removed quietly.
 - A winget application's detail page shows Remove for an installed edition again; it showed Install once the manifest had loaded.
+- `brokey leftovers <source>:<id>` shows, for an application that is still installed, what Brokey would offer to clear after removing it and what it would keep because other applications use it, with how sure it is of each. It changes nothing. Windows only.
 
 ## 0.1.7
 

@@ -21,10 +21,11 @@ pub use selfupdate_adapter::SelfUpdate;
 
 use crate::settings::Settings;
 use crate::state::{AppState, PlanStatus};
+use brokey_core::cleanup::holding::Listing;
 use brokey_core::updates::UpdateList;
 use brokey_core::{
-    DriversReport, Event, FeaturesReport, Op, Package, PackageRef, Plan, Query, SearchResult,
-    SourceStatus, SystemInfo,
+    DriversReport, Event, FeaturesReport, Findings, Op, Package, PackageRef, Plan, Query,
+    SearchResult, SourceStatus, SystemInfo,
 };
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Invoke;
@@ -53,6 +54,9 @@ pub fn handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + 'static 
         run_plan,
         cancel_plan,
         active_plans,
+        leftovers_get,
+        await_finished,
+        holding_list,
         drivers,
         features,
         settings_get,
@@ -186,6 +190,29 @@ fn cancel_plan(state: tauri::State<'_, AppState>, id: String) -> Result<(), Stri
     state.cancel(&id)
 }
 
+/// The scan a removal made, for the page's list of leftovers. `null` when
+/// this session made no scan by that id, which the page says in a sentence.
+#[tauri::command]
+fn leftovers_get(
+    state: tauri::State<'_, AppState>,
+    scan: String,
+) -> Result<Option<Findings>, String> {
+    Ok(logic::leftovers_get(&state, &scan))
+}
+
+/// The user saying the uninstaller a plan is waiting on has finished.
+#[tauri::command]
+fn await_finished(state: tauri::State<'_, AppState>, plan: String) -> Result<(), String> {
+    state.set_finished(&plan)
+}
+
+/// What the holding area holds, user and machine, and any root that could
+/// not be read.
+#[tauri::command]
+async fn holding_list() -> Result<Listing, String> {
+    blocking(|| Ok(logic::holding_list())).await
+}
+
 #[tauri::command]
 fn active_plans(state: tauri::State<'_, AppState>) -> Result<Vec<PlanStatus>, String> {
     Ok(state.plans())
@@ -259,10 +286,12 @@ pub mod logic {
     use crate::state::PlanState;
     use crate::state::{AppState, SELF_UPDATE_MAX_AGE, UPDATES_MAX_AGE};
     use brokey_core::Plan;
+    use brokey_core::cleanup::holding::Listing;
     use brokey_core::transaction::runner::Runner;
     use brokey_core::updates::UpdateList;
     use brokey_core::{
-        DriversReport, Event, Op, Package, PackageRef, Query, SearchResult, SourceStatus, Store,
+        DriversReport, Event, Findings, Op, Package, PackageRef, Query, SearchResult, SourceStatus,
+        Store,
     };
     use std::sync::Arc;
 
@@ -529,10 +558,40 @@ pub mod logic {
         Ok(())
     }
 
+    /// The findings of a scan this session made, if there is one by that id.
+    pub fn leftovers_get(state: &AppState, scan: &str) -> Option<Findings> {
+        state
+            .scans()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(scan)
+            .map(|record| record.findings.clone())
+    }
+
+    /// Every holding entry, newest first.
+    pub fn holding_list() -> Listing {
+        use brokey_core::cleanup::holding;
+        holding::list(&holding::user_root(), &holding::machine_root())
+    }
+
+    /// Empty what the user's own holding area has held for more than thirty
+    /// days. Run at start-up on a thread of its own; the machine's entries
+    /// are left alone, because emptying them needs Administrator, and they
+    /// show as waiting until a plan that asks for it empties them.
+    pub fn empty_old_holding() {
+        use brokey_core::cleanup::holding;
+        let report = holding::empty(&holding::user_root(), None, Some(30));
+        for (id, why) in report.failed {
+            log::warn!("holding entry {id} was not emptied: {why}");
+        }
+    }
+
     /// A dry run for the confirm step.
     pub fn preview(state: &AppState, ops: Vec<Op>) -> Result<PlanPreview, String> {
         let store = state.store();
-        let plan = store.plan(&ops).map_err(|e| sentence(&e.message))?;
+        let plan = store
+            .plan_with(&ops, &state.scans())
+            .map_err(|e| sentence(&e.message))?;
         let notices = notices(&store, &ops);
         Ok(PlanPreview { plan, notices })
     }
@@ -551,7 +610,9 @@ pub mod logic {
         emit: impl Fn(&Event) + Send + Sync + 'static,
     ) -> Result<String, String> {
         let store = state.store();
-        let plan = store.plan(&ops).map_err(|e| sentence(&e.message))?;
+        let plan = store
+            .plan_with(&ops, &state.scans())
+            .map_err(|e| sentence(&e.message))?;
         if plan.steps.is_empty() {
             return Err(
                 "There is nothing to do. Everything asked for is already in place.".to_string(),
@@ -584,7 +645,10 @@ pub mod logic {
         // is on record by the time the id reaches the page. Every runner
         // shares one queue: two plans that both reach pacman would fight
         // over its lock, so the second waits for the first and says so.
-        let runner = Runner::new().with_queue(plan_queue());
+        let runner = Runner::new()
+            .with_queue(plan_queue())
+            .with_scans(state.scans())
+            .with_finished(state.finished_flag(&id));
         state.set_cancel_token(&id, runner.cancel_token());
         let emit: Arc<dyn Fn(&Event) + Send + Sync> = Arc::new(emit);
         let worker_state = state.clone();

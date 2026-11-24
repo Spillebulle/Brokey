@@ -732,6 +732,21 @@ fn everything_the_page_receives_matches_types_ts() {
             waiting: false,
         },
     );
+    c.value(
+        "HoldingListing",
+        &brokey_core::cleanup::holding::Listing {
+            entries: vec![HoldingEntry {
+                id: "h-2".into(),
+                name: "Discord".into(),
+                created: "2026-10-01T10:00:00+00:00".into(),
+                size: 4096,
+                items: 2,
+                scope_machine: false,
+                waiting: false,
+            }],
+            unreadable: vec![r"C:\ProgramData\Brokey\Holding".into()],
+        },
+    );
     c.value("Plan", &plan());
     for event in every_event() {
         c.value("Event", &event);

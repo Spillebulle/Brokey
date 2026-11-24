@@ -312,6 +312,12 @@ export interface HoldingEntry {
   waiting: boolean;
 }
 
+/** What holding_list returns: every entry, newest first, and the roots that could not be read. */
+export interface HoldingListing {
+  entries: HoldingEntry[];
+  unreadable: string[];
+}
+
 export interface SystemInfo {
   distro_id: string;
   distro_like: string[];

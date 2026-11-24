@@ -8,6 +8,7 @@
 
 use crate::commands::{SelfUpdate, selfupdate_adapter};
 use crate::settings::Settings;
+use brokey_core::cleanup::internal::Scans;
 use brokey_core::transaction::CancelToken;
 use brokey_core::updates::UpdateList;
 use brokey_core::{Event, Plan, Store};
@@ -70,6 +71,13 @@ struct Inner {
     plans: Mutex<Vec<PlanStatus>>,
     /// One flag per plan id, set by `cancel_plan`, read by the runner.
     cancels: Mutex<HashMap<String, CancelToken>>,
+    /// Every leftover scan this session has made. Planning a clear and the
+    /// runner that carries it out are handed this same map, which is how
+    /// the page never has to send a path.
+    scans: Scans,
+    /// One flag per plan id, set by `await_finished`: the user saying the
+    /// uninstaller a plan is waiting on has finished.
+    finished: Mutex<HashMap<String, Arc<AtomicBool>>>,
     updates: Mutex<Option<(Instant, UpdateList)>>,
     /// Whether the sources have been asked to refresh their indexes this
     /// session. The first update check does it; a transaction empties the
@@ -120,6 +128,8 @@ impl AppState {
                 settings_path,
                 plans: Mutex::new(Vec::new()),
                 cancels: Mutex::new(HashMap::new()),
+                scans: Scans::default(),
+                finished: Mutex::new(HashMap::new()),
                 updates: Mutex::new(None),
                 updates_refreshed: AtomicBool::new(false),
                 self_update: Mutex::new(None),
@@ -266,6 +276,34 @@ impl AppState {
             .unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), value));
     }
 
+    /// The scans this session has made, shared with every plan built and
+    /// every runner started.
+    pub fn scans(&self) -> Scans {
+        self.inner.scans.clone()
+    }
+
+    /// The flag a plan's runner watches for the user's "It has finished".
+    pub fn finished_flag(&self, plan: &str) -> Arc<AtomicBool> {
+        self.inner
+            .finished
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(plan.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// Tell a plan that is waiting on an uninstaller that it has finished.
+    pub fn set_finished(&self, plan: &str) -> Result<(), String> {
+        if self.plan_state(plan) != Some(PlanState::Running) {
+            return Err(format!(
+                "There is no running plan {plan} to tell. It may have finished already."
+            ));
+        }
+        self.finished_flag(plan).store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
     /// Record a plan as running and hand back its cancel flag. Finished
     /// plans beyond the last twenty are forgotten, oldest first; a running
     /// plan is never dropped from the list, however old.
@@ -291,6 +329,11 @@ impl AppState {
             let gone = plans.remove(oldest_finished);
             self.inner
                 .cancels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&gone.plan.id);
+            self.inner
+                .finished
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&gone.plan.id);
@@ -444,6 +487,44 @@ mod tests {
             ok,
             message: String::new(),
         }
+    }
+
+    #[test]
+    fn the_finished_flag_a_plan_watches_is_the_one_the_page_sets() {
+        let state = scratch_state("finished-flag");
+        state.add_plan(a_plan("p1"));
+        let watched = state.finished_flag("p1");
+        assert!(!watched.load(Ordering::SeqCst));
+        state.set_finished("p1").unwrap();
+        assert!(watched.load(Ordering::SeqCst));
+        // Another plan's flag is its own.
+        assert!(!state.finished_flag("p2").load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn telling_a_plan_that_is_not_running_it_has_finished_says_so() {
+        let state = scratch_state("finished-unknown");
+        let error = state.set_finished("ghost").unwrap_err();
+        assert!(error.contains("ghost") && error.ends_with('.'), "{error}");
+        state.add_plan(a_plan("p1"));
+        state.push_event("p1", finished("p1", true));
+        assert!(state.set_finished("p1").is_err());
+    }
+
+    #[test]
+    fn every_clone_of_the_state_shares_one_set_of_scans() {
+        let state = scratch_state("scans");
+        let clone = state.clone();
+        assert!(std::sync::Arc::ptr_eq(&state.scans(), &clone.scans()));
+    }
+
+    #[test]
+    fn a_plan_a_page_never_asked_for_has_no_leftovers() {
+        let state = scratch_state("leftovers-none");
+        assert_eq!(
+            crate::commands::logic::leftovers_get(&state, "scan-0"),
+            None
+        );
     }
 
     #[test]

@@ -50,6 +50,14 @@ pub fn run_showing(show: Option<brokey_core::PackageRef>) {
         // package databases are read.
         .manage(state::AppState::new())
         .invoke_handler(commands::handler())
+        .setup(|_| {
+            // Once the window is being built, off the thread that builds it.
+            #[cfg(windows)]
+            let _ = std::thread::Builder::new()
+                .name("holding".into())
+                .spawn(commands::logic::empty_old_holding);
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running Brokey");
 }
